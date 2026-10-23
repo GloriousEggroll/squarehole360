@@ -1020,7 +1020,7 @@ std::shared_ptr<void> gow3::renderer::AcquireNativeImmediateMarkerTargetGuard(
 }
 void Gow3ObserveMarkerPairEmitted(rex::ppc::Register& device,rex::ppc::Register& last_word,
                                   rex::ppc::Register& counter,rex::ppc::Register& position,
-                                  rex::ppc::Register& serial) noexcept {
+                                  rex::ppc::Register& serial) {
   if(!marker_submission_enabled.load(std::memory_order_acquire))return;
   try {
     auto memory_lock=rex::thread::global_critical_region::AcquireDirect();
@@ -1047,12 +1047,12 @@ void Gow3ObserveMarkerPairEmitted(rex::ppc::Register& device,rex::ppc::Register&
     }
   } catch(...) {marker_submission_enabled.store(false,std::memory_order_release);}
 }
-void Gow3ObserveMarkerCounterInitialized(rex::ppc::Register& device,rex::ppc::Register& counter) noexcept {ObserveMarkerRegistration(device.u32,counter.u32,false);}
-void Gow3ObserveMarkerCounterRingReady(rex::ppc::Register& device,rex::ppc::Register& counter) noexcept {ObserveMarkerRegistration(device.u32,counter.u32,true);}
-void Gow3ObserveMarkerCounterDestroyed(rex::ppc::Register& device) noexcept {InvalidateMarkerObservation(device.u32,false);}
-void Gow3ObserveMarkerCounterRingReset(rex::ppc::Register& device) noexcept {InvalidateMarkerObservation(device.u32,true);}
-void Gow3ObserveMarkerCounterRecovery(rex::ppc::Register& device) noexcept {InvalidateMarkerObservation(device.u32,false);}
-void Gow3ObserveMarkerCounterCpuDirect(rex::ppc::Register& device) noexcept {InvalidateMarkerObservation(device.u32,false);}
+void Gow3ObserveMarkerCounterInitialized(rex::ppc::Register& device,rex::ppc::Register& counter) {ObserveMarkerRegistration(device.u32,counter.u32,false);}
+void Gow3ObserveMarkerCounterRingReady(rex::ppc::Register& device,rex::ppc::Register& counter) {ObserveMarkerRegistration(device.u32,counter.u32,true);}
+void Gow3ObserveMarkerCounterDestroyed(rex::ppc::Register& device) {InvalidateMarkerObservation(device.u32,false);}
+void Gow3ObserveMarkerCounterRingReset(rex::ppc::Register& device) {InvalidateMarkerObservation(device.u32,true);}
+void Gow3ObserveMarkerCounterRecovery(rex::ppc::Register& device) {InvalidateMarkerObservation(device.u32,false);}
+void Gow3ObserveMarkerCounterCpuDirect(rex::ppc::Register& device) {InvalidateMarkerObservation(device.u32,false);}
 
 void Gow3SetGraphicsBoundarySink(gow3::renderer::GraphicsBoundarySink sink) {
   getdata_inline_selection.Reset();

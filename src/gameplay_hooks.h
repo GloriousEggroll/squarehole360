@@ -17,12 +17,14 @@ void Gow3CaptureIndexedChunk(rex::ppc::Register& device,rex::ppc::Register& topo
 void Gow3CaptureOwnedCommands(rex::ppc::Register& device,rex::ppc::Register& command_end);
 
 // Optional title-known counter metadata census; every hook preserves registers.
-void Gow3ObserveMarkerCounterInitialized(rex::ppc::Register& device, rex::ppc::Register& counter) noexcept;
-void Gow3ObserveMarkerCounterDestroyed(rex::ppc::Register& device) noexcept;
-void Gow3ObserveMarkerCounterRingReset(rex::ppc::Register& device) noexcept;
-void Gow3ObserveMarkerCounterRingReady(rex::ppc::Register& device, rex::ppc::Register& counter) noexcept;
-void Gow3ObserveMarkerCounterRecovery(rex::ppc::Register& device) noexcept;
-void Gow3ObserveMarkerCounterCpuDirect(rex::ppc::Register& device) noexcept;
+// Not noexcept: codegen emits its own extern declarations for midasm hooks,
+// without an exception specification. The observers catch internally.
+void Gow3ObserveMarkerCounterInitialized(rex::ppc::Register& device, rex::ppc::Register& counter);
+void Gow3ObserveMarkerCounterDestroyed(rex::ppc::Register& device);
+void Gow3ObserveMarkerCounterRingReset(rex::ppc::Register& device);
+void Gow3ObserveMarkerCounterRingReady(rex::ppc::Register& device, rex::ppc::Register& counter);
+void Gow3ObserveMarkerCounterRecovery(rex::ppc::Register& device);
+void Gow3ObserveMarkerCounterCpuDirect(rex::ppc::Register& device);
 void Gow3ObserveMarkerPairEmitted(rex::ppc::Register& device, rex::ppc::Register& last_word,
                                   rex::ppc::Register& counter, rex::ppc::Register& position,
-                                  rex::ppc::Register& serial) noexcept;
+                                  rex::ppc::Register& serial);
