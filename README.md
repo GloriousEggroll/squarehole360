@@ -60,7 +60,7 @@ The GPU's command processor, not its shaders, is now the limit.
 ```sh
 git clone https://github.com/GloriousEggroll/squarehole360.git
 cd squarehole360
-tools/setup-dependencies.sh            # pinned submodules (recursive) + local patches
+tools/setup-dependencies.sh            # pinned submodules (our forks), recursive
 
 python3 tools/import-assets.py import "/path/to/Gears of War 3.iso"
 tools/build-linux.sh                   # recompiles the game, then builds it
@@ -86,7 +86,7 @@ frame-rate cap, the renderer choice (native or Xenia) and troubleshooting.
 | `src/renderer/profiles/` | Per-game executable profiles (D3D entry points, device offsets) |
 | `config/` | Game settings and recompiler hook definitions |
 | `vendor/rexglue-sdk/` | Submodule: [our ReXGlue SDK fork](https://github.com/GloriousEggroll/rexglue-sdk/tree/squarehole360) (v0.8.0 + port changes) |
-| `vendor/plume`, `vendor/xenos-recomp`, `vendor/fidelityfx-sdk` | Submodules, patched from `patches/` |
+| `vendor/plume`, `vendor/xenos-recomp`, `vendor/fidelityfx-sdk` | Submodules: our forks, `squarehole360` branch |
 | `tools/assets/`, `tools/import-assets.py` | Disc import and verification |
 | `tools/porting/` | XEX image dump, XDK signature scanner, GetData generator |
 | `tools/rendering/` | Renderer tests, replay tools, the [benchmark harness](tools/rendering/bench/README.md) |

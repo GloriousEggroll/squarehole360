@@ -4,10 +4,13 @@
 	branch = squarehole360
 [submodule "vendor/plume"]
 	path = vendor/plume
-	url = https://github.com/renderbag/plume.git
+	url = https://github.com/GloriousEggroll/plume.git
+	branch = squarehole360
 [submodule "vendor/fidelityfx-sdk"]
 	path = vendor/fidelityfx-sdk
-	url = https://github.com/rexglue/FidelityFX-SDK.git
+	url = https://github.com/GloriousEggroll/FidelityFX-SDK.git
+	branch = squarehole360
 [submodule "vendor/xenos-recomp"]
 	path = vendor/xenos-recomp
-	url = https://github.com/hedge-dev/XenosRecomp.git
+	url = https://github.com/GloriousEggroll/XenosRecomp.git
+	branch = squarehole360

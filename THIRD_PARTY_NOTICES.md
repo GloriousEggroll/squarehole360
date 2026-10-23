@@ -7,13 +7,15 @@ It builds on the following projects, each under its own license.
 |---|---|---|
 | ReXGlue SDK, our fork `GloriousEggroll/rexglue-sdk` branch `squarehole360` (submodule), including code derived from the Xenia project | `vendor/rexglue-sdk` | BSD 3-Clause (`vendor/rexglue-sdk/LICENSE`) |
 | Xenia-derived texture untiling | `src/renderer/native/texture_data.cpp` | BSD 3-Clause (`src/renderer/native/texture_data.LICENSE`) |
-| Plume (submodule + `patches/plume.patch`) | `vendor/plume` | MIT |
-| XenosRecomp (submodule + `patches/xenos-recomp.patch`) | `vendor/xenos-recomp` | MIT |
-| AMD FidelityFX SDK (submodule + `patches/fidelityfx-sdk.patch`) | `vendor/fidelityfx-sdk` | MIT (see `LICENSE.txt` in the submodule) |
-| ReXGlue third-party libraries (FFmpeg, SDL3, glslang, SPIRV-Tools, Vulkan headers, VMA, volk, fmt, spdlog, xxHash, imgui, tracy, and others; nested submodules of the SDK; glslang and SPIRV-Tools patched from `patches/`) | `vendor/rexglue-sdk/thirdparty` | Their own licenses, in each submodule or directory |
+| Plume (fork `GloriousEggroll/plume`, branch `squarehole360`) | `vendor/plume` | MIT |
+| XenosRecomp (fork `GloriousEggroll/XenosRecomp`, branch `squarehole360`) | `vendor/xenos-recomp` | MIT |
+| AMD FidelityFX SDK (fork `GloriousEggroll/FidelityFX-SDK` of ReXGlue's fork, branch `squarehole360`) | `vendor/fidelityfx-sdk` | MIT (see `LICENSE.txt` in the submodule) |
+| ReXGlue third-party libraries (FFmpeg, SDL3, glslang, SPIRV-Tools, Vulkan headers, VMA, volk, fmt, spdlog, xxHash, imgui, tracy, and others; nested submodules of the SDK; glslang and SPIRV-Tools from our forks' `squarehole360` branches) | `vendor/rexglue-sdk/thirdparty` | Their own licenses, in each submodule or directory |
 
-Each submodule is pinned to an exact commit. `tools/setup-dependencies.sh`
-fetches them recursively and applies the patches in `patches/`.
+Each submodule is pinned to an exact commit. Where we change a dependency,
+the submodule points at our fork's `squarehole360` branch: the upstream
+commit we build against plus our changes. `tools/setup-dependencies.sh`
+fetches everything recursively.
 
 ## Not included
 
