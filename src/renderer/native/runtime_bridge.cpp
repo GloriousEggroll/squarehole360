@@ -467,6 +467,9 @@ REXCVAR_DEFINE_BOOL(gow3_native_async_gpu_submissions, true, "Renderer diagnosti
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_submission_worker, true, "Renderer diagnostics",
                    "Overlap checked Native driver submissions with draw preparation; restart required");
+REXCVAR_DEFINE_INT32(gow3_native_temporal_trace_frames, 0, "Renderer diagnostics",
+                    "Log the draws after the scene for this many frames without a detected HUD")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_temporal_inputs, true, "Renderer diagnostics",
                    "Jitter the scene and produce depth, motion vectors and a HUD mask when a "
                    "temporal upscaler (FSR 3) is selected; restart required")
@@ -2246,6 +2249,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       REXLOG_INFO("Native FSI shader variant: implicit coherent interlock v1");
     REXLOG_INFO("Native raster output: {}", config.native_fsi ? "ordered pixel interlock" : "fixed-function diagnostic path");
     config.temporal_inputs = REXCVAR_GET(gow3_native_temporal_inputs);
+    config.temporal_trace_frames = uint32_t(REXCVAR_GET(gow3_native_temporal_trace_frames));
     config.temporal = [this](std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> inputs) {
       output_temporal = std::move(inputs);
     };

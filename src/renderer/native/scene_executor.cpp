@@ -143,6 +143,7 @@
 #include "raw_float_texture_spv.h"
 #include "raw_float_texture.h"
 #include "temporal_inputs.h"
+#include <rex/logging.h>
 #include "temporal_inputs_spv.h"
 #include "restore_depth_spv.h"
 #include "restore_depth_stencil_spv.h"
@@ -888,6 +889,8 @@ struct SceneExecutor::State {
     // depthless full-frame draw after the last one (the tonemap).
     bool temporal_scene_drawn_=false;
     int64_t temporal_tonemap_base_=-1;
+    std::vector<std::string> temporal_trace_;
+    uint32_t temporal_trace_logged_=0;
     // False only when every surfaces_ image is clean; lets per-draw commit scans skip the map.
     bool surfaces_maybe_dirty_=false;
     // Working-image <-> packed EDRAM conversions (hardware render targets).
@@ -8654,18 +8657,36 @@ public:
     // frame-sized target snapshots the colour target before the HUD.
     // First draw of a frame opens temporal capture. The colour target is
     // copied before the HUD: at a UE3 Canvas draw into a frame-sized target, or
-    // at the second depthless full-frame draw into the same target after the
-    // last scene-view draw (the first being the tonemap), which also catches
-    // subtitles and titles drawn without Canvas.
+    // at the next full-frame draw into the target of the tonemap (the first
+    // depthless full-frame draw after the last scene-view draw), which also
+    // catches subtitles and titles drawn without Canvas.
     void TemporalBeforeDraw(const DrawInput& o) {
         if(!temporal_frame_open_) {
             temporal_frame_open_=true;temporal_velocity_base_=-1;
-            temporal_scene_drawn_=false;temporal_tonemap_base_=-1;
+            temporal_scene_drawn_=false;temporal_tonemap_base_=-1;temporal_trace_.clear();
             temporal_->BeginFrame(temporal_width_,temporal_height_);
         }
         if(!temporal_->active())return;
         const auto payload=ViewPayload(o.State());const auto state=payload.bytes();
         if(state.size()<0x2940)return;
+        if(config_.temporal_trace_frames>temporal_trace_logged_) {
+            const auto surfaces=o.Surfaces();
+            auto vs=[&](unsigned r,unsigned c){return std::bit_cast<float>(BE(state,0x780+r*16+c*4));};
+            std::string entry=std::string(o.Function())+" n="+std::to_string(o.Args()[2])+
+                " vs="+(o.Shader(false).IsNull()?std::string("-"):std::string(o.Shader(false).Digest()).substr(0,8))+
+                " ps="+(o.Shader(true).IsNull()?std::string("-"):std::string(o.Shader(true).Digest()).substr(0,8));
+            if(surfaces[0]) {
+                const auto l=SurfaceStorage(surfaces[0]);
+                entry+=" rt=e"+std::to_string(l.base)+"/f"+std::to_string(l.format)+"/"+std::to_string(surfaces[0].Width())+"x"+std::to_string(surfaces[0].Height());
+            }
+            entry+=surfaces[4]?" depth":" nodepth";
+            entry+=" mask="+std::to_string(BE(state,0x28dc)&0xffff)+" blend="+std::to_string(BE(state,0x2938));
+            entry+=" vz="+std::to_string(std::bit_cast<float>(BE(state,0x2918)))+"/"+std::to_string(std::bit_cast<float>(BE(state,0x291c)));
+            entry+=" c6="+std::to_string(vs(6,0))+","+std::to_string(vs(6,1))+" c7="+std::to_string(vs(7,0))+","+std::to_string(vs(7,1))+
+                " c0="+std::to_string(vs(0,0))+","+std::to_string(vs(1,1))+","+std::to_string(vs(3,0))+","+std::to_string(vs(3,1));
+            if(std::bit_cast<float>(BE(state,0x2918))==-1.f&&std::bit_cast<float>(BE(state,0x291c))==1.f)temporal_trace_.clear();
+            else if(temporal_trace_.size()<64)temporal_trace_.push_back(std::move(entry));
+        }
         if(std::bit_cast<float>(BE(state,0x2918))==-1.f&&std::bit_cast<float>(BE(state,0x291c))==1.f) {
             temporal_scene_drawn_=true;temporal_tonemap_base_=-1;
             return;
@@ -8675,10 +8696,13 @@ public:
         if(!surfaces[0]||o.Shader(true).IsNull()||!(BE(state,0x28dc)&15))return;
         if(surfaces[0].Width()!=temporal_width_||surfaces[0].Height()!=temporal_height_)return;
         bool hud=NativeTemporalIsHudDraw(state,temporal_width_,temporal_height_);
-        if(!hud&&temporal_scene_drawn_&&!surfaces[4]) {
+        if(!hud&&temporal_scene_drawn_) {
+            // The tonemap has no depth surface; what follows it into the same
+            // target may (cutscene subtitles keep one bound).
             const int64_t base=SurfaceStorage(surfaces[0]).base;
-            if(temporal_tonemap_base_<0)temporal_tonemap_base_=base;
-            else hud=temporal_tonemap_base_==base;
+            if(temporal_tonemap_base_<0) {
+                if(!surfaces[4])temporal_tonemap_base_=base;
+            } else hud=temporal_tonemap_base_==base;
         }
         if(!hud)return;
         auto& surface=Surface(surfaces[0]);
@@ -8699,7 +8723,16 @@ public:
                 late=image.texture.get();
         }
         temporal_frame_open_=false;temporal_velocity_base_=-1;
-        return temporal_->Finish(commands,world,late,hud,velocity);
+        auto inputs=temporal_->Finish(commands,world,late,hud,velocity);
+        if(config_.temporal_trace_frames>temporal_trace_logged_&&inputs&&!inputs->hudless_color.image&&
+           temporal_->statistics().frames%240==0) {
+            ++temporal_trace_logged_;
+            REXLOG_INFO("Temporal trace {}: {} draws after the last scene-view draw, no HUD found",
+                        temporal_trace_logged_,temporal_trace_.size());
+            for(const auto& entry:temporal_trace_)REXLOG_INFO("  {}",entry);
+        }
+        temporal_trace_.clear();
+        return inputs;
     }
     void EndFrame(const Json& o) {
         if(config_.diagnose_texture_eviction_reloads)try {SetTextureCensusFrame(o.at("frame").get<uint32_t>());}
