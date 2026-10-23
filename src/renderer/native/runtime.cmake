@@ -118,6 +118,10 @@ add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/raw_float_texture_spv.h"
     COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.1 --vn raw_float_texture_spv
         -o "${GOW3_NATIVE_SHADER_DIR}/raw_float_texture_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/raw_float_texture.comp"
     DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/raw_float_texture.comp" VERBATIM)
+add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/temporal_inputs_spv.h"
+    COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.1 --vn temporal_inputs_spv
+        -o "${GOW3_NATIVE_SHADER_DIR}/temporal_inputs_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/temporal_inputs.comp"
+    DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/temporal_inputs.comp" VERBATIM)
 add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/state_transfer_spv.h"
     COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.1 --vn state_transfer_spv
         -o "${GOW3_NATIVE_SHADER_DIR}/state_transfer_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/state_transfer.comp"
@@ -168,6 +172,7 @@ add_library(gow3-native-renderer STATIC
     "${CMAKE_CURRENT_LIST_DIR}/scene_executor.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/native_monotonic_depth_module.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/readonly_depth_conversion.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/temporal_inputs.cpp"
     "${GOW3_NATIVE_SHADER_DIR}/early_depth_lower_bound_comp_spv.h"
     "${CMAKE_CURRENT_LIST_DIR}/retained_opaque_writer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/retained_fp24_depth_writer.cpp"
@@ -200,6 +205,7 @@ add_library(gow3-native-renderer STATIC
     "${GOW3_NATIVE_SHADER_DIR}/atlas_depth_clear_spv.h"
     "${GOW3_NATIVE_SHADER_DIR}/atlas_depth_clear_host_spv.h"
     "${GOW3_NATIVE_SHADER_DIR}/raw_float_texture_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/temporal_inputs_spv.h"
     "${GOW3_NATIVE_SHADER_DIR}/state_transfer_spv.h")
 target_compile_features(gow3-native-renderer PUBLIC cxx_std_23)
 target_include_directories(gow3-native-renderer PUBLIC "${GOW3_NATIVE_ROOT}/src"

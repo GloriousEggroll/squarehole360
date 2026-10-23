@@ -142,6 +142,8 @@
 #include "memory_load_rg32_spv.h"
 #include "raw_float_texture_spv.h"
 #include "raw_float_texture.h"
+#include "temporal_inputs.h"
+#include "temporal_inputs_spv.h"
 #include "restore_depth_spv.h"
 #include "restore_depth_stencil_spv.h"
 #include <bitset>
@@ -875,6 +877,11 @@ struct SceneExecutor::State {
     std::unique_ptr<NativeFusedPackedAtlasResolve> fused_packed_atlas_resolve_;
     std::unique_ptr<NativeSynchronousGpuTimings> presentation_gpu_timings_;
     std::map<std::string,Image> surfaces_,resolved_;
+    // Temporal upscaling inputs; frame_open_ is set by the frame's first draw.
+    std::unique_ptr<NativeTemporalInputs> temporal_;
+    bool temporal_frame_open_=false;
+    uint32_t temporal_width_=0,temporal_height_=0;
+    std::vector<uint8_t> temporal_constants_;
     // False only when every surfaces_ image is clean; lets per-draw commit scans skip the map.
     bool surfaces_maybe_dirty_=false;
     // Working-image <-> packed EDRAM conversions (hardware render targets).
@@ -4466,6 +4473,10 @@ public:
             direct_atlas_depth_resolve_stats_.configured=resolve_memory_->EnableAtlasRgbaDepthStore(
                 memory_store_rgba_stencil_spv);
         if(config_.raw_gpu_float_cpu_textures)resolve_memory_->EnableRawFloatCpuTextures(raw_float_texture_spv);
+        if(config_.temporal_inputs) {
+            temporal_=std::make_unique<NativeTemporalInputs>(*device_,std::span<const uint32_t>(temporal_inputs_spv));
+            if(!temporal_->supported())temporal_.reset();
+        }
         if(config_.compact_resolve_channels)
             resolve_memory_->EnableCompactLoadFormats(memory_load_r32_spv,memory_load_rg32_spv,
                 config_.storage_image_extended_formats_enabled);
@@ -6296,6 +6307,8 @@ public:
         else if(!StoreCanonicalResolve(*dest.texture,layout,dst,address))
             resolve_memory_->Store(*dest.texture,layout,dst,address);
         dest.version=resolve_memory_->Version(layout,address);
+        if(temporal_&&slot==4&&conversion==PassTransfer::Conversion::DepthFloat24)
+            temporal_->ObserveDepthResolve(dest.texture.get());
         if(packed_color_source) {
             auto& stats=direct_packed_color_resolve_stats_;++stats.selected;++stats.packed_sources;
             stats.source_pixels+=kNativeDirectPackedColorResolvePixels;
@@ -6334,6 +6347,7 @@ public:
             }
         }
         if(config_.shader_ready&&!DrawShadersReady(o)) {++async_shader_skipped_draws_;return;}
+        if(temporal_)TemporalBeforeDraw(o);
         std::optional<RetainedPhaseTimingContext> timing_context;
         if(RetainedPhaseGpuTimingEnabled())timing_context.emplace(*this,o);
         struct EarlyDepthFailureGuard {
@@ -6978,10 +6992,20 @@ public:
         // OFF uploads at the original point. ON waits for both FINAL modules.
         const auto shared_constant_data=std::span(reinterpret_cast<const uint8_t*>(&fsi_shared),shared_bytes);
         if(config_.pinned_null_constant_uploads)(void)PackedDrawConstantSize(raw,shared_constant_data);
+        // Scene-view draws (reverse-Z viewport) take the jittered camera. The
+        // captured payload is shared and content-hashed: patch a copy.
+        std::span<const uint8_t> constant_source=raw;
+        if(temporal_&&temporal_->active()&&raw.size()>=0x2780&&
+           std::bit_cast<float>(BE(raw,0x2918))==-1.f&&std::bit_cast<float>(BE(raw,0x291c))==1.f&&
+           temporal_->ObserveSceneDraw(raw)) {
+            temporal_constants_.assign(raw.begin(),raw.end());
+            NativeTemporalApplyJitter(temporal_constants_,temporal_->jitter());
+            constant_source=temporal_constants_;
+        }
         RenderBuffer* constants=nullptr;ShaderPushConstants addresses{};
         bool pinned_null_constants_selected=false;
         const auto upload_constants=[&](bool pinned_null) {
-            constants=UploadConstants(draw_slot.constants,raw,shared_constant_data,
+            constants=UploadConstants(draw_slot.constants,constant_source,shared_constant_data,
                 config_.delta_constant_uploads?&constant_delta_writes:nullptr,pinned_null);
             addresses={constants->getDeviceAddress(),constants->getDeviceAddress()+4096,constants->getDeviceAddress()+8192};
         };
@@ -8611,6 +8635,37 @@ public:
             readonly_query_read_physical_=edram_memory_->physical_serial();
         } else readonly_query_read_owner_.reset();
     }
+    // First draw of a frame opens temporal capture; a UE3 Canvas draw into a
+    // frame-sized target snapshots the colour target before the HUD.
+    void TemporalBeforeDraw(const DrawInput& o) {
+        if(!temporal_frame_open_) {
+            temporal_frame_open_=true;
+            temporal_->BeginFrame(temporal_width_,temporal_height_);
+        }
+        if(!temporal_->WantsHudSnapshot())return;
+        const auto payload=ViewPayload(o.State());const auto state=payload.bytes();
+        if(state.size()<0x2780||!NativeTemporalIsHudDraw(state,temporal_width_,temporal_height_))return;
+        const auto surfaces=o.Surfaces();
+        if(!surfaces[0]||o.Shader(true).IsNull()||!(BE(state,0x28dc)&15))return;
+        if(surfaces[0].Width()!=temporal_width_||surfaces[0].Height()!=temporal_height_)return;
+        auto& surface=Surface(surfaces[0]);
+        RunTransferScope([&]{temporal_->RecordHudSnapshot(transfer_batch_->BeginStage(),surface);},0);
+    }
+    std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> TemporalFinish(RenderCommandList& commands) {
+        // Every input must still be owned by the executor's caches.
+        RenderTexture* world=nullptr;RenderTexture* late=nullptr;RenderTexture* hud=nullptr;
+        for(const auto& [key,image]:resolved_)
+            if(image.texture.get()==temporal_->world_depth())world=image.texture.get();
+        for(const auto& [key,image]:surfaces_) {
+            if(!image.texture)continue;
+            if(image.texture.get()==temporal_->hud_source())hud=image.texture.get();
+            const auto storage=SurfaceStorage(image.identity);
+            if(storage.depth&&storage.base==0&&storage.width==temporal_width_&&storage.height==temporal_height_)
+                late=image.texture.get();
+        }
+        temporal_frame_open_=false;
+        return temporal_->Finish(commands,world,late,hud);
+    }
     void EndFrame(const Json& o) {
         if(config_.diagnose_texture_eviction_reloads)try {SetTextureCensusFrame(o.at("frame").get<uint32_t>());}
         catch(...) {texture_census_frame_valid_=false;texture_eviction_reload_census_->MetadataFailure();}
@@ -8681,8 +8736,17 @@ public:
             const auto& desc=static_cast<const VulkanTexture&>(*presented).desc;
             NativeSynchronousGpuTimingScope presentation_scope(&presentation_timing,*commands_,
                 NativeSynchronousGpuPhase::PresentTransition,desc.width,desc.height);
+            std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> temporal_inputs;
+            if(temporal_&&temporal_frame_open_)temporal_inputs=TemporalFinish(*commands_);
             commands_->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(presented.get(),RenderTextureLayout::SHADER_READ));
-            Submit(&presentation_scope);config_.present(o.at("frame"),presented,fetch);
+            Submit(&presentation_scope);
+            if(config_.temporal)config_.temporal(std::move(temporal_inputs));
+            config_.present(o.at("frame"),presented,fetch);
+        }
+        if(temporal_) {
+            if(temporal_frame_open_)temporal_->Abort();
+            temporal_frame_open_=false;
+            temporal_width_=layout.width;temporal_height_=layout.height;
         }
         transfer_report_dirty_=true;
         diagnostic_counters_.completed_frames.push_back(o.at("frame"));

@@ -25,6 +25,10 @@
 #include <rex/graphics/pipeline/texture/util.h>
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/native_completion_markers.h>
+#include <rex/graphics/frame_limiter.h>
+#if GOW3_HAS_NATIVE_RENDERER
+#include "native/runtime_bridge.h"
+#endif
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -39,6 +43,11 @@
 #include <vector>
 
 REXCVAR_DECLARE(bool, gpu_command_summary);
+REXCVAR_DECLARE(double, framerate_limit);
+REXCVAR_DECLARE(bool, present_anti_lag);
+REXCVAR_DEFINE_BOOL(gow3_low_latency, false, "Display",
+                    "Keep the game at most one frame ahead of the renderer and apply the "
+                    "frame-rate limit before the next frame reads input");
 REXCVAR_DECLARE(bool, gpu_native_marker_operands);
 REXCVAR_DECLARE(bool, gpu_native_submit_completion_markers);
 REXCVAR_DECLARE(bool, gow3_native_fast_snapshot_fingerprints);
@@ -1685,6 +1694,30 @@ GOW3_OBSERVE_OWNED(sub_82AF34A8,profile::d3d::kResolve)
 GOW3_OBSERVE_OWNED(sub_82AF16D8,profile::d3d::kClearRect)
 #undef GOW3_OBSERVE_OWNED
 REX_EXTERN(__imp__sub_82AF6B10);
+namespace {
+// Runs on the game's render thread right after Present(frame) returns, which is
+// just before the game simulates the next frame and reads its input.
+void PaceAfterPresent(uint32_t frame) {
+  static rex::graphics::FrameLimiter limiter;
+  static bool limiter_on_guest = false;
+  const bool low_latency = REXCVAR_GET(gow3_low_latency);
+  if (capture_processor && low_latency != limiter_on_guest) {
+    capture_processor->SetGuestThreadFrameLimiter(low_latency);
+    limiter_on_guest = low_latency;
+  }
+  if (low_latency) {
+#if GOW3_HAS_NATIVE_RENDERER
+    // One frame in flight in the renderer while this one is simulated.
+    if (frame) Gow3WaitForNativeFrame(frame - 1, std::chrono::milliseconds(50));
+#endif
+    limiter.Wait(REXCVAR_GET(framerate_limit));
+  }
+  if (REXCVAR_GET(present_anti_lag)) {
+    if (capture_processor) capture_processor->UpdateAntiLag(false, uint64_t(frame) + 1);
+  }
+}
+}  // namespace
+
 REX_EXTERN(sub_82AF6B10) {
   if(!Observing()){__imp__sub_82AF6B10(ctx,base);return;}
   uint32_t marker;
@@ -1694,6 +1727,7 @@ REX_EXTERN(sub_82AF6B10) {
     ~Scope(){rex::graphics::ExchangeApiFrameMarker(previous);}
   } scope{rex::graphics::ExchangeApiFrameMarker(marker)};
   Observe(kPresent,ctx,base);__imp__sub_82AF6B10(ctx,base);
+  PaceAfterPresent(marker);
 }
 
 // Observe completed D3D draws: shader linking and dirty-state flushes have

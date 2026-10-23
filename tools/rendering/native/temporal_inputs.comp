@@ -1,0 +1,58 @@
+#version 450
+// Per-frame inputs for temporal upscaling, at the guest render resolution:
+//   depth   = max(world depth, depth of draws after the world depth was taken)
+//             (reverse-Z, so max is nearest; Gears re-renders the player after
+//             clearing the world depth)
+//   motion  = camera reprojection of that depth, in pixels, previous - current
+//   reactive= 1 where the HUD changed the frame after the scene was finished
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform texture2D world_depth;      // R32F device depth
+layout(binding = 1) readonly buffer LateDepth { float late_depth[]; };  // D32 copy
+layout(binding = 2) uniform texture2D hud_before;       // scene before the HUD
+layout(binding = 3) uniform texture2D hud_after;        // final frame
+layout(binding = 4, r32f) uniform writeonly image2D depth_out;
+layout(binding = 5, rg16f) uniform writeonly image2D motion_out;
+layout(binding = 6, r8) uniform writeonly image2D reactive_out;
+
+layout(push_constant) uniform Constants {
+  // Rows of the current-NDC -> previous-clip matrix (row-vector convention).
+  vec4 reprojection[4];
+  uvec2 size;
+  uint flags;  // 1: late depth valid, 2: HUD snapshot valid, 4: world depth valid
+  float min_depth;  // Depth of a point at infinity; sky clears below it.
+} pc;
+
+void main() {
+  const uvec2 pixel = gl_GlobalInvocationID.xy;
+  if (any(greaterThanEqual(pixel, pc.size))) return;
+  const ivec2 p = ivec2(pixel);
+
+  float depth = (pc.flags & 4u) != 0u ? texelFetch(world_depth, p, 0).r : 0.0;
+  if ((pc.flags & 1u) != 0u) depth = max(depth, late_depth[pixel.y * pc.size.x + pixel.x]);
+  imageStore(depth_out, p, vec4(depth));
+
+  // Sky and cleared pixels are at infinity: reproject as directions.
+  const float d = max(depth, pc.min_depth);
+  const vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.size);
+  const vec4 ndc = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0 - d, 1.0);
+  const vec4 clip = ndc.x * pc.reprojection[0] + ndc.y * pc.reprojection[1] +
+                    ndc.z * pc.reprojection[2] + ndc.w * pc.reprojection[3];
+  vec2 motion = vec2(0.0);
+  if (clip.w > 1e-6) {
+    const vec2 previous = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    motion = (previous - uv) * vec2(pc.size);
+  }
+  imageStore(motion_out, p, vec4(motion, 0.0, 0.0));
+
+  float reactive = 0.0;
+  if ((pc.flags & 2u) != 0u) {
+    const vec4 before = texelFetch(hud_before, p, 0);
+    const vec4 after = texelFetch(hud_after, p, 0);
+    const vec3 delta = abs(after.rgb - before.rgb);
+    reactive = max(delta.r, max(delta.g, delta.b)) > (1.0 / 255.0) ? 1.0 : 0.0;
+  }
+  imageStore(reactive_out, p, vec4(reactive));
+}

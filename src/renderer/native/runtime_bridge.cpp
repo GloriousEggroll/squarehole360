@@ -56,6 +56,7 @@
 #include <rex/graphics/vulkan/command_processor.h>
 #include <rex/ui/vulkan/device.h>
 #include <rex/ui/vulkan/instance.h>
+#include <rex/ui/vulkan/temporal_upscale.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -466,6 +467,10 @@ REXCVAR_DEFINE_BOOL(gow3_native_async_gpu_submissions, true, "Renderer diagnosti
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_submission_worker, true, "Renderer diagnostics",
                    "Overlap checked Native driver submissions with draw preparation; restart required");
+REXCVAR_DEFINE_BOOL(gow3_native_temporal_inputs, true, "Renderer diagnostics",
+                   "Jitter the scene and produce depth, motion vectors and a HUD mask when a "
+                   "temporal upscaler (FSR 3) is selected; restart required")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_four_inflight_batches, true, "Renderer diagnostics",
                    "Four native GPU fences with unchanged physical list, query and scratch bounds")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -640,6 +645,19 @@ LiveVulkanDeviceDesc DescribeDevice(HostDevice* device) {
   return desc;
 }
 
+// Completion of API frames for game-thread pacing (Gow3WaitForNativeFrame).
+std::mutex native_completion_mutex;
+std::condition_variable native_completion_changed;
+std::atomic<bool> native_completion_active{false};
+std::atomic<uint32_t> native_completed_frame{UINT32_MAX};
+void PublishNativeCompletion(uint32_t frame) {
+  {
+    std::lock_guard lock(native_completion_mutex);
+    native_completed_frame.store(frame, std::memory_order_release);
+  }
+  native_completion_changed.notify_all();
+}
+
 struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   Processor* processor;
   rex::memory::Memory* memory;
@@ -778,6 +796,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   CompletedFrameDisposer completed_frame_disposer;
   std::shared_ptr<plume::RenderTexture> output;
   std::array<uint32_t, 6> output_fetch{};
+  std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> output_temporal;
   uint32_t output_frame = UINT32_MAX;
   std::atomic<uint64_t> completed_frames{0};
   std::atomic<uint32_t> last_completed_api_frame{UINT32_MAX};
@@ -2226,6 +2245,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     if(config.implicit_fsi_barriers)
       REXLOG_INFO("Native FSI shader variant: implicit coherent interlock v1");
     REXLOG_INFO("Native raster output: {}", config.native_fsi ? "ordered pixel interlock" : "fixed-function diagnostic path");
+    config.temporal_inputs = REXCVAR_GET(gow3_native_temporal_inputs);
+    config.temporal = [this](std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> inputs) {
+      output_temporal = std::move(inputs);
+    };
     config.present = [this](uint32_t frame, std::shared_ptr<plume::RenderTexture> texture,
                             std::array<uint32_t, 6> fetch) {
       output_frame = frame;
@@ -4021,6 +4044,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         SaveQueryMismatch(comparison);
         RecordPresentationInterval(output_frame,active_frame->operations.size());
         last_completed_api_frame = output_frame;
+        PublishNativeCompletion(output_frame);
         const auto completed = ++completed_frames;
         const bool initial_complex_frame = active_frame->operations.size() > 4 && ++complex_frames <= 3;
         // A slow first campaign frame must not hide behind a 120-frame sampling
@@ -4111,6 +4135,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       source.height = texture.desc.height;
       source.format = rex::graphics::xenos::TextureFormat(output_fetch[1] & 63);
       source.keep_alive = std::make_shared<RetainedImage>(RetainedImage{shared_from_this(), output});
+      source.temporal = output_temporal;
       return source;
     } catch (const std::exception& error) {
       StopForFailure(frame,error.what());
@@ -4303,6 +4328,8 @@ void Gow3StartNativeRenderer(rex::graphics::GraphicsSystem* graphics, const std:
       Gow3SetPublishedQueryResults(state->published_results);
     }
     running = std::move(state);
+    native_completed_frame.store(UINT32_MAX, std::memory_order_relaxed);
+    native_completion_active.store(true, std::memory_order_release);
     REXLOG_INFO("Native renderer enabled from guest boot: exclusive native raster, queries and presentation; automatic fallback disabled");
   } catch (const std::exception& error) {
     if (state) {
@@ -4322,7 +4349,19 @@ void Gow3StartNativeRenderer(rex::graphics::GraphicsSystem* graphics, const std:
   }
 }
 
+bool Gow3WaitForNativeFrame(uint32_t frame, std::chrono::milliseconds timeout) {
+  if (!native_completion_active.load(std::memory_order_acquire)) return false;
+  std::unique_lock lock(native_completion_mutex);
+  return native_completion_changed.wait_for(lock, timeout, [&] {
+    if (!native_completion_active.load(std::memory_order_relaxed)) return true;
+    const uint32_t done = native_completed_frame.load(std::memory_order_relaxed);
+    return done != UINT32_MAX && int32_t(done - frame) >= 0;
+  });
+}
+
 void Gow3StopNativeRenderer() {
+  native_completion_active.store(false, std::memory_order_release);
+  native_completion_changed.notify_all();
   Gow3EnableNativeGetDataInline(false);
   auto state = std::exchange(running, {});
   if (!state) return;

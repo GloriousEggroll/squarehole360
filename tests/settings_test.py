@@ -333,9 +333,9 @@ class SettingsTest(unittest.TestCase):
         window = SettingsWindow(self.path, hdr_probe=False)
         picker = window.widgets['gow3_renderer']
         self.assertEqual([picker.itemText(i) for i in range(picker.count())], ['Native', 'Xenia'])
-        shared = ['gow3_renderer', 'present_hdr', 'fullscreen', 'mnk_mode', 'present_dither']
+        shared = ['gow3_renderer', 'present_hdr', 'fullscreen', 'mnk_mode', 'present_dither', 'present_effect']
         native = ['gow3_native_pipeline_prewarm', 'gow3_native_shader_prewarm_threads']
-        xenia = ['resolution_scale', 'present_effect', 'texture_cache_memory_limit_soft', 'async_shader_compilation']
+        xenia = ['resolution_scale', 'swap_post_effect', 'texture_cache_memory_limit_soft', 'async_shader_compilation']
         for mode in ('native', 'xenia', 'native'):
             picker.setCurrentIndex(picker.findData(mode))
             for key in shared:
@@ -351,13 +351,13 @@ class SettingsTest(unittest.TestCase):
 
     def test_inactive_invalid_values_survive_native_save_but_not_xenia_save(self):
         self.path.write_text('gow3_renderer = "native"\ntexture_cache_memory_limit_soft = 8192\n'
-                             'present_effect = ["invalid"]\nasync_shader_compilation = "bad"\n')
+                             'swap_post_effect = ["invalid"]\nasync_shader_compilation = "bad"\n')
         values = load(self.path)
         self.assertEqual(values['texture_cache_memory_limit_soft'], 8192)
         window = SettingsWindow(self.path, hdr_probe=False)
         self.assertEqual(window.widgets['texture_cache_memory_limit_soft'].maximum(), 4096)
         self.assertTrue(window.save_settings())
-        self.assertEqual(load(self.path)['present_effect'], ['invalid'])
+        self.assertEqual(load(self.path)['swap_post_effect'], ['invalid'])
         window.widgets['gow3_renderer'].setCurrentIndex(1)
         # The newly selected fields contain valid, editable defaults, never the
         # invalid hidden values retained in the file.
@@ -366,12 +366,12 @@ class SettingsTest(unittest.TestCase):
         selected = load(self.path)
         self.assertEqual(selected['gow3_renderer'], 'xenia')
         self.assertEqual(selected['texture_cache_memory_limit_soft'], 384)
-        self.assertEqual(selected['present_effect'], 'fsr')
+        self.assertEqual(selected['swap_post_effect'], 'none')
         window.close()
 
     def test_mode_relevant_validation(self):
         values = load(self.path)
-        values.update(texture_cache_memory_limit_soft=8192, present_effect=['invalid'])
+        values.update(texture_cache_memory_limit_soft=8192, swap_post_effect=['invalid'])
         validate(values)
         values['gow3_renderer'] = 'xenia'
         with self.assertRaises(ValueError): validate(values)

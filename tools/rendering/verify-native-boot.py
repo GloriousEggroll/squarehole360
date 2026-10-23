@@ -25,6 +25,8 @@ import tempfile
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
+# GOW3_BUILD_DIR selects another build tree (relative to the checkout).
+BUILD = ROOT / os.environ.get("GOW3_BUILD_DIR", "build")
 PERF = Path("/tmp/gow3-perf/usr/bin/perf")
 
 
@@ -363,7 +365,7 @@ def copy_mesa_cache(source, destination):
 
 def copy_pipeline_cache(source, destination):
     """Copy bounded observed recipes for this compiler into a private cache."""
-    embedded = (ROOT / "build/native_shader_embedded.h").read_text()
+    embedded = (BUILD / "native_shader_embedded.h").read_text()
     version = re.search(r'kNativeShaderVersion\[\] = "([0-9a-f]{64})"', embedded)[1]
     relative = Path("v1") / version
     directory = source / relative
@@ -399,7 +401,7 @@ def copy_pipeline_cache(source, destination):
 
 def copy_native_cache(source, destination):
     """Copy complete current-compiler entries, leaving the source untouched."""
-    embedded = (ROOT / "build/native_shader_embedded.h").read_text()
+    embedded = (BUILD / "native_shader_embedded.h").read_text()
     version = re.search(r'kNativeShaderVersion\[\] = "([0-9a-f]{64})"', embedded)[1]
     records = []
     skipped = 0
@@ -440,7 +442,7 @@ def copy_fsi_state_cache(source, destination, *, shaders=False, forward_cfg=Fals
                    else "native_fsi_state_specialization_shader_version.h")
     version_name = ("kNativeFsiStateForwardCfgShaderVersion" if forward_cfg
                     else "kNativeFsiStateSpecializationShaderVersion")
-    header = (ROOT / "build" / header_name).read_text()
+    header = (BUILD / header_name).read_text()
     version = re.search(re.escape(version_name) + r'\[\] = "([0-9a-f]{64})"', header)[1]
     extension = ".g3fsifwd" if forward_cfg else ".g3fsi"
     magic = b"G3FFWD01" if forward_cfg else b"G3FSIC01"
@@ -488,6 +490,11 @@ def copy_fsi_state_cache(source, destination, *, shaders=False, forward_cfg=Fals
 
 def child(folder, seconds):
     temporary = Path(folder)
+    mode_path = temporary / "output-mode"
+    if mode_path.exists():
+        # Before the game window exists, so it opens on the requested mode.
+        subprocess.run(["wlr-randr", "--output", "HEADLESS-1", "--custom-mode", mode_path.read_text().strip()],
+                       check=True, timeout=10)
     env = os.environ.copy()
     env.update(GDK_BACKEND="wayland", SDL_AUDIODRIVER="dummy", DISABLE_OBS_VKCAPTURE="1")
     # Scope allocator experiments to the game. The compositor, input jobs,
@@ -503,7 +510,7 @@ def child(folder, seconds):
     reference_only = (temporary / "reference-only").exists()
     # A cold reference cache must wait for compilation during comparisons;
     # otherwise its skipped draws produce misleading zero-sample queries.
-    command = [str(ROOT / "build/bin/gow3"), f"--game_data_root={ROOT / 'game'}",
+    command = [str(BUILD / "bin/gow3"), f"--game_data_root={ROOT / 'game'}",
                f"--user_data_root={temporary / 'user'}", f"--cache_path={temporary / 'cache'}",
                f"--gow3_config={temporary / 'gow3.toml'}", f"--log_file={temporary / 'game.log'}",
                "--log_max_file_size_mb=64",
@@ -748,6 +755,7 @@ def main():
                         help="Diagnostic only: preload this local allocator into the game process")
     parser.add_argument("--profile-cpu-at", type=float, default=80, help="Start profiling this many seconds after game launch")
     parser.add_argument("--anisotropic-override", type=int, choices=(-1,), default=-1, help="Use original per-texture game filtering; forced filtering is no longer supported")
+    parser.add_argument("--output-mode", help="Headless output mode WIDTHxHEIGHT (for example 3840x2160) for upscaling tests")
     parser.add_argument("--frame-limit", type=float, default=0, help="Diagnostic frame cap; unlimited by default (zero)")
     parser.add_argument("--gpu-command-summary", action="store_true", help="Log compatibility command submission counters for performance diagnosis")
     parser.add_argument("--present-gpu-timestamps", action=argparse.BooleanOptionalAction, default=None, help="Observe existing scaler/UI/HDR paint GPU duration without additional waits")
@@ -1052,8 +1060,8 @@ def main():
     args.output = args.output.resolve()
     args.output.mkdir(parents=True, exist_ok=True)
     build_identity = {}
-    for relative in ("build/bin/gow3", "build/bin/librexruntime.so"):
-        binary = ROOT / relative
+    for relative in ("bin/gow3", "bin/librexruntime.so"):
+        binary = BUILD / relative
         with binary.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         build_identity[relative] = {"sha256": digest, "bytes": binary.stat().st_size}
@@ -1354,6 +1362,10 @@ def main():
             (args.output / "user-data-seed-identity.json").write_text(json.dumps(seed_identity, indent=2) + "\n")
         if actions:
             (temporary / "input-sequence.json").write_text(json.dumps(actions))
+        if args.output_mode:
+            if not re.fullmatch(r"\d{3,5}x\d{3,5}", args.output_mode):
+                parser.error("--output-mode must be WIDTHxHEIGHT")
+            (temporary / "output-mode").write_text(args.output_mode)
         env = os.environ.copy()
         env.update(XDG_RUNTIME_DIR=folder, XDG_CONFIG_HOME=str(temporary / "config"),
                    XDG_CACHE_HOME=str(temporary / "desktop-cache"), XDG_DATA_HOME=str(temporary / "data"),

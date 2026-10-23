@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+namespace rex::ui::vulkan {struct TemporalUpscaleInputs;}
 namespace gow3::renderer {
 class LiveOperation;
 class NativeBatchCompletionError : public std::runtime_error {
@@ -78,6 +79,11 @@ struct SceneExecutorConfig {
     // GPU writes and the SHADER_READ transition have completed. The recipient
     // must retain the image until its presentation submission completes.
     std::function<void(uint32_t,std::shared_ptr<plume::RenderTexture>,std::array<uint32_t,6>)> present;
+    // Jitter scene draws and produce temporal upscaling inputs while the
+    // presenter asks for them (see temporal_inputs.h). `temporal` receives a
+    // frame's inputs, or nullptr, right before `present` for that frame.
+    bool temporal_inputs=false;
+    std::function<void(std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs>)> temporal;
     std::filesystem::path capture,compiled,output;
     std::filesystem::path texture_probe_directory;
     std::string texture_probe_hashes;

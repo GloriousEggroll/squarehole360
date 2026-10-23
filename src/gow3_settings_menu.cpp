@@ -108,7 +108,10 @@ class GameSettings final : public rex::ui::ImGuiDialog {
         (key == "present_hdr" || values_["present_hdr"] == "true");
     if (key == "framerate_limit") return values_["gow3_frame_limit_mode"] == "custom";
     if (key == "window_width" || key == "window_height") return values_["fullscreen"] == "false";
-    if (key.starts_with("present_fsr_")) return values_["present_effect"] == "fsr";
+    if (key == "present_frame_generation") return values_["present_effect"] == "fsr3";
+    if (key == "present_fsr_max_upsampling_passes") return values_["present_effect"] == "fsr";
+    if (key.starts_with("present_fsr_"))
+      return values_["present_effect"] == "fsr" || values_["present_effect"] == "fsr3";
     if (key == "present_cas_additional_sharpness") return values_["present_effect"] == "cas";
     if (key == "readback_memexport_fast") return values_["readback_memexport"] == "true";
     if (key == "vulkan_batch_occlusion_queries") return values_["occlusion_query_enable"] == "true" && values_["vulkan_async_occlusion_queries"] == "true";

@@ -28,8 +28,40 @@ if(NOT GOW3_EXPERIMENTAL_MAIN_CODE_MODEL STREQUAL "sdk")
 endif()
 
 # The SDK already bundles the CAS/FSR 1 shaders and host constants.
-# Enable spatial upscaling without the optional temporal SDK/runtime.
 add_compile_definitions(REX_HAS_FIDELITYFX_SDK=1)
+# FSR 3.1 temporal upscaling and frame generation come from our FidelityFX
+# fork (vendor/fidelityfx-sdk). Its shader compiler is a Windows program;
+# Linux builds run it through Wine.
+option(GOW3_ENABLE_FIDELITYFX "Build FSR 3.1 temporal upscaling and frame generation" ON)
+if(GOW3_ENABLE_FIDELITYFX AND CMAKE_HOST_UNIX)
+    find_program(GOW3_WINE wine)
+    if(NOT GOW3_WINE)
+        message(WARNING "Wine was not found: building without FSR 3.1 and frame generation "
+                        "(FidelityFX's shader compiler is a Windows program)")
+        set(GOW3_ENABLE_FIDELITYFX OFF CACHE BOOL "" FORCE)
+    endif()
+endif()
+if(GOW3_ENABLE_FIDELITYFX)
+    set(REXGLUE_ENABLE_FIDELITYFX ON CACHE BOOL "" FORCE)
+    set(FETCHCONTENT_SOURCE_DIR_FIDELITYFX "${CMAKE_CURRENT_SOURCE_DIR}/vendor/fidelityfx-sdk" CACHE PATH "" FORCE)
+    if(WIN32 AND NOT CMAKE_HOST_WIN32)
+        # Cross builds have no Vulkan SDK: FidelityFX links the loader through
+        # an import library made from cmake/windows/vulkan-1.def and the SDK's
+        # bundled headers. The real vulkan-1.dll ships with the GPU driver.
+        set(GOW3_VULKAN_IMPLIB "${CMAKE_BINARY_DIR}/vulkan-1.lib")
+        if(NOT EXISTS "${GOW3_VULKAN_IMPLIB}")
+            execute_process(COMMAND "${CMAKE_AR}" "/def:${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows/vulkan-1.def"
+                    /machine:x64 "/out:${GOW3_VULKAN_IMPLIB}"
+                RESULT_VARIABLE gow3_vulkan_implib_result)
+            if(NOT gow3_vulkan_implib_result EQUAL 0)
+                message(FATAL_ERROR "Cannot create the vulkan-1 import library")
+            endif()
+        endif()
+        set(Vulkan_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/rexglue-sdk/thirdparty/vulkan-headers/include"
+            CACHE PATH "" FORCE)
+        set(Vulkan_LIBRARY "${GOW3_VULKAN_IMPLIB}" CACHE FILEPATH "" FORCE)
+    endif()
+endif()
 
 include(generated/rexglue.cmake)
 
@@ -49,6 +81,9 @@ endfunction()
 if(GOW3_ENABLE_NATIVE_RENDERER)
     include(src/renderer/native/runtime.cmake)
     gow3_windows_compat(gow3-native-renderer)
+    add_executable(gow3-temporal-inputs-test tests/temporal_inputs_test.cpp)
+    target_include_directories(gow3-temporal-inputs-test PRIVATE src)
+    target_link_libraries(gow3-temporal-inputs-test PRIVATE gow3-native-renderer rex::runtime)
     add_executable(gow3-native-host-device-test tools/rendering/native/live_device_test.cpp)
     target_link_libraries(gow3-native-host-device-test PRIVATE gow3-native-renderer)
 endif()
@@ -104,6 +139,16 @@ if(TARGET rex_hdr_detection)
         add_executable(hdr_transfer_test tests/hdr_transfer_test.cpp ${CMAKE_BINARY_DIR}/hdr_transfer_test.h)
         target_include_directories(hdr_transfer_test PRIVATE ${CMAKE_BINARY_DIR})
         target_link_libraries(hdr_transfer_test PRIVATE Vulkan::Vulkan)
+    endif()
+endif()
+
+if(TARGET amd_fidelityfx_vk AND NOT WIN32)
+    find_package(Vulkan)
+    if(Vulkan_FOUND)
+        add_executable(gow3-fidelityfx-context-test tests/fidelityfx_context_test.cpp)
+        target_include_directories(gow3-fidelityfx-context-test PRIVATE
+            "${FETCHCONTENT_SOURCE_DIR_FIDELITYFX}/ffx-api/include")
+        target_link_libraries(gow3-fidelityfx-context-test PRIVATE amd_fidelityfx_vk Vulkan::Vulkan)
     endif()
 endif()
 

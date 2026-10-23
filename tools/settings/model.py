@@ -72,10 +72,13 @@ SETTINGS = [
  S('vsync', 'Vertical sync', False, 'Display', 'Synchronize presentation to the display. Off allows tearing if the desktop permits it.'),
  S('gow3_frame_limit_mode', 'Frame-rate limit', 'custom', 'Display', 'A maximum only. Slow frames are never forced to catch up.', (('custom','Custom maximum'),('display','Monitor refresh rate'),('unlimited','Unlimited'))),
  S('framerate_limit', 'Maximum FPS', 60.0, 'Display', 'Default: 60. Applies when Custom maximum is selected; enter at least 1 FPS.', minimum=0, maximum=1000),
- S('present_effect', 'Upscaling', 'fsr', 'Image', 'FSR 1 uses the final image and scales it to the window or fullscreen resolution.', (('fsr','AMD FSR 1 (spatial)'),('cas','AMD CAS sharpening'),('bilinear','Bilinear')), renderer='xenia'),
- S('present_fsr_sharpness_reduction', 'FSR softness', 0.2, 'Image', '0 is the sharpest; larger values reduce sharpening.', minimum=0, maximum=2, renderer='xenia'),
- S('present_fsr_max_upsampling_passes', 'FSR scaling passes', 2, 'Image', 'Two passes cover 720p to 4K. Each pass scales by at most 2×.', minimum=1, maximum=4, renderer='xenia'),
- S('present_cas_additional_sharpness', 'CAS sharpness', 0.0, 'Image', 'Additional sharpening when CAS is selected.', minimum=0, maximum=1, renderer='xenia'),
+ S('gow3_low_latency', 'Low latency', False, 'Display', 'Keeps the game at most one frame ahead of the renderer and applies the frame-rate limit before input is read. Lowers input lag; may cost a little throughput.'),
+ S('present_anti_lag', 'AMD Anti-Lag', False, 'Display', 'Uses the driver\u2019s anti-lag (VK_AMD_anti_lag) when available, such as AMD on Linux with Mesa. No effect elsewhere.'),
+ S('present_effect', 'Upscaling', 'fsr', 'Image', 'FSR 1 scales the final image to the window. FSR 3.1 (native renderer) also uses depth and motion from earlier frames for a sharper, steadier image; menus fall back to FSR 1.', (('fsr','AMD FSR 1 (spatial)'),('fsr3','AMD FSR 3.1 (temporal)'),('cas','AMD CAS sharpening'),('bilinear','Bilinear')), renderer='shared'),
+ S('present_frame_generation', 'Frame generation', False, 'Image', 'FSR 3.1 shows a generated frame between game frames: smoother motion at the cost of some input latency. Needs FSR 3.1 upscaling; best above 60 FPS.', renderer='shared'),
+ S('present_fsr_sharpness_reduction', 'FSR softness', 0.2, 'Image', '0 is the sharpest; larger values reduce sharpening.', minimum=0, maximum=2, renderer='shared'),
+ S('present_fsr_max_upsampling_passes', 'FSR scaling passes', 2, 'Image', 'Two passes cover 720p to 4K. Each pass scales by at most 2×. FSR 3.1 always uses one.', minimum=1, maximum=4, renderer='shared'),
+ S('present_cas_additional_sharpness', 'CAS sharpness', 0.0, 'Image', 'Additional sharpening when CAS is selected.', minimum=0, maximum=1, renderer='shared'),
  S('resolution_scale', 'Internal resolution', 1, 'Image', '1× renders at the game’s original resolution; 2× is about 1440p and 3× about 4K.', ((1,'1× (original resolution)'),(2,'2× (about 1440p)'),(3,'3× (about 4K)')), renderer='xenia'),
  S('swap_post_effect', 'Post-process anti-aliasing', 'none', 'Image', 'FXAA smooths edges before scaling; it may soften the picture.', (('none','None'),('fxaa','FXAA'),('fxaa_extreme','FXAA (strong)')), renderer='xenia'),
  S('present_dither', 'Output dithering', False, 'Image', 'Reduce visible color banding in gradients.'),
@@ -115,7 +118,8 @@ LIVE_SETTINGS = {
     'fullscreen', 'window_width', 'window_height', 'gow3_frame_limit_mode', 'framerate_limit',
     'present_effect', 'present_fsr_sharpness_reduction',
     'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
-    'present_dither', 'swap_post_effect',
+    'present_dither', 'swap_post_effect', 'present_frame_generation',
+    'gow3_low_latency', 'present_anti_lag',
 }
 
 def game_running():

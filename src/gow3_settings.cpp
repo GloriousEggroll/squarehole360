@@ -60,7 +60,7 @@ void Gow3LoadSettingsConfig(const std::filesystem::path& path) {
       const std::pair<const char*, const char*> required[] = {
           {"resolution_scale", "1"}, {"draw_resolution_scale_x", "1"},
           {"draw_resolution_scale_y", "1"}, {"render_target_path_vulkan", "fsi"},
-          {"occlusion_query_enable", "true"}, {"present_effect", "bilinear"},
+          {"occlusion_query_enable", "true"},
           {"swap_post_effect", "none"}, {"native_2x_msaa", "false"}};
       for (const auto& [key, value] : required) {
         if (rex::cvar::IsCommandLineOverride(key) && rex::cvar::GetFlagByName(key) != value)

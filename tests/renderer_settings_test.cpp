@@ -22,9 +22,11 @@ int main() {
     assert(std::string_view(setting.key) != "anisotropic_override");
   assert(!Gow3MenuLiveApplies(find("gow3_renderer"), n, x));
   assert(Gow3MenuLiveApplies(find("framerate_limit"), n, x));
-  assert(!Gow3MenuLiveApplies(find("present_effect"), n, x));
-  assert(!Gow3MenuLiveApplies(find("present_effect"), x, n));
-  assert(Gow3MenuLiveApplies(find("present_effect"), x, x));
+  assert(!Gow3MenuLiveApplies(find("swap_post_effect"), n, x));
+  assert(!Gow3MenuLiveApplies(find("swap_post_effect"), x, n));
+  assert(Gow3MenuLiveApplies(find("swap_post_effect"), x, x));
+  assert(Gow3MenuLiveApplies(find("present_effect"), n, n));
+  assert(Gow3MenuValidValue(find("present_effect"), "fsr3"));
   assert(!Gow3MenuKeyApplies("gow3_native_raster", x));
   assert(!Gow3MenuValidValue(find("texture_cache_memory_limit_soft"), "8192"));
   assert(Gow3MenuValidValue(find("texture_cache_memory_limit_soft"), "4096"));

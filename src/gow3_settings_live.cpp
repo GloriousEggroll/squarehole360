@@ -27,7 +27,8 @@ const std::set<std::string> live_keys = {
   "fullscreen", "window_width", "window_height", "gow3_frame_limit_mode", "framerate_limit",
   "present_effect", "present_fsr_sharpness_reduction",
   "present_fsr_max_upsampling_passes", "present_cas_additional_sharpness",
-  "present_dither", "swap_post_effect"
+  "present_dither", "swap_post_effect", "present_frame_generation",
+  "gow3_low_latency", "present_anti_lag"
 };
 struct Watch {
   rex::ui::Window* window;
@@ -138,7 +139,9 @@ void Apply(Watch& w, const Values& desired) {
           value == "fxaa_extreme" ? Effect::kFxaaExtreme : Effect::kNone);
     } else {
       using Effect = rex::ui::Presenter::GuestOutputPaintConfig::Effect;
-      if (key == "present_effect") paint.SetEffect(value == "fsr" ? Effect::kFsr : value == "cas" ? Effect::kCas : Effect::kBilinear);
+      if (key == "present_effect")
+        paint.SetEffect(value == "fsr" ? Effect::kFsr : value == "fsr3" ? Effect::kFsr3
+                        : value == "cas" ? Effect::kCas : Effect::kBilinear);
       if (key == "present_fsr_sharpness_reduction") paint.SetFsrSharpnessReduction(std::stof(value));
       if (key == "present_fsr_max_upsampling_passes") paint.SetFsrMaxUpsamplingPasses(std::stoi(value));
       if (key == "present_cas_additional_sharpness") paint.SetCasAdditionalSharpness(std::stof(value));
