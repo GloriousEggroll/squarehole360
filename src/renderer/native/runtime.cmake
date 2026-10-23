@@ -204,7 +204,7 @@ add_library(gow3-native-renderer STATIC
 target_compile_features(gow3-native-renderer PUBLIC cxx_std_23)
 target_include_directories(gow3-native-renderer PUBLIC "${GOW3_NATIVE_ROOT}/src"
     "${REXSDK_DIR}/thirdparty/inja/third_party/include")
-target_include_directories(gow3-native-renderer PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" "${GOW3_NATIVE_SHADER_DIR}"
+target_include_directories(gow3-native-renderer PRIVATE "${REXSDK_DIR}/thirdparty/renderdoc" "${CMAKE_CURRENT_BINARY_DIR}" "${GOW3_NATIVE_SHADER_DIR}"
     "${REXSDK_DIR}/thirdparty/picosha2" "${REXSDK_DIR}/thirdparty/glslang")
 # Counter census remains a replay-only target; production links only the
 # authenticated source/compiler helper and its uninstrumented module.

@@ -13,7 +13,7 @@
 #include <rex/logging.h>
 #include <imgui.h>
 #include <toml++/toml.hpp>
-#include <glib.h>
+#include "gow3_host.h"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -27,12 +27,11 @@ ImFont* title_font = nullptr;
 const ImVec4 red(0.72f, 0.035f, 0.055f, 1);
 std::string ReadFile(const std::filesystem::path& path) {
   if (!std::filesystem::exists(path)) return {};
-  std::ifstream f(path); if (!f) throw std::runtime_error("Unable to read settings.");
+  std::ifstream f(path, std::ios::binary); if (!f) throw std::runtime_error("Unable to read settings.");
   return {std::istreambuf_iterator<char>(f), {}};
 }
 std::string Hash(const std::string& text) {
-  auto* hash = g_compute_checksum_for_string(G_CHECKSUM_SHA256, text.data(), text.size());
-  std::string result(hash); g_free(hash); return result;
+  return Gow3Sha256Hex(text);
 }
 class GameSettings final : public rex::ui::ImGuiDialog {
  public:
@@ -99,13 +98,7 @@ class GameSettings final : public rex::ui::ImGuiDialog {
       if (!path_.parent_path().empty()) std::filesystem::create_directories(path_.parent_path());
       std::ostringstream formatted; formatted << table_;
       const auto text = formatted.str();
-      GError* error = nullptr;
-      if (!g_file_set_contents_full(path_.c_str(), text.data(), text.size(),
-          G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error)) {
-        const std::string message = error ? error->message : "Unable to save settings";
-        if (error) g_error_free(error);
-        throw std::runtime_error(message);
-      }
+      Gow3WriteFileAtomic(path_, text);
       original_ = text; original_exists_ = true; saved_ = values_; awaiting_ = Hash(text); error_.clear();
     } catch (const std::exception& e) { error_ = e.what(); }
   }
@@ -353,10 +346,10 @@ struct MenuInput {
   std::function<void()> toggle;
   std::function<bool()> is_open;
   MenuStickChordLatch shortcut;
-  guint timer = 0;
+  Gow3UiTimer timer;
 };
 std::unique_ptr<MenuInput> menu_input;
-gboolean PollMenu(void*) {
+void PollMenu() {
   auto& m = *menu_input;
   rex::input::X_INPUT_STATE state{};
   bool connected = m.input->GetHostState(0, &state) == 0;
@@ -392,7 +385,7 @@ gboolean PollMenu(void*) {
     {ImGuiKey_GamepadLStickUp, y}, {ImGuiKey_GamepadLStickDown, -y}};
   for (auto [key, value] : stick) io.AddKeyAnalogEvent(key, value > .25f,
       std::clamp((value - .25f) / .75f, 0.0f, 1.0f));
-  return G_SOURCE_CONTINUE;
+  return;
 }
 }
 std::unique_ptr<rex::ui::ImGuiDialog> Gow3CreateSettingsMenu(rex::ui::ImGuiDrawer* drawer,
@@ -400,8 +393,8 @@ std::unique_ptr<rex::ui::ImGuiDialog> Gow3CreateSettingsMenu(rex::ui::ImGuiDrawe
   return std::make_unique<GameSettings>(drawer,path,std::move(close));
 }
 void Gow3ConfigureMenuFonts(ImFontAtlas* atlas) {
-  const char* regular = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSansCondensed.ttf";
-  const char* bold = "/usr/share/fonts/dejavu-sans-fonts/DejaVuSansCondensed-Bold.ttf";
+  const auto regular = Gow3MenuFontPath(false).string();
+  const auto bold = Gow3MenuFontPath(true).string();
   // The default ImGui range omits curly apostrophes, dashes and other characters
   // in the shared settings schema. Keep the ranges alive until the atlas builds.
   static ImVector<ImWchar> ranges;
@@ -414,8 +407,8 @@ void Gow3ConfigureMenuFonts(ImFontAtlas* atlas) {
     for (const auto& choice : setting.choices) builder.AddText(choice.label);
   }
   builder.BuildRanges(&ranges);
-  if (std::filesystem::exists(regular)) ImGui::GetIO().FontDefault = atlas->AddFontFromFileTTF(regular,20,nullptr,ranges.Data);
-  if (std::filesystem::exists(bold)) title_font = atlas->AddFontFromFileTTF(bold,42);
+  if (!regular.empty()) ImGui::GetIO().FontDefault = atlas->AddFontFromFileTTF(regular.c_str(),20,nullptr,ranges.Data);
+  if (!bold.empty()) title_font = atlas->AddFontFromFileTTF(bold.c_str(),42);
 }
 void Gow3StartMenuInput(rex::Runtime* runtime, rex::ui::Window* window,
     rex::ui::ImGuiDrawer* drawer, std::function<void()> toggle, std::function<bool()> is_open) {
@@ -423,6 +416,6 @@ void Gow3StartMenuInput(rex::Runtime* runtime, rex::ui::Window* window,
   auto* input = dynamic_cast<rex::input::InputSystem*>(runtime->input_system());
   if (!input) return;
   menu_input = std::make_unique<MenuInput>(input,window,drawer,std::move(toggle),std::move(is_open));
-  menu_input->timer = g_timeout_add(16,PollMenu,nullptr);
+  menu_input->timer.Start(window->app_context(), std::chrono::milliseconds(16), PollMenu);
 }
-void Gow3StopMenuInput() { if(menu_input) {g_source_remove(menu_input->timer);menu_input.reset();} }
+void Gow3StopMenuInput() { if(menu_input) {menu_input->timer.Stop();menu_input.reset();} }

@@ -46,7 +46,8 @@ The GPU's command processor, not its shaders, is now the limit.
 
 ## Requirements
 
-- Linux (a Windows port is planned; the code avoids Linux-only APIs)
+- Linux to build. The game runs on Linux, and on Windows from a cross-compiled
+  build (see below)
 - Clang, CMake 3.25+, Ninja, Python 3.11+
 - A modern Vulkan GPU and driver (developed and tested on an AMD RX 9070 XT
   with RADV)
@@ -71,6 +72,25 @@ tools/run-linux.sh
 generates the XDK-derived inputs (`tools/porting/generate_getdata.py`) and
 builds `build/bin/gow3`. Saves and caches live in `user/`, and logs in
 `logs/`.
+
+### Windows build
+
+Code generation runs on Linux, so the Windows build is cross-compiled there
+with clang-cl and an [xwin](https://github.com/Jake-Shadle/xwin) sysroot
+(creating it accepts Microsoft's license):
+
+```sh
+xwin --accept-license --arch x86_64 splat --use-winsysroot-style \
+  --preserve-ms-arch-notation --output ~/.xwin
+tools/build-linux.sh                   # generates the recompiled sources
+tools/build-windows.sh                 # builds build-windows/bin/gow3.exe
+```
+
+Copy the checkout (or at least `build-windows/`, `config/`, `game/` and
+`tools/`) to Windows and run `tools\run-windows.bat`; the settings editor is
+`tools\settings-windows.bat`. It needs the Microsoft Visual C++ 2015-2022
+runtime and a Vulkan 1.3 driver. The same build also runs under Wine and
+Proton.
 
 Settings live in `config/gow3.toml`. You can change them in the standalone
 editor (`tools/settings.sh`) or in game (L3+R3, or F4). The

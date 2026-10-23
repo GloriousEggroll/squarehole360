@@ -123,7 +123,7 @@ public:
     }
     const Json& Identity(std::string_view path,std::string_view kind)const {
         Require(FileName(path),"Invalid Native capture path");const auto& id=manifest.at("files").at(std::string(path));
-        Require(id.at("kind")==kind,"Native capture file kind mismatch");return id;
+        Require(id.at("kind")==std::string(kind),"Native capture file kind mismatch");return id;
     }
     std::vector<uint8_t> Load(std::string_view path,std::string_view kind) {
         const auto& id=Identity(path,kind);const auto data=Read(directory_/path,Unsigned(id.at("bytes")),kind=="metadata"?kMetadataBytes:kind=="resource"?kCpuBytes:kHistoryBytes);

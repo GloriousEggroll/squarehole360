@@ -33,8 +33,22 @@ add_compile_definitions(REX_HAS_FIDELITYFX_SDK=1)
 
 include(generated/rexglue.cmake)
 
+# Applies to this directory's targets only, not the SDK added above: keep
+# <windows.h> from defining min/max over std::min/std::max.
+if(WIN32)
+    add_compile_definitions(NOMINMAX)
+endif()
+# Renderer and game sources name variables `interface`; see windows_compat.h.
+function(gow3_windows_compat target)
+    if(WIN32 AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        target_compile_options(${target} PRIVATE
+            "$<$<COMPILE_LANGUAGE:CXX>:/FI${CMAKE_CURRENT_SOURCE_DIR}/src/platform/windows_compat.h>")
+    endif()
+endfunction()
+
 if(GOW3_ENABLE_NATIVE_RENDERER)
     include(src/renderer/native/runtime.cmake)
+    gow3_windows_compat(gow3-native-renderer)
     add_executable(gow3-native-host-device-test tools/rendering/native/live_device_test.cpp)
     target_link_libraries(gow3-native-host-device-test PRIVATE gow3-native-renderer)
 endif()
@@ -127,10 +141,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
             ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
         target_include_directories(unit_tests PRIVATE src ${CMAKE_BINARY_DIR})
     endif()
-    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp
+    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp src/gow3_host.cpp
         src/renderer/gears_bridge.cpp src/renderer/native/getdata_inline_leaf.cpp
         ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
     rexglue_setup_target(gow3)
+    gow3_windows_compat(gow3)
     include(cmake/host_allocator.cmake)
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gow3_getdata_inline_source_auth.json
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/rendering/getdata_inline_source_guard.py
@@ -150,14 +165,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     if(TARGET gow3-vrr-probe)
         add_dependencies(gow3 gow3-vrr-probe)
     endif()
-    find_package(PkgConfig REQUIRED)
-    pkg_check_modules(GOW3_GLIB REQUIRED IMPORTED_TARGET glib-2.0)
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        find_package(PkgConfig REQUIRED)
         pkg_check_modules(GOW3_GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
         add_executable(gow3-window-size-test tests/window_size_test.cpp)
         target_link_libraries(gow3-window-size-test PRIVATE rex::runtime PkgConfig::GOW3_GTK)
     endif()
-    target_link_libraries(gow3 PRIVATE tomlplusplus PkgConfig::GOW3_GLIB)
+    target_link_libraries(gow3 PRIVATE tomlplusplus xxHash::xxhash)
+    if(TARGET rex_adaptive_sync)
+        # Static, not exported from rexruntime.dll on Windows; gow3_vrr.cpp calls it.
+        target_link_libraries(gow3 PRIVATE rex_adaptive_sync)
+    endif()
+    if(WIN32)
+        # The SDK's Windows entry point is wWinMain.
+        set_target_properties(gow3 PROPERTIES WIN32_EXECUTABLE ON)
+    endif()
     if(GOW3_ENABLE_NATIVE_RENDERER)
         target_link_libraries(gow3 PRIVATE gow3-native-renderer)
         target_compile_definitions(gow3 PRIVATE GOW3_HAS_NATIVE_RENDERER=1)
@@ -169,8 +191,13 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     if(GOW3_ENABLE_GUEST_TRACE)
         target_compile_definitions(gow3 PRIVATE REXGLUE_ENABLE_GUEST_FUNCTION_TRACE=1)
     endif()
-    target_compile_options(gow3 PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
-    target_compile_options(gow3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/src/gameplay_hooks.h")
+    if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+        target_compile_options(gow3 PRIVATE -fno-strict-aliasing /fp:strict /Zc:char8_t-
+            "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/gameplay_hooks.h")
+    else()
+        target_compile_options(gow3 PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
+        target_compile_options(gow3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/src/gameplay_hooks.h")
+    endif()
     if(NOT GOW3_EXPERIMENTAL_MAIN_CODE_MODEL STREQUAL "sdk")
         # This is deliberately after rexglue_setup_target's original model.
         # Keep the SDK's --no-relax link setting to isolate this experiment.
@@ -180,6 +207,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     # rex_app.cpp is compiled by the host and needs SDK implementation headers.
     target_include_directories(gow3 PRIVATE ${CMAKE_BINARY_DIR}
         "${REXSDK_DIR}/thirdparty/imgui"
+        "${REXSDK_DIR}/thirdparty/renderdoc"
         "${CMAKE_BINARY_DIR}/rexglue-sdk/include")
 endif()
 

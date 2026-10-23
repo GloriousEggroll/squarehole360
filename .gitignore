@@ -41,3 +41,6 @@ scratch/
 generated/native-getdata/
 config/*.bak*
 config/*.runtime.*.toml
+
+# Proprietary upscaler SDKs fetched by tools/fetch-vendor-sdks.sh.
+/vendor-sdks/

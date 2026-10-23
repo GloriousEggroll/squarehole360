@@ -214,7 +214,7 @@ struct DrawResourceInput {
         return typed->hash.View();
     }
     bool Matches(std::string_view expected)const {
-        return json?*json==expected:typed&&typed->hash.View()==expected;
+        return json?*json==std::string(expected):typed&&typed->hash.View()==expected;
     }
     std::optional<std::string_view> OptionalDigest() const {
         return IsNull()?std::nullopt:std::optional<std::string_view>(Digest());
@@ -279,7 +279,7 @@ struct DrawTextureInput {
     uint32_t Slot()const{return typed?typed->slot:json->at("slot").get<uint32_t>();}
     std::array<uint32_t,6> Fetch()const{return typed?typed->fetch:json->at("fetch").get<std::array<uint32_t,6>>();}
     bool SourceIs(std::string_view expected)const {
-        if(json)return json->at("source")==expected;
+        if(json)return json->at("source")==std::string(expected);
         switch(typed->source) {
             case TextureSource::CpuSnapshot:return expected=="cpu_snapshot";
             case TextureSource::GpuPreviousOrAlias:return expected=="gpu_alias_or_previous_frame";

@@ -12,8 +12,7 @@
 #include <rex/ui/presenter.h>
 #include <rex/ui/window.h>
 #include <toml++/toml.hpp>
-#include <glib.h>
-#include <unistd.h>
+#include "gow3_host.h"
 #include <fstream>
 #include <sstream>
 #include <future>
@@ -39,11 +38,12 @@ struct Watch {
   std::string digest, error, start_time;
   std::set<std::string> ignored;
   std::future<void> pending;
-  guint timer = 0;
+  Gow3UiTimer timer;
 };
 std::unique_ptr<Watch> watch;
 std::string Read(const std::filesystem::path& path) {
-  std::ifstream stream(path);
+  // Binary: the digest must match the settings editor's hash of the raw bytes.
+  std::ifstream stream(path, std::ios::binary);
   if (!stream) throw std::runtime_error("Cannot read settings file");
   return {std::istreambuf_iterator<char>(stream), {}};
 }
@@ -51,8 +51,7 @@ std::string ReadConfig(const std::filesystem::path& path) {
   return std::filesystem::exists(path) ? Read(path) : std::string{};
 }
 std::string Digest(const std::string& text) {
-  auto* hash = g_compute_checksum_for_string(G_CHECKSUM_SHA256, text.data(), text.size());
-  std::string result(hash); g_free(hash); return result;
+  return Gow3Sha256Hex(text);
 }
 Values Parse(const std::string& text) {
   Values values;
@@ -88,17 +87,10 @@ Values Parse(const std::string& text) {
     throw std::runtime_error("Custom frame limit must be at least 1 FPS");
   return values;
 }
-std::string ProcessStartTime() {
-  std::string stat = Read("/proc/self/stat");
-  std::istringstream fields(stat.substr(stat.rfind(')') + 2));
-  std::string value;
-  for (int i = 3; i <= 22; ++i) fields >> value;
-  return value;
-}
 void Publish(Watch& w) {
   const auto vrr = Gow3GetVrrStatus();
   toml::table state;
-  state.insert("pid", int64_t(getpid()));
+  state.insert("pid", Gow3ProcessId());
   state.insert("start_time", w.start_time);
   state.insert("digest", w.digest);
   state.insert("error", w.error);
@@ -193,17 +185,17 @@ void Apply(Watch& w, const Values& desired) {
     done->set_value();
   });
 }
-gboolean Tick(void*) {
+void Tick() {
   auto& w = *watch;
   try {
     if (Gow3PollVrr()) Publish(w);
     if (w.pending.valid()) {
-      if (w.pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return G_SOURCE_CONTINUE;
+      if (w.pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
       w.pending.get(); Publish(w);
     }
     auto text = ReadConfig(w.config);
     auto digest = Digest(text);
-    if (digest == w.digest) return G_SOURCE_CONTINUE;
+    if (digest == w.digest) return;
     w.error.clear(); w.ignored.clear(); w.digest = digest;
     // Parse completely before applying any settings. Failed edits keep the game running.
     w.requested = Parse(text);
@@ -214,7 +206,7 @@ gboolean Tick(void*) {
         w.requested[key] = rex::cvar::GetFlagInfo(key)->default_value;
     Apply(w, w.requested);
   } catch (const std::exception& e) { w.error = e.what(); Publish(w); }
-  return G_SOURCE_CONTINUE;
+  return;
 }
 }
 void Gow3StartSettingsWatch(rex::ui::Window* window, rex::Runtime* runtime) {
@@ -224,7 +216,7 @@ void Gow3StartSettingsWatch(rex::ui::Window* window, rex::Runtime* runtime) {
   auto w = std::make_unique<Watch>();
   w->window = window; w->graphics = graphics;
   w->config = std::filesystem::absolute(Gow3SettingsPath());
-  w->status = w->config.string() + ".runtime." + std::to_string(getpid()) + ".toml";
+  w->status = w->config.string() + ".runtime." + std::to_string(Gow3ProcessId()) + ".toml";
   try {
     auto text = ReadConfig(w->config); w->digest = Digest(text);
     w->renderer = ParseGow3RendererMode(rex::cvar::GetFlagByName("gow3_renderer"));
@@ -234,18 +226,18 @@ void Gow3StartSettingsWatch(rex::ui::Window* window, rex::Runtime* runtime) {
         [](std::string_view key) { return rex::cvar::IsCommandLineOverride(key); });
     for (const auto& [key, value] : w->requested)
       if (rex::cvar::IsCommandLineOverride(key)) w->ignored.insert(key);
-    w->start_time = ProcessStartTime();
+    w->start_time = Gow3ProcessStartTime();
   } catch (const std::exception& e) { REXLOG_WARN("Live settings unavailable: {}", e.what()); return; }
   watch = std::move(w);
   Gow3StartVrr(window);
   Publish(*watch);
-  watch->timer = g_timeout_add(500, Tick, nullptr);
+  watch->timer.Start(window->app_context(), std::chrono::milliseconds(500), Tick);
   REXLOG_INFO("Watching settings for live changes: {}", watch->config.string());
 }
 void Gow3StopSettingsWatch() {
   Gow3StopVrr();
   if (!watch) return;
-  g_source_remove(watch->timer);
+  watch->timer.Stop();
   std::error_code ec; std::filesystem::remove(watch->status, ec);
   watch.reset();
 }

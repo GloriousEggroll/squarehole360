@@ -56,7 +56,7 @@ inline bool NativeFsiPassJoin(const NativeFsiPassPlanes& pass,const NativeFsiPas
     merged=pass;
     for(uint32_t i=0;i<draw.count;++i) {
         const auto& plane=draw.planes[i];
-        auto* same=std::find_if(merged.planes.begin(),merged.planes.begin()+merged.count,
+        auto same=std::find_if(merged.planes.begin(),merged.planes.begin()+merged.count,
             [&](const NativeFsiPlane& p){return p.SameMapping(plane);});
         if(same!=merged.planes.begin()+merged.count)same->tiles=std::max(same->tiles,plane.tiles);
         else if(merged.count==merged.planes.size())return false;

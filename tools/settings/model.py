@@ -10,6 +10,43 @@ import tomllib
 import tomli_w
 
 ROOT = Path(__file__).resolve().parents[2]
+WINDOWS = os.name == 'nt'
+BIN_DIR = 'build-windows/bin' if WINDOWS else 'build/bin'
+
+
+def binary(name, root=None):
+    return (root or ROOT) / BIN_DIR / (name + '.exe' if WINDOWS else name)
+
+
+def process_identity(pid):
+    """Return (executable, start_time) for a live pid; start_time matches the
+    game's Gow3ProcessStartTime(). Raises OSError when the pid is not running."""
+    if not WINDOWS:
+        proc = Path('/proc') / str(pid)
+        stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+        return (proc / 'exe').resolve(strict=True), stat[19]
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        raise OSError(ctypes.get_last_error(), 'process not running')
+    try:
+        size = wintypes.DWORD(32768)
+        name = ctypes.create_unicode_buffer(size.value)
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, name, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), 'cannot query process image')
+        times = [wintypes.FILETIME() for _ in range(4)]
+        if not kernel32.GetProcessTimes(handle, *[ctypes.byref(t) for t in times]):
+            raise OSError(ctypes.get_last_error(), 'cannot query process times')
+        exit_code = wintypes.DWORD()
+        if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)) and exit_code.value != 259:
+            raise OSError('process exited')  # 259 = STILL_ACTIVE
+        created = (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        return Path(name.value).resolve(), str(created)
+    finally:
+        kernel32.CloseHandle(handle)
 CONFIG = ROOT / 'config/gow3.toml'
 
 @dataclass(frozen=True)
@@ -81,23 +118,56 @@ LIVE_SETTINGS = {
     'present_dither', 'swap_post_effect',
 }
 
+def game_running():
+    executable = binary('gow3').resolve()
+    if WINDOWS:
+        import ctypes
+        from ctypes import wintypes
+        pids = (wintypes.DWORD * 8192)()
+        used = wintypes.DWORD()
+        if not ctypes.WinDLL('psapi').EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(used)):
+            return False
+        candidates = pids[:used.value // ctypes.sizeof(wintypes.DWORD)]
+    else:
+        candidates = [int(p.name) for p in Path('/proc').iterdir() if p.name.isdigit()]
+    for pid in candidates:
+        try:
+            if process_identity(pid)[0] == executable:
+                return True
+        except (OSError, IndexError):
+            continue
+    return False
+
+
 def running_states(path):
     states = []
-    executable = (ROOT / 'build/bin/gow3').resolve()
+    executable = binary('gow3').resolve()
     for status in path.parent.glob(path.name + '.runtime.*.toml'):
         try:
             data = tomllib.loads(status.read_text())
-            pid = int(data['pid'])
-            proc = Path('/proc') / str(pid)
-            stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
-            if ((proc / 'exe').resolve(strict=True) != executable or
-                    stat[19] != data['start_time'] or
+            running, start_time = process_identity(int(data['pid']))
+            if (running != executable or
+                    start_time != data['start_time'] or
                     Path(data['config']).resolve() != path.resolve()):
                 continue
             states.append(data)
         except (OSError, ValueError, KeyError, IndexError, TypeError):
             continue
     return states
+
+
+def replace_with_retry(source, target, attempts=20):
+    # Windows refuses to replace a file another process has open; the game
+    # only holds gow3.toml for the moment it takes to read it.
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt + 1 == attempts:
+                raise
+            import time
+            time.sleep(0.05)
 
 
 def fingerprint(path):
@@ -182,9 +252,10 @@ def save(values, path=CONFIG, expected=None):
     if path.exists(): shutil.copy2(path, path.with_suffix('.toml.bak'))
     fd, name = tempfile.mkstemp(prefix=path.name+'.', dir=path.parent)
     try:
-        with os.fdopen(fd, 'w') as f:
+        # LF on every platform: the game hashes the raw bytes it reads.
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
             f.write(body);f.flush();os.fsync(f.fileno())
-        os.replace(name,path)
+        replace_with_retry(name, path)
     finally:
         if os.path.exists(name): os.unlink(name)
     return fingerprint(path)

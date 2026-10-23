@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
     QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
-from model import CONFIG, ROOT, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, widget_value
+from model import CONFIG, ROOT, WINDOWS, binary, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, widget_value
 
 
 class SettingsWindow(QMainWindow):
@@ -132,7 +132,7 @@ class SettingsWindow(QMainWindow):
     def check_vrr(self):
         if self.vrr_process is not None:
             return
-        probe = ROOT / 'build/bin/gow3-vrr-probe'
+        probe = binary('gow3-vrr-probe', ROOT)
         if not probe.is_file():
             self.update_vrr_status({'available': False, 'reason': 'VRR detection tool is unavailable.'})
             return
@@ -215,7 +215,7 @@ class SettingsWindow(QMainWindow):
     def check_hdr(self):
         if self.hdr_process is not None:
             return
-        probe = ROOT / 'build/bin/gow3-hdr-probe'
+        probe = binary('gow3-hdr-probe', ROOT)
         if not probe.is_file():
             self.update_hdr_status({'available': False, 'reason': 'HDR detection tool is unavailable.'})
             return
@@ -426,23 +426,23 @@ class SettingsWindow(QMainWindow):
         if not self.save_settings():
             return
         try:
-            executable = (ROOT / 'build/bin/gow3').resolve()
-            for process in Path('/proc').iterdir():
-                if not process.name.isdigit():
-                    continue
-                try:
-                    running = (process / 'exe').resolve(strict=True)
-                except OSError:
-                    continue
-                if running == executable:
-                    QMessageBox.information(self, 'Game already running',
-                        'Settings saved. Close the running game before launching again.')
-                    return
+            if game_running():
+                QMessageBox.information(self, 'Game already running',
+                    'Settings saved. Close the running game before launching again.')
+                return
             (ROOT / 'logs').mkdir(exist_ok=True)
             with (ROOT / 'logs/settings-launch.log').open('a') as output:
-                subprocess.Popen([str(ROOT / 'tools/run-linux.sh'),
-                                  '--gow3_config=' + str(self.path.resolve())],
-                                 cwd=ROOT, stdout=output, stderr=output, start_new_session=True)
+                if WINDOWS:
+                    subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                                      '-File', str(ROOT / 'tools/run-windows.ps1'),
+                                      '--gow3_config=' + str(self.path.resolve())],
+                                     cwd=ROOT, stdout=output, stderr=output,
+                                     creationflags=subprocess.DETACHED_PROCESS |
+                                     subprocess.CREATE_NEW_PROCESS_GROUP)
+                else:
+                    subprocess.Popen([str(ROOT / 'tools/run-linux.sh'),
+                                      '--gow3_config=' + str(self.path.resolve())],
+                                     cwd=ROOT, stdout=output, stderr=output, start_new_session=True)
             self.status.setText('Game launched • You can close settings')
         except OSError as error:
             QMessageBox.warning(self, 'Unable to launch', str(error))
