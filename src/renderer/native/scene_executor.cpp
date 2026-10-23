@@ -884,6 +884,10 @@ struct SceneExecutor::State {
     std::vector<uint8_t> temporal_constants_;
     // EDRAM base of this frame's velocity-pass target until it is resolved.
     int64_t temporal_velocity_base_=-1;
+    // HUD detection: a scene-view draw happened, and the target of the first
+    // depthless full-frame draw after the last one (the tonemap).
+    bool temporal_scene_drawn_=false;
+    int64_t temporal_tonemap_base_=-1;
     // False only when every surfaces_ image is clean; lets per-draw commit scans skip the map.
     bool surfaces_maybe_dirty_=false;
     // Working-image <-> packed EDRAM conversions (hardware render targets).
@@ -8648,17 +8652,35 @@ public:
     }
     // First draw of a frame opens temporal capture; a UE3 Canvas draw into a
     // frame-sized target snapshots the colour target before the HUD.
+    // First draw of a frame opens temporal capture. The colour target is
+    // copied before the HUD: at a UE3 Canvas draw into a frame-sized target, or
+    // at the second depthless full-frame draw into the same target after the
+    // last scene-view draw (the first being the tonemap), which also catches
+    // subtitles and titles drawn without Canvas.
     void TemporalBeforeDraw(const DrawInput& o) {
         if(!temporal_frame_open_) {
             temporal_frame_open_=true;temporal_velocity_base_=-1;
+            temporal_scene_drawn_=false;temporal_tonemap_base_=-1;
             temporal_->BeginFrame(temporal_width_,temporal_height_);
         }
-        if(!temporal_->WantsHudSnapshot())return;
+        if(!temporal_->active())return;
         const auto payload=ViewPayload(o.State());const auto state=payload.bytes();
-        if(state.size()<0x2780||!NativeTemporalIsHudDraw(state,temporal_width_,temporal_height_))return;
+        if(state.size()<0x2940)return;
+        if(std::bit_cast<float>(BE(state,0x2918))==-1.f&&std::bit_cast<float>(BE(state,0x291c))==1.f) {
+            temporal_scene_drawn_=true;temporal_tonemap_base_=-1;
+            return;
+        }
+        if(!temporal_->WantsHudSnapshot())return;
         const auto surfaces=o.Surfaces();
         if(!surfaces[0]||o.Shader(true).IsNull()||!(BE(state,0x28dc)&15))return;
         if(surfaces[0].Width()!=temporal_width_||surfaces[0].Height()!=temporal_height_)return;
+        bool hud=NativeTemporalIsHudDraw(state,temporal_width_,temporal_height_);
+        if(!hud&&temporal_scene_drawn_&&!surfaces[4]) {
+            const int64_t base=SurfaceStorage(surfaces[0]).base;
+            if(temporal_tonemap_base_<0)temporal_tonemap_base_=base;
+            else hud=temporal_tonemap_base_==base;
+        }
+        if(!hud)return;
         auto& surface=Surface(surfaces[0]);
         RunTransferScope([&]{temporal_->RecordHudSnapshot(transfer_batch_->BeginStage(),surface);},0);
     }

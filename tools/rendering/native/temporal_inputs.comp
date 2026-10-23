@@ -57,11 +57,18 @@ void main() {
     const vec4 texel = texelFetch(object_velocity, p / 2, 0);
     const vec2 encoded = (pc.flags & 16u) != 0u ? texel.bg : texel.rg;
     if (any(greaterThan(encoded, vec2(0.5 / 255.0)))) {
-      // Current (jittered) minus previous, in pixels; motion vectors are
-      // previous minus the unjittered current position.
       // 8-bit UNORM stores the game's 0.5 (no motion) as 128/255.
-      const vec2 velocity = (encoded - 128.0 / 255.0) * 2.0 * pc.velocity_scale;
-      motion = pc.jitter - velocity;
+      const vec2 steps = round(encoded * 255.0) - 128.0;
+      if (all(equal(steps, vec2(0.0)))) {
+        // Written as still (the camera-attached player uses a zero scale): no
+        // jitter is folded into it, so the motion vector is zero too.
+        motion = vec2(0.0);
+      } else {
+        // Current (jittered) minus previous, in pixels; motion vectors are
+        // previous minus the unjittered current position.
+        const vec2 velocity = steps * (2.0 / 255.0) * pc.velocity_scale;
+        motion = pc.jitter - velocity;
+      }
     }
   }
   imageStore(motion_out, p, vec4(motion, 0.0, 0.0));
