@@ -1,0 +1,44 @@
+#pragma once
+#include <array>
+#include <cmath>
+#include <cstdint>
+
+namespace gow3::renderer {
+inline constexpr uint64_t kNativePackedSecondaryStencilClearPixels=640ull*360ull;
+struct NativePackedSecondaryStencilClearInput {
+    bool native_fsi=false,query_active=false,source_depth=false;
+    uint32_t width=0,height=0,pitch=0,base=0,format=0,surface_info=0,flags=0;
+    float depth=0.f;
+    std::array<int32_t,4> rectangle{};
+};
+// Only logical640x360 pixels belong to this layout. Its final8 tile rows
+// remain outside the normalized footprint, including alias/padding bytes.
+// The depth scalar remains validated even though flags32 changes only stencil,
+// exactly as the original PassTransfer::Clear. No MSAA or extra attachments.
+inline bool NativePackedSecondaryStencilClearLayoutAllowed(
+    const NativePackedSecondaryStencilClearInput& input) noexcept {
+    const auto& r=input.rectangle;
+    return input.native_fsi&&input.source_depth&&input.width==640&&input.height==360&&
+        input.pitch==640&&input.base==1440&&input.format==1&&
+        (input.surface_info&16383u)==input.pitch&&!(input.surface_info&0x30000u)&&
+        input.flags==0x20&&std::isfinite(input.depth)&&input.depth>=0.f&&input.depth<=1.f&&
+        r[0]>=0&&r[1]>=0&&r[2]>r[0]&&r[3]>r[1]&&r[2]<=640&&r[3]<=360;
+}
+inline bool NativePackedSecondaryStencilClearAllowed(
+    const NativePackedSecondaryStencilClearInput& input) noexcept {
+    return !input.query_active&&NativePackedSecondaryStencilClearLayoutAllowed(input);
+}
+enum class NativePackedSecondaryStencilClearSource {Refuse,CurrentHost,Packed};
+// Observe this AFTER the original overlapping dirty alias commits. A current
+// host token can follow RestoreDepth without StoreSurface, so neither it nor
+// dirty/pending host state authorizes replacing the original image path.
+inline NativePackedSecondaryStencilClearSource NativePackedSecondaryStencilClearChooseSource(
+    bool fully_defined,bool host_present,bool host_dirty,uint64_t host_version,
+    uint64_t packed_version,bool pending_receipt,bool other_dirty) noexcept {
+    if(!fully_defined||!packed_version||host_dirty||pending_receipt||other_dirty)
+        return NativePackedSecondaryStencilClearSource::Refuse;
+    if(host_present&&host_version==packed_version)
+        return NativePackedSecondaryStencilClearSource::CurrentHost;
+    return NativePackedSecondaryStencilClearSource::Packed;
+}
+} // namespace gow3::renderer

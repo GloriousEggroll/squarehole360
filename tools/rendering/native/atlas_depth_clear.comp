@@ -1,0 +1,37 @@
+#version 450
+#if HOST_SOURCE
+#extension GL_EXT_samplerless_texture_functions : require
+#endif
+// Exact existing UNORM24 decode -> D32 clear -> roundEven store composition.
+// Tiled depth addressing follows resolve_memory.comp (texture_data.LICENSE).
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std430) buffer Memory {uint words[];} memory;
+layout(set=0,binding=1,rgba32f) writeonly uniform image2D receipt_image;
+#if HOST_SOURCE
+layout(set=0,binding=2) uniform texture2D host_depth;
+layout(set=0,binding=3) uniform utexture2D host_stencil;
+#endif
+layout(push_constant) uniform Parameters {
+    uint width,height,pitch,base,left,top,right,bottom;
+} pc;
+void main() {
+    uvec2 p=gl_GlobalInvocationID.xy;
+    if(p.x>=pc.width||p.y>=pc.height)return;
+    uint column=p.x%80u;column=column<40u?column+40u:column-40u;
+    uint tile=(p.y/16u)*((pc.pitch+79u)/80u)+p.x/80u;
+    uint at=(pc.base+tile)*1280u+(p.y%16u)*80u+column;
+#if HOST_SOURCE
+    uint stencil=texelFetch(host_stencil,ivec2(p),0).x&255u;
+    precise float depth=texelFetch(host_depth,ivec2(p),0).x;
+#else
+    uint previous=memory.words[at],d=previous>>8u,stencil=previous&255u;
+    precise float depth=float(d+(d>>23u))/16777216.0;
+#endif
+    if(p.x>=pc.left&&p.x<pc.right&&p.y>=pc.top&&p.y<pc.bottom)depth=1.0;
+    // Preserve the pre-encode host state too: re-decoding rounded packed depth
+    // can differ. The Scene later restores this receipt only at its exact token.
+    imageStore(receipt_image,ivec2(p),vec4(depth,depth,depth,float(stencil)/255.0));
+    precise float scaled=clamp(depth,0.0,1.0)*16777215.0;
+    uint packed=uint(roundEven(scaled));
+    memory.words[at]=(packed<<8u)|stencil;
+}

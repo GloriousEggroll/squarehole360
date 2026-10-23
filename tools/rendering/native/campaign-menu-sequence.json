@@ -1,0 +1,23 @@
+[
+  {"at": 48, "screenshot": "menu-00-before.png"},
+  {"at": 52, "key": "Escape", "hold_ms": 1000},
+  {"at": 60, "screenshot": "menu-01-start.png"},
+  {"at": 64, "key": "space", "hold_ms": 3000},
+  {"at": 73, "screenshot": "menu-02-accept.png"},
+  {"at": 77, "key": "space", "hold_ms": 3000},
+  {"at": 86, "screenshot": "menu-03-accept.png"},
+  {"at": 90, "key": "space", "hold_ms": 3000},
+  {"at": 100, "screenshot": "menu-04-accept.png"},
+  {"at": 110, "key": "Return", "hold_ms": 3000},
+  {"at": 120, "screenshot": "menu-05-return.png"},
+  {"at": 125, "key": "Right", "hold_ms": 2000},
+  {"at": 135, "screenshot": "menu-06-right.png"},
+  {"at": 140, "key": "space", "hold_ms": 3000},
+  {"at": 150, "screenshot": "menu-07-accept.png"},
+  {"at": 160, "key": "space", "hold_ms": 3000},
+  {"at": 170, "screenshot": "menu-08-accept.png"},
+  {"at": 190, "key": "space", "hold_ms": 3000},
+  {"at": 200, "screenshot": "menu-09-accept.png"},
+  {"at": 230, "screenshot": "menu-10-loading.png"},
+  {"at": 290, "screenshot": "menu-11-final.png"}
+]

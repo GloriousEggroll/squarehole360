@@ -1,0 +1,50 @@
+[
+  {
+    "at": 2,
+    "key": "Escape",
+    "hold_ms": 3000
+  },
+  {
+    "at": 10,
+    "screenshot": "campaign-00-title.png"
+  },
+  {
+    "at": 18,
+    "key": "space",
+    "hold_ms": 2500
+  },
+  {
+    "at": 28,
+    "screenshot": "campaign-01-menu.png"
+  },
+  {
+    "at": 35,
+    "key": "space",
+    "hold_ms": 2500
+  },
+  {
+    "at": 45,
+    "screenshot": "campaign-02-standard.png"
+  },
+  {
+    "at": 55,
+    "key": "space",
+    "hold_ms": 2500
+  },
+  {
+    "at": 68,
+    "screenshot": "campaign-03-continue.png"
+  },
+  {
+    "at": 92,
+    "screenshot": "campaign-04-loading.png"
+  },
+  {
+    "at": 140,
+    "screenshot": "campaign-05-scene.png"
+  },
+  {
+    "at": 210,
+    "screenshot": "campaign-06-scene.png"
+  }
+]

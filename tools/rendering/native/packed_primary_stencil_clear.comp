@@ -1,0 +1,19 @@
+#version 450
+// Exact reviewed primary FP24 surface. The original RestoreDepth pipeline
+// clamps decoded depth to [0,1] before the canonical StoreSurface re-encodes.
+// Hardware all24-bit roundtrip validation is a separate admission prerequisite.
+layout(local_size_x=8,local_size_y=8,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Packed {uint words[];} memory;
+layout(push_constant) uniform Parameters {uvec4 rectangle;uint stencil;uint reserved0;uint reserved1;uint reserved2;} pc;
+void main() {
+    uvec2 p=gl_GlobalInvocationID.xy;
+    if(p.x>=1280u||p.y>=720u)return;
+    uint tile=(p.y/16u)*16u+p.x/80u;
+    uint column=(p.x%80u+40u)%80u;
+    uint index=tile*1280u+(p.y%16u)*80u+column;
+    uint previous=memory.words[index];
+    uint depth=min(previous>>8,0xf00000u);
+    bool inside=p.x>=pc.rectangle.x&&p.y>=pc.rectangle.y&&
+                p.x<pc.rectangle.z&&p.y<pc.rectangle.w;
+    memory.words[index]=(depth<<8)|(inside?(pc.stencil&255u):(previous&255u));
+}

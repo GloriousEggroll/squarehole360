@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0) uniform texture2D input_image;
+layout(set=0,binding=1) uniform sampler input_sampler;
+layout(set=0,binding=2,std430) writeonly buffer Output {vec4 values[];} output_values;
+layout(push_constant) uniform Parameters {uint destination;} pc;
+void main() {
+    uint i=gl_GlobalInvocationID.x;
+    if(i>=128)return;
+    // Include out-of-range border/wrap coordinates, odd image dimensions,
+    // fractional bilinear weights and LOD values clamped to the sole base mip.
+    vec2 uv=(vec2(i&7u,(i>>3)&7u)-vec2(1.25))/5.5;
+    output_values.values[pc.destination+i]=textureLod(
+        sampler2D(input_image,input_sampler),uv,i<64?-1.0:1.0);
+}

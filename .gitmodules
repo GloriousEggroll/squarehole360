@@ -1,0 +1,13 @@
+[submodule "vendor/rexglue-sdk"]
+	path = vendor/rexglue-sdk
+	url = https://github.com/GloriousEggroll/rexglue-sdk.git
+	branch = squarehole360
+[submodule "vendor/plume"]
+	path = vendor/plume
+	url = https://github.com/renderbag/plume.git
+[submodule "vendor/fidelityfx-sdk"]
+	path = vendor/fidelityfx-sdk
+	url = https://github.com/rexglue/FidelityFX-SDK.git
+[submodule "vendor/xenos-recomp"]
+	path = vendor/xenos-recomp
+	url = https://github.com/hedge-dev/XenosRecomp.git

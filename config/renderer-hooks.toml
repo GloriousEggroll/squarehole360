@@ -1,0 +1,268 @@
+# Finalized UP geometry: immediately before inline EndVertices commits.
+# Instruction words are checked against the loaded supported XEX before capture.
+
+[[midasm_hook]]
+address = 0x82360500
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r9"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x823F6478
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82491464
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82766058
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r10"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x827663C4
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r10"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82768730
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r6"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x827687D8
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r6"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x827B33A8
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r7"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8287B324
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r5"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8287B3D8
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r7"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8287B430
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82931D54
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82937880
+name = "Gow3CaptureUpEnd"
+registers = ["r30", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8293864C
+name = "Gow3CaptureUpEnd"
+registers = ["r29", "r10"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x829395B8
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8293A28C
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8295F480
+name = "Gow3CaptureUpEnd"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x8295F8DC
+name = "Gow3CaptureUpEnd"
+registers = ["r30", "r6"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82960880
+name = "Gow3CaptureUpEnd"
+registers = ["r11", "r3"]
+after_instruction = false
+
+# Validated append commits; retain immutable packet ownership before publication.
+# Allocation/reset stores are deliberately excluded: they change pointer ownership
+# without appending PM4 (82AEF11C, 82AEF7DC, 82AEFEE8, 82AF2D6C,
+# 82AF47A8, 82AF47CC, 82AF4DC8).
+
+[[midasm_hook]]
+address = 0x82AEEA60
+name = "Gow3CaptureOwnedCommands"
+registers = ["r11", "r10"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AEEBC4
+name = "Gow3CaptureOwnedCommands"
+registers = ["r11", "r10"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF02E8
+name = "Gow3CapturePrimitiveChunk"
+registers = ["r31", "r25", "r23", "r29", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF0760
+name = "Gow3CaptureIndexedChunk"
+registers = ["r31", "r18", "r21", "r27", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF0C08
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF1254
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF13DC
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r30"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF1584
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF168C
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF1A58
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF1AC8
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF1BF4
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF1C80
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF2E7C
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF3CFC
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r10"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF3D50
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF3E9C
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF3F70
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF409C
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF40D4
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r30"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF4208
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF4254
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF4480
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r10"]
+after_instruction = false
+
+
+# Clear helper stores through an alias of device+48 (r23), rather than a direct
+# displacement. r31 retains the device and r11 is the finalized cursor.
+[[midasm_hook]]
+address = 0x82AF0E8C
+name = "Gow3CaptureOwnedCommands"
+registers = ["r31", "r11"]
+after_instruction = false

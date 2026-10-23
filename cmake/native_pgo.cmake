@@ -1,0 +1,40 @@
+# Clang IR instrumentation changes neither shader code nor floating-point policy.
+# Train using a private gameplay run, merge its profraw files with a matching
+# llvm-profdata, then configure USE with that absolute profdata path. Never
+# benchmark the instrumented GENERATE build against a production executable.
+set(GOW3_NATIVE_PGO_MODE "OFF" CACHE STRING "Host renderer PGO: OFF, GENERATE, USE")
+set_property(CACHE GOW3_NATIVE_PGO_MODE PROPERTY STRINGS OFF GENERATE USE)
+set(GOW3_NATIVE_PGO_PATH "" CACHE PATH "Absolute raw-profile directory or merged profile file")
+if(NOT GOW3_NATIVE_PGO_MODE MATCHES "^(OFF|GENERATE|USE)$")
+    message(FATAL_ERROR "GOW3_NATIVE_PGO_MODE must be OFF, GENERATE or USE")
+endif()
+if(GOW3_NATIVE_PGO_MODE STREQUAL "OFF")
+    return()
+endif()
+if(NOT TARGET gow3-native-renderer OR NOT TARGET gow3)
+    message(FATAL_ERROR "Native PGO requires the Native renderer and gow3 executable")
+endif()
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR
+   NOT CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+    message(FATAL_ERROR "Native PGO requires Clang with its GNU-style driver")
+endif()
+if(NOT IS_ABSOLUTE "${GOW3_NATIVE_PGO_PATH}")
+    message(FATAL_ERROR "GOW3_NATIVE_PGO_PATH must be an absolute path")
+endif()
+if(GOW3_NATIVE_PGO_MODE STREQUAL "GENERATE")
+    file(MAKE_DIRECTORY "${GOW3_NATIVE_PGO_PATH}")
+    set(gow3_native_pgo_options "-fprofile-generate=${GOW3_NATIVE_PGO_PATH}" -fprofile-update=atomic)
+    # A static instrumented library needs the runtime in every final consumer.
+    target_link_options(gow3-native-renderer INTERFACE "-fprofile-generate=${GOW3_NATIVE_PGO_PATH}")
+    target_link_options(plume INTERFACE "-fprofile-generate=${GOW3_NATIVE_PGO_PATH}")
+else()
+    if(NOT EXISTS "${GOW3_NATIVE_PGO_PATH}" OR IS_DIRECTORY "${GOW3_NATIVE_PGO_PATH}")
+        message(FATAL_ERROR "Native PGO USE requires an existing merged profile file")
+    endif()
+    set(gow3_native_pgo_options "-fprofile-use=${GOW3_NATIVE_PGO_PATH}")
+endif()
+target_compile_options(gow3-native-renderer PRIVATE ${gow3_native_pgo_options})
+target_compile_options(plume PRIVATE ${gow3_native_pgo_options})
+set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/renderer/gears_bridge.cpp"
+    APPEND PROPERTY COMPILE_OPTIONS ${gow3_native_pgo_options})
+message(STATUS "Native host PGO: ${GOW3_NATIVE_PGO_MODE}, ${GOW3_NATIVE_PGO_PATH}")

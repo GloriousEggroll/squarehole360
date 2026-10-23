@@ -1,0 +1,14 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "readonly_depth_attachment.glsl"
+layout(local_size_x=8,local_size_y=8)in;
+layout(set=0,binding=0,std430)readonly buffer Packed {uint words[];} source;
+layout(set=0,binding=1,std430)writeonly buffer Decoded {uint bits[];} destination;
+layout(push_constant)uniform Layout {uint width,height,pitch,base;} pc;
+void main() {
+    uvec2 pixel=gl_GlobalInvocationID.xy;if(pixel.x>=pc.width||pixel.y>=pc.height)return;
+    uint column=pixel.x%80u;column=column<40u?column+40u:column-40u;
+    uint tile=(pixel.y/16u)*((pc.pitch+79u)/80u)+pixel.x/80u;
+    uint at=((pc.base+tile)*1280u+(pixel.y%16u)*80u+column)%(2048u*1280u);
+    destination.bits[pixel.y*pc.width+pixel.x]=floatBitsToUint(nativeReadonlyD32(source.words[at]>>8));
+}

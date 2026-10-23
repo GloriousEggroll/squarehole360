@@ -1,0 +1,68 @@
+# Native hooks for module EF4AD5E9DD1982ED. Both original instructions are
+# checked before launch; tools/audit.py additionally pins the full XEX hash.
+# Unlock FPS patch provenance: xenia-canary/game-patches, illusion and boma.
+
+[[midasm_hook]]
+address = 0x8253D9B0
+name = "Gow3UncapFrameRate"
+return_on_true = true
+
+[[midasm_hook]]
+address = 0x82AF66BC
+name = "Gow3SetPresentInterval"
+registers = ["r11"]
+after_instruction = true
+
+# Poll idle render tickables (including Bink) with millisecond precision.
+# The original 25 ms threshold produces a 25/25/50 ms cadence for 30 FPS movies.
+[[midasm_hook]]
+address = 0x823F4148
+name = "Gow3MoviePollInterval"
+registers = ["f0"]
+after_instruction = true
+
+# Diagnostic-only engine counter observations. Original stores and completion
+# remain authoritative; these observations are not allocation lifetime pins.
+
+[[midasm_hook]]
+address = 0x82B03C64
+name = "Gow3ObserveMarkerCounterInitialized"
+registers = ["r31", "r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82B03E48
+name = "Gow3ObserveMarkerCounterDestroyed"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF5F10
+name = "Gow3ObserveMarkerCounterRingReset"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF6180
+name = "Gow3ObserveMarkerCounterRingReady"
+registers = ["r31", "r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82B08120
+name = "Gow3ObserveMarkerCounterRecovery"
+registers = ["r3"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x82AF55BC
+name = "Gow3ObserveMarkerCounterCpuDirect"
+registers = ["r11"]
+after_instruction = false
+
+# Exact original pair completed; capture identity before command publication.
+[[midasm_hook]]
+address = 0x82AF559C
+name = "Gow3ObserveMarkerPairEmitted"
+registers = ["r11", "r3", "r8", "r5", "r6"]
+after_instruction = true

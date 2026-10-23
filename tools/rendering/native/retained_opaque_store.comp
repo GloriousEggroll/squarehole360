@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x=8,local_size_y=8)in;
+layout(set=0,binding=0,std430)buffer Canonical{uint words[];} destination;
+layout(set=0,binding=1,std430)readonly buffer Scratch{uint words[];} inputData;
+uint depthCode(uint bits){
+    if(bits<0x38000000u)return uint(uintBitsToFloat(bits)*34359738368.0);
+    return (((bits>>23u)-111u)<<20u)|((bits&0x7fffffu)>>3u);
+}
+void main(){
+    uvec2 p=gl_GlobalInvocationID.xy;if(p.x>=1280u||p.y>=720u)return;
+    uint tile=(p.y/16u)*16u+p.x/80u, row=(p.y%16u)*80u,column=p.x%80u,i=p.y*1280u+p.x;
+    uint color=(720u+tile)*1280u+row+column,depth=tile*1280u+row+(column+40u)%80u;
+    destination.words[color]=inputData.words[i];
+    destination.words[depth]=(depthCode(inputData.words[1280u*720u+i])<<8u)|(destination.words[depth]&255u);
+}

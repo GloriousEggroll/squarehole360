@@ -1,0 +1,154 @@
+# Gears of War 3 function boundaries not present in the XEX PDATA.
+# XenonRecomp independently identifies the same entries and boundaries.
+
+[functions.0x822CDF50]
+size = 0x18
+
+[functions.0x822DC840]
+size = 0x2C
+
+[functions.0x823565B0]
+size = 0xC
+
+[functions.0x823D4F78]
+size = 0x18
+
+# Called indirectly while loading SP_Nightmare_P. Ten instructions ending
+# in blr at 0x8265B284; independently present in the XenonRecomp export.
+[functions.0x8265B260]
+size = 0x28
+
+[functions.0x8271C710]
+size = 0x10
+
+# Virtual call from 0x82A4B5E8 after the prison sequence; pointer at 0x821DFA00.
+# Leaf function ends in blr at 0x829ADA60, before padding at 0x829ADA64.
+# Independently present in the XenonRecomp export.
+[functions.0x829AD8B8]
+size = 0x1AC
+
+[functions.0x82B1BAA0]
+size = 0x8
+
+[functions.0x82B1BAB0]
+size = 0x8
+
+[functions.0x82B1BAB8]
+size = 0x8
+
+[functions.0x82B1BAC0]
+size = 0x58
+
+[functions.0x82B21F30]
+size = 0xD8
+
+[functions.0x82B222D8]
+size = 0xFC
+
+[functions.0x82B22EC8]
+size = 0x8
+
+[functions.0x82B26D60]
+size = 0x18
+
+[functions.0x82B82BA8]
+size = 0x20
+
+[functions.0x82B8C670]
+size = 0x10
+
+[functions.0x82B8C680]
+size = 0x10
+
+[functions.0x82BA6268]
+size = 0x18
+
+[functions.0x82BA6280]
+size = 0x18
+
+[functions.0x82BA6298]
+size = 0x18
+
+[functions.0x82BA62B0]
+size = 0x18
+
+[functions.0x82BA62C8]
+size = 0x18
+
+[functions.0x82BA62E0]
+size = 0x18
+
+[functions.0x82BA62F8]
+size = 0x18
+
+[functions.0x82BA6310]
+size = 0x18
+
+[functions.0x82BC9D98]
+size = 0x18
+
+[functions.0x82C0AD80]
+size = 0x14
+
+[functions.0x82C0AE40]
+size = 0x18
+
+[functions.0x82C0AE58]
+size = 0x1C
+
+[functions.0x82C690A0]
+size = 0x14
+
+[functions.0x82C79B60]
+size = 0x20
+
+[functions.0x82D057A8]
+size = 0x160
+
+[functions.0x82D37198]
+size = 0x64
+
+[functions.0x82D68090]
+size = 0x10
+
+[functions.0x82D680C0]
+size = 0x30
+
+[functions.0x82D680F0]
+size = 0x24
+
+[functions.0x82D68114]
+size = 0x4
+
+[functions.0x82D6813C]
+size = 0x4
+
+[functions.0x82DB80F0]
+size = 0xE4
+
+[functions.0x82DCE010]
+size = 0x7C
+
+[functions.0x82DF5C28]
+size = 0xC
+
+[functions.0x82E10418]
+size = 0x8
+
+[functions.0x82E10420]
+size = 0x10
+
+[functions.0x82E1044C]
+size = 0x4
+
+[functions.0x82E10A60]
+size = 0xC
+
+[functions.0x82EDD390]
+size = 0x8
+
+[functions.0x82EDD398]
+size = 0x8
+
+[functions.0x82EDD3A0]
+size = 0x8

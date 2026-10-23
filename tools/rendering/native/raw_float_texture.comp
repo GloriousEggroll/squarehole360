@@ -1,0 +1,13 @@
+#version 450
+// Integer-only permutation of the original RGBA32F bits. A buffer-to-image
+// transfer writes the original float format afterwards; no float imageStore
+// may canonicalize NaNs, flush subnormals or change signed zero here.
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Source {uint words[];} source;
+layout(set=0,binding=1,std430) writeonly buffer Destination {uint words[];} destination;
+layout(push_constant) uniform Parameters {uint source_word;uint count;uint reserved0;uint reserved1;} pc;
+void main() {
+    uint i=gl_GlobalInvocationID.x;if(i>=pc.count)return;
+    uint v=source.words[pc.source_word+i];
+    destination.words[i]=((v&255u)<<24)|((v&65280u)<<8)|((v>>8)&65280u)|(v>>24);
+}

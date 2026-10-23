@@ -1,0 +1,9 @@
+[project]
+sdk_version = "0.8.0.0"
+name = "gow3"
+game_root = "game"
+
+[entrypoint]
+file_path = "game/default.xex"
+out_directory_path = "generated/default"
+includes = ["config/function-boundaries.toml", "config/gameplay-hooks.toml", "config/renderer-hooks.toml"]

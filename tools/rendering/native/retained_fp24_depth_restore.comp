@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x=8,local_size_y=8)in;
+layout(set=0,binding=0,std430)readonly buffer Canonical{uint words[];} source;
+layout(set=0,binding=1,std430)writeonly buffer Scratch{uint words[];} outputData;
+float exactHalfDepth(uint code){
+    uint e=code>>20u,m=code&0xfffffu;
+    if(e!=0u)return uintBitsToFloat(((e+111u)<<23u)|(m<<3u));
+    return float(m)*2.910383045673370361328125e-11;
+}
+void main(){
+    uvec2 p=gl_GlobalInvocationID.xy;if(p.x>=1280u||p.y>=720u)return;
+    uint tile=(p.y/16u)*16u+p.x/80u,row=(p.y%16u)*80u,column=p.x%80u;
+    uint depth=tile*1280u+row+(column+40u)%80u;
+    outputData.words[p.y*1280u+p.x]=floatBitsToUint(exactHalfDepth(source.words[depth]>>8u));
+}

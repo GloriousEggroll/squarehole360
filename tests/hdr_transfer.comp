@@ -1,0 +1,11 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "hdr_transfer.glsl"
+layout(local_size_x=1) in;
+struct Sample { vec4 srgb; vec4 parameters; vec4 result; };
+layout(std430, binding=0) buffer Samples { Sample samples[]; };
+void main() {
+  uint i = gl_GlobalInvocationID.x;
+  samples[i].result = vec4(convert_to_hdr(samples[i].srgb.rgb,
+      samples[i].parameters.x, samples[i].parameters.y, samples[i].parameters.z), 1.0);
+}

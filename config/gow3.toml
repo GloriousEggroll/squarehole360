@@ -1,0 +1,77 @@
+anisotropic_override = -1
+async_shader_compilation = true
+depth_float24_convert_in_pixel_shader = false
+depth_float24_round = false
+framerate_limit = 169.0
+fullscreen = true
+gamma_render_target_as_unorm16 = false
+gow3_60fps = true
+gow3_frame_limit_mode = 'unlimited'
+gow3_movie_pacing = true
+gow3_native_cache_coherence_waits = true
+gow3_native_cache_gpu_alias_states = true
+gow3_native_packed_depth_render_pass_groups = true
+gow3_native_fsi_draw_pass_groups = true
+gow3_native_async_shaders = true
+gow3_native_async_pipelines = true
+gow3_native_defer_cpu_texture_drains = true
+gow3_native_hardware_render_targets = true
+gow3_native_frame_journal = "logs/frame-journal.csv"
+gow3_native_pipeline_prewarm = true
+gow3_native_readonly_depth_no_write_metadata = true
+gow3_native_shader_lookup_lookaside = true
+gow3_native_shader_prewarm = true
+gow3_native_shader_prewarm_threads = 0
+gow3_renderer = 'native'
+gpu_native_submit_completion_markers = true
+mnk_mode = false
+monitor = 0
+native_2x_msaa = false
+occlusion_query_enable = true
+present_cas_additional_sharpness = 0.0
+present_dither = false
+present_effect = 'cas'
+present_fsr_max_upsampling_passes = 2
+present_fsr_sharpness_reduction = 0.20000000000000001
+present_hdr = true
+present_hdr_highlights = 1.0
+present_hdr_paper_white = 203.0
+present_hdr_peak_nits = 0.0
+present_letterbox = true
+readback_memexport = false
+readback_memexport_fast = true
+render_target_path_vulkan = 'fsi'
+resolution_scale = 1
+store_shaders = true
+swap_post_effect = 'none'
+texture_cache_memory_limit_hard = 8192
+texture_cache_memory_limit_soft = 4096
+texture_cache_memory_limit_soft_lifetime = 30
+vsync = false
+vulkan_async_occlusion_queries = true
+vulkan_async_shader_translation = true
+vulkan_async_skip_incomplete_frames = false
+vulkan_batch_occlusion_queries = true
+vulkan_pipeline_creation_threads = -1
+vulkan_unclamped_vertex_indices = true
+window_height = 720
+window_width = 1280
+# Keep immutable visibility queries in shared Native render passes.
+gow3_native_host_query_reset = true
+gow3_native_readonly_depth_read_only_pass = true
+gow3_native_readonly_depth_skip_edram_barrier = true
+gow3_native_readonly_query_render_pass_groups = true
+
+# Qualified Native renderer improvements and learned shader states.
+gow3_native_packed_color_render_pass_groups = true
+gow3_native_fsi_state_material_composition = true
+gow3_native_fsi_state_cache_headroom = true
+gow3_native_queued_volume_alias_loads = true
+
+# Keep detailed diagnostic dumps out of gameplay.
+gow3_native_verbose_frame_reports = false
+
+# Native texture reuse and prewarmed combat rendering.
+gow3_native_fsi_action_state_overflow_lookup = true
+gow3_native_packed_color_action_pass_groups = true
+gow3_native_share_cpu_texture_sampling_variants = true

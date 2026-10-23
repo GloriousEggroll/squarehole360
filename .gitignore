@@ -1,0 +1,43 @@
+*.iso
+/input/
+/game/
+/generated/default/
+/build/
+/user/
+/logs/
+/analysis/
+# Vendored dependencies are submodules (see .gitmodules).
+/tools/xdvdfs
+*.xtr
+*.rdc
+*.dmp
+/core
+/core.*
+__pycache__/
+# Locally imported/converted copyrighted game data, never release inputs.
+**/.gow3-assets/
+**/.*.import-*/
+**/.*.prepare-*/
+**/.*.import.lock
+build-*/
+*.g3d
+*.g3m
+reports/rendering/native-renderer/captures/
+reports/rendering/native-renderer/extracted-*/
+reports/rendering/native-renderer/global-shaders/
+reports/rendering/native-renderer/compiled-*/
+reports/rendering/native-renderer/mesh-*/
+
+# Measurement output (hundreds of GB), local saves and scratch space.
+reports/
+user-backups/
+scratch/
+/--help/
+*.orig
+*.rej
+*.perf
+
+# Generated locally from the user executable (XDK code).
+generated/native-getdata/
+config/*.bak*
+config/*.runtime.*.toml

@@ -1,0 +1,109 @@
+[
+  {
+    "at": 25,
+    "key": "Escape",
+    "hold_ms": 1800
+  },
+  {
+    "at": 29,
+    "screenshot": "weapon-00-menu.png"
+  },
+  {
+    "at": 33,
+    "key": "space",
+    "hold_ms": 1800
+  },
+  {
+    "at": 37,
+    "screenshot": "weapon-01-standard.png"
+  },
+  {
+    "at": 41,
+    "key": "space",
+    "hold_ms": 1800
+  },
+  {
+    "at": 45,
+    "screenshot": "weapon-02-continue.png"
+  },
+  {
+    "at": 49,
+    "key": "space",
+    "hold_ms": 1800
+  },
+  {
+    "at": 65,
+    "screenshot": "weapon-03-loading.png"
+  },
+  {
+    "at": 90,
+    "screenshot": "weapon-04-scene.png"
+  },
+  {
+    "at": 100,
+    "key_sequence": [
+      {
+        "press": "F8"
+      },
+      {
+        "sleep_ms": 1800
+      },
+      {
+        "press": "F9"
+      },
+      {
+        "sleep_ms": 8000
+      },
+      {
+        "release": "F9"
+      },
+      {
+        "release": "F8"
+      }
+    ]
+  },
+  {
+    "at": 101.4,
+    "screenshot": "weapon-05-aimed.png"
+  },
+  {
+    "at": 102.4,
+    "screenshot": "weapon-06-fire.png"
+  },
+  {
+    "at": 103,
+    "capture": true
+  },
+  {
+    "at": 103.4,
+    "screenshot": "weapon-07-fire.png"
+  },
+  {
+    "at": 104.4,
+    "screenshot": "weapon-08-fire.png"
+  },
+  {
+    "at": 105.4,
+    "screenshot": "weapon-09-fire.png"
+  },
+  {
+    "at": 106.4,
+    "screenshot": "weapon-10-fire.png"
+  },
+  {
+    "at": 107.4,
+    "screenshot": "weapon-11-fire.png"
+  },
+  {
+    "at": 109,
+    "screenshot": "weapon-12-fire.png"
+  },
+  {
+    "at": 112,
+    "screenshot": "weapon-13-after.png"
+  },
+  {
+    "at": 125,
+    "close": true
+  }
+]

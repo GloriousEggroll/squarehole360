@@ -1,0 +1,300 @@
+# Gears of War 3: user guide
+
+Detailed setup, settings and renderer notes for the Gears of War 3 build.
+The project overview is in the [README](../README.md); current measured
+results are in [STATUS.md](../STATUS.md).
+
+This is an **incomplete, experimental port**, not a full source decompilation.
+The native Linux executable reaches the title screen and loads and renders
+the opening prison cinematic and gameplay from a fresh offline campaign.
+The former empty-world defect and black patches on Anya's face in the
+opening cinematic are fixed. Full gameplay correctness has not been established.
+
+The build uses our ReXGlue SDK fork (`vendor/rexglue-sdk`, a submodule) and
+regenerates C++ from the executable extracted from your ISO. It uses native
+x86-64 CPU code,
+ReXGlue's Xbox services and command ordering, and the new native Vulkan renderer
+by default. The Xenia-derived renderer remains available for compatibility.
+
+## Run and build
+
+Each user supplies their own Xbox 360 ISO. Import it once before building or
+launching; game content and converted renderer data are not release inputs:
+
+```sh
+python3 tools/import-assets.py import "/path/to/gow3.iso"
+```
+
+The portable Python tool extracts the disc into `game/`, verifies checksums,
+and prepares a local asset catalog and native shader inputs in
+`game/.gow3-assets/`. It checks the exact executable version this build supports,
+shows progress, and publishes a fresh installation only after verification.
+It does not download any game content. Python 3.11+ is required; extraction
+does not require Wine, Xenia, a mount command, or the old `xdvdfs` executable.
+Windows uses the same tool (`py -3 tools/import-assets.py ...`); Windows execution
+has not yet been tested.
+
+For an existing extraction, the following verifies every file against the ISO
+before adopting it. Original game files are preserved:
+
+```sh
+python3 tools/import-assets.py import "/path/to/gow3.iso" --adopt-existing
+python3 tools/import-assets.py verify
+```
+
+The ISO is only needed for import/adoption, not subsequent launches. A different
+destination can be selected with `--output "/path/to/game"`; launch that
+installation with `./tools/run-linux.sh --game_data_root="/path/to/game"`.
+The normal launcher checks the imported inventory, sizes and executable hash;
+`verify` checks every game and prepared file's full SHA-256.
+See [the asset tool documentation](../tools/assets/README.md) for native shader
+compilation, recovery, and the boundary between extracted and converted assets.
+
+From this directory:
+
+```sh
+./tools/run-linux.sh
+./tools/settings.sh
+./tools/build-linux.sh
+./tools/validate.sh
+```
+
+Run uses `build/bin/gow3`, mounts `game/`, and stores saves and caches in
+`user/`. This is a Release build. Normal launches do not load RenderDoc or
+enable its capture overlay; graphics capture requires an explicit RenderDoc launch. Xbox Live is unavailable; local socket operations remain enabled
+because even the offline campaign requires them.  Start a **New Campaign** if an older checkpoint loads
+the empty world; those saves were preserved, not replaced.
+Normal builds also omit per-function guest tracing checks. For a diagnostic
+build that needs function/state tracing, configure CMake with
+`-DGOW3_ENABLE_GUEST_TRACE=ON` and rebuild `gow3`; switch it back to `OFF`
+and rebuild afterward. This option is off by default and is separate from
+ordinary logs and MangoHud.
+Linux builds automatically link the installed jemalloc allocator when available;
+normal launches need no `LD_PRELOAD` setting. Configure with
+`-DGOW3_HOST_ALLOCATOR=SYSTEM` to use the system allocator, or `JEMALLOC` to require
+jemalloc. `AUTO` is the default and keeps the system allocator on other platforms.
+Native snapshot hashing uses OpenSSL's accelerated SHA-256 when its development
+package is available at configure time. Otherwise it uses the bundled portable
+implementation with identical cache keys. Set `-DGOW3_NATIVE_ACCELERATED_HASH=OFF`
+to build without that optional dependency. Accelerated dynamic builds require
+the matching OpenSSL Crypto runtime library on the destination machine.
+Mouse and keyboard controller emulation is enabled by default in the game
+config (`mnk_mode = true`). Disable it in the settings GUI's Input tab or launch
+with `./tools/run-linux.sh --mnk_mode=false`; SDK defaults map Start to Escape,
+A to Space, B to Shift, and the D-pad to arrow keys. These menu controls have
+been exercised in the diagnostic runs.
+
+Stereo output now uses the runtime's normalized downmix to avoid the observed
+clipping when six game channels were mixed by the audio server. The latest
+interactive campaign checkpoint is now in the normal `user/` save root:
+
+```sh
+./tools/run-linux.sh
+```
+
+Audio diagnostics are disabled by default. Add `--audio_diagnostics=true` to
+record buffer starvation and sample levels if crackling persists after restart.
+
+Settings are loaded from `config/gow3.toml` before graphics initialization.
+Run `./tools/settings.sh` to edit them separately from the game (Python 3.11+,
+PySide6 and tomli-w are required). **Window mode** offers **Windowed** and
+**Borderless fullscreen**. Returning to Windowed restores the configured client
+size (1280×720 by default). Click **Apply**: window mode and size, the frame-rate
+ceiling and dithering can update while playing. Xenia also supports live
+FSR/CAS/bilinear selection, sharpening, FSR pass count and FXAA. The editor waits for the running game to
+acknowledge the saved file; resource/compatibility options show **Game restart
+needed** at the bottom. Reverting those options clears the notice. The editor
+preserves unknown settings, keeps a `.toml.bak`, and refuses to overwrite external
+edits made since loading. Explicit command-line options override the config.
+Use `--gow3_config=/path/to/settings.toml` to select another file.
+
+**Renderer** has two choices, **Native** (the default) and **Xenia**, in both
+settings editors. Each shows its own supported options alongside shared display,
+HDR and input controls. Changing the renderer requires a game restart.
+Native owns all scene drawing, copies, visibility queries and frame sources;
+it never switches to Xenia after an error. Unsupported native work stops the run
+with an error. Native currently uses 1× internal resolution, hardware render targets
+(the exact fragment-interlock mode remains selectable with
+`gow3_native_hardware_render_targets = false`), exact occlusion queries and
+bilinear output scaling. These prerequisites are
+selected automatically without overwriting saved Xenia preferences.
+To explicitly select Xenia:
+
+```sh
+./tools/run-linux.sh --gow3_renderer=xenia
+```
+
+Native campaign rendering, movement, real query publication and clean shutdown
+have passed a saved-checkpoint test. Whole-game coverage and normal frame-rate
+performance are still being improved. Native batches up to 64 draws while
+retaining their resources until the batch fence completes. Queries, guest-memory
+fences, dependent work and presentation drain pending draws before
+publishing results. Native shader preparation starts in the background when the
+game creates shader objects. Known native pipeline combinations are recorded in
+the local cache and prepared behind the startup progress bar on later runs. A
+draw still waits if its exact shader or pipeline is not ready; this is not a
+complete cache for the whole game.
+
+This installation also retains 409 observed native pipeline recipes from its
+own gameplay captures. Startup prepares those combinations before the game
+begins. New scenes can still introduce shaders or pipelines that were not seen
+in those captures.
+
+For a diagnostic comparison, `--gow3_native_draw_batch_size=1` restores a fence
+per native draw. The default is 16; the accepted range is 1–64 and changes require
+a restart. This internal diagnostic is not a settings-menu option. An offline
+comparison preserved all 134 captured images and reduced draw submissions from
+1,523 to 197. These replay timings do not establish gameplay FPS.
+
+The default **maximum is 60 FPS**, with VSync off. This is a ceiling, not a
+minimum or a forced simulation rate. In Display, choose Custom maximum,
+Monitor refresh rate, or Unlimited. Unlimited removes the host ceiling;
+engine limits and GPU load can still constrain performance. The unlock of the
+original 30 FPS game cap is enabled independently. To select modes manually:
+
+```toml
+gow3_frame_limit_mode = "custom" # "custom", "display", or "unlimited"
+framerate_limit = 60.0         # used by "custom"
+vsync = false
+```
+
+Xenia image settings include 1×/2×/3× internal rendering, FSR 1, CAS, bilinear
+scaling, sharpening, FXAA, and MSAA support. Native uses 1× internal resolution
+and bilinear scaling; select Xenia to use its additional image options.
+Dithering is available in both renderers. Both always use the game's original
+per-texture filtering; legacy `anisotropic_override` values normalize to `-1`.
+FSR 1 scales to the actual window or fullscreen surface; for 720p to 4K use
+native internal resolution and a 3840×2160 desktop surface. Fractional desktop
+scaling uses Wayland's preferred fractional scale and viewport protocol, so
+fullscreen can use the physical 4K output. Xwayland fallback may expose a
+smaller surface that the compositor scales.
+The runtime logs the actual swapchain dimensions. **FSR 4 is not implemented**;
+the existing presentation path lacks its motion, depth and jitter inputs.
+
+Native Wayland presentation is the default. The launcher first checks Vulkan
+Wayland support; if unavailable it uses X11/Xwayland with HDR disabled. Set
+`GDK_BACKEND=x11 ./tools/run-linux.sh` for an explicit SDR compatibility run.
+
+The HDR tab enables native Vulkan HDR10 output (10-bit BT.2020/PQ), without
+Gamescope. Both the settings app and the renderer inspect the compositor's
+**active** output color description, and require Vulkan HDR10 surface support.
+Missing/failed detection disables HDR controls and the renderer falls back to
+SDR even if the config requests HDR. The renderer rechecks when the surface
+moves between outputs or the compositor reports an output color change;
+the standalone editor refreshes its independent probe every ten seconds.
+Paper white defaults to 203 nits and peak brightness to the output's report
+(0 means automatic); custom calibration and highlight strength are exposed.
+This is HDR presentation with highlight expansion from the completed SDR game
+image. It does not recover original pre-tonemap engine lighting or extra scene
+detail. HDR output/calibration changes currently require a game restart.
+
+Both settings interfaces show read-only **VRR (FreeSync)** status when the
+Wayland compositor reports it. The game leaves desktop VRR policy untouched.
+An enabled status reports the monitor's configuration, not proof of variable
+scanout on every frame. VSync and the frame-rate ceiling remain separate options;
+turning VSync off does not itself enable VRR.
+
+The in-game settings menu uses the same option schema and config as the
+standalone app. **L3+R3** (press both stick buttons) toggles it; **F4** is the
+keyboard shortcut. Use the D-pad/left stick to select a category, then **A**
+to enter its options. Up/down moves between enabled options; left/right changes
+the focused value (hold **RB** for faster numeric adjustment). **B** returns
+to the category list; B again closes. **X** applies and **Y** reloads saved
+settings. Keyboard equivalents are arrows, Enter, Escape, Ctrl+Enter to apply,
+F6 to reload, and Shift for faster adjustment. Each category remembers its
+last option, and the selection scrolls into view automatically.
+Gameplay controls are blocked while the menu is open. Release both stick buttons
+before pressing the shortcut again; the Guide button does not toggle settings.
+Shader loading uses a plain red bar and white text; the menu uses matching red, white and dark
+colors. Simultaneous edits in the other editor require Reload before saving.
+
+For compatibility rendering, the default config enables asynchronous shader translation and pipeline compilation,
+using all detected logical CPU threads in one shared worker pool. Newly encountered
+effects can briefly appear late while this work finishes. Draws that export data
+to game memory complete their shader preparation synchronously to preserve those
+writes. The Shaders tab exposes Background shader translation; disable it with
+`--vulkan_async_shader_translation=false` for a comparison. Earlier asynchronous
+pipeline changes reduced stutter; the additional translation change removed
+GPU-thread translation work but the user reported similar overall stutter.
+Some stalls occur without shader compilation.
+
+Asynchronous visibility queries are also enabled for compatibility rendering. GPU query results are
+published after their submission fences complete, with pending batches drained
+before the command thread waits. This removes the previous CPU wait after
+every individual visibility query. The Advanced tab exposes the option;
+for a comparison run, use `--vulkan_async_occlusion_queries=false`.
+Group visibility queries also combines queries into normal submission batches;
+`--vulkan_batch_occlusion_queries=false` restores per-query submissions while
+retaining asynchronous result collection. Guest memory waits and command-thread
+idle submit and drain pending results, including batches not yet submitted.
+The runtime still uses real query results and protects query storage against
+reuse while GPU work is pending. This improves synchronization overhead;
+heavy GPU scenes can still fall below 60 FPS.
+
+The game config disables optional CPU readback of shader memory exports
+(`readback_memexport = false`), matching the working Xenia comparison. The prior
+run's rare 0.57–1.65 second freezes coincided with 1,638–3,595 synchronous
+readbacks in a single frame. GPU shader exports still execute normally. The
+Advanced tab exposes Copy shader output to CPU memory and Buffered shader
+readbacks for compatibility testing; enabling CPU copies can bring those stalls
+back. Longer gameplay validation of the disabled setting is ongoing.
+
+Startup shows a progress bar while translating and compiling shaders discovered
+in previous play sessions. The compatibility cache consolidates 2,472 shaders and 3,130
+pipeline descriptions from our runs, with source caches retained. Native
+rendering has its own versioned shader cache and observed pipeline recipes. It is not a
+complete whole-game cache. The initial compilation with an empty Mesa cache
+took about 14 seconds on this machine; subsequent driver-cache hits are faster.
+
+The version-checked frame-rate unlock is enabled by default. Gameplay has been
+observed around 40–60 FPS, including about 53 FPS in one fire-heavy ship scene;
+this does not guarantee locked 60 FPS. Prerecorded movies retain their original
+frame rate. The movie pacing option reduces the idle render polling interval
+from 25 ms to 1 ms; it does not change the video's playback clock or shared game
+constants. To restore the original game cap, restart with:
+
+```sh
+./tools/run-linux.sh --gow3_60fps=false
+```
+
+The frame-rate unlock hook sites follow the [Xenia Canary Unlock FPS patch by illusion and
+boma](https://github.com/xenia-canary/game-patches/blob/main/patches/4D5308AB%20-%20Gears%20of%20War%203.patch.toml).
+They are regenerated from `config/gameplay-hooks.toml`, and the original
+instruction bytes are checked before activation. `game/default.xex` is unchanged.
+
+Build prerequisites on the current machine are Clang 22, CMake, Ninja,
+Python 3, GTK 3 development files, and the vendored SDK dependencies.
+The build uses eight jobs by default (`GOW3_BUILD_JOBS` overrides this).
+`validate.sh` returns failure if any checks fail; existing SDK failures are
+documented in `STATUS.md`.
+
+## Artifacts and limits
+
+- `generated/default/`: instruction-level C++ translation, used by the build.
+- `analysis/decompiled/functions/`: unverified Ghidra C pseudocode, **not**
+  the input to the Linux build or a recovery of the original project.
+- `analysis/decompiled/functions.tsv`: per-function export status.
+- `reports/progress.json`: mechanically checked counts and executable identity.
+- `reports/input-inventory.json` and `reports/iso.sha256`: input provenance.
+- `logs/`: generation, compilation, tests, and runtime diagnostics.
+- `reports/linux-first-boot.png`: observed native title screen.
+- `reports/rendering/native-offline-start.png`: fresh campaign prison cinematic.
+- `reports/rendering/native-offline-gameplay.rdc`: native prison gameplay capture.
+- `reports/rendering/findings.json`: rendering diagnosis and validation scope.
+- `reports/rendering/vertex-residency-fix.patch`: fix for stale animated vertex data.
+
+Ghidra exported 41,369 functions recognized in a copied analysis database,
+after verifying its executable SHA-256. Of those, 7,477 contain warnings.
+Some functions contain truncated control flow from unsupported instructions.
+The database does not establish complete discovery or correct semantics.
+Types, class layouts, names, build organization, and correctness still need
+extensive reconstruction and validation.
+
+`tools/decompile.sh` repeats the export using the saved local analysis
+database. It defaults to the installed Ghidra and the adjacent JDK 21;
+`GHIDRA_HEADLESS` and `GOW3_JDK` override those paths. Creating a fresh database
+from the ISO, and full analysis with Xenon instruction support, are not yet
+automated by this wrapper.
+
+See `STATUS.md` for the checkpoint and unresolved work. Game assets, generated
+game code, and captures are local artifacts excluded from version control.

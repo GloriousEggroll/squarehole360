@@ -1,0 +1,57 @@
+#version 450
+// Optional full format26/31 physical store plus the EXACT canonical LOAD
+// result. Addressing/encoding/decoding mirror resolve_memory.comp; attribution
+// remains renderer/native/texture_data.LICENSE. Host proves disjoint texels,
+// full coverage and equal producer/consumer decode identity. No buffer reread
+// occurs: a dispatch-wide dependency cannot be implemented by local barriers.
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=0,std430) buffer Memory {uint words[];} memory;
+layout(set=0,binding=1) uniform texture2D input_image;
+layout(set=0,binding=2,rgba32f) writeonly uniform image2D output_image;
+layout(push_constant) uniform Parameters {
+    uvec2 extent;uvec2 origin;uvec2 packed_offset;uint pitch;uint log_bytes;
+    uint tiled;uint endian;uint format;uint signs;uint offset;uint word_count;ivec2 stencil_offset;
+} pc;
+uint address(uvec2 p) {
+    p+=pc.packed_offset;
+    if(pc.tiled==0)return pc.offset+((p.y*pc.pitch+p.x)<<pc.log_bytes);
+    uint macro=((p.x>>5)+(p.y>>5)*((pc.pitch+31)>>5))<<(pc.log_bytes+7);
+    uint micro=((p.x&7)+((p.y&14)<<2))<<pc.log_bytes;
+    uint o=macro+((micro&~15u)<<1)+(micro&15)+((p.y&1)<<4);
+    uint bank=(((p.y&8)>>2)+(p.x>>3))&3;
+    return pc.offset+((o&~511u)<<3)+((p.y&16)<<7)+((o&448)<<2)+bank*64+(o&63);
+}
+uint order(uint v) {
+    if(pc.endian==1||pc.endian==2)v=((v&0x00ff00ffu)<<8)|((v>>8)&0x00ff00ffu);
+    if(pc.endian==2||pc.endian==3)v=(v<<16)|(v>>16);
+    return v;
+}
+void write32(uint a,uint v) {memory.words[a>>2]=order(v);}
+uint encode16(float value,uint channel) {
+    if(isnan(value))return 0;
+    if(((pc.signs>>(channel*2))&3)==1)return uint(int(roundEven(clamp(value,-1.0,1.0)*32767.0)))&65535;
+    return uint(roundEven(clamp(value,0.0,1.0)*65535.0));
+}
+float decode16(uint v,uint channel) {
+    if(((pc.signs>>(channel*2))&3)==1)return max(float(int(v<<16)>>16)/32767.0,-1.0);
+    return float(v)/65535.0;
+}
+void main() {
+    if(any(greaterThanEqual(gl_GlobalInvocationID.xy,pc.extent)))return;
+    uvec2 p=gl_GlobalInvocationID.xy+pc.origin;uint a=address(p);
+    if((a+(1u<<pc.log_bytes)+3)/4>pc.word_count)return;
+    vec4 c=texelFetch(input_image,ivec2(p),0);
+    vec4 decoded=vec4(0,0,0,1);
+    if(pc.format==26) {
+        uint low=encode16(c.x,0)|(encode16(c.y,1)<<16);
+        uint high=encode16(c.z,2)|(encode16(c.w,3)<<16);
+        write32(a,low);write32(a+4,high);
+        decoded=vec4(decode16(low&65535,0),decode16(low>>16,1),
+            decode16(high&65535,2),decode16(high>>16,3));
+    } else if(pc.format==31) {
+        uint low=packHalf2x16(c.xy);write32(a,low);
+        decoded.xy=unpackHalf2x16(low);
+    } else return; // Startup/host contract only admits the two exact formats.
+    imageStore(output_image,ivec2(p),decoded);
+}

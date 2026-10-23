@@ -1,0 +1,18 @@
+#version 450
+layout(local_size_x=64) in;
+layout(set=0,binding=0,std430) readonly buffer Source { uint words[]; } source_data;
+layout(set=0,binding=1,std430) buffer Destination { uint words[]; } destination_data;
+layout(push_constant) uniform Range { uint first; uint end; uint word_first; uint word_count; } range;
+void main() {
+    uint index=gl_GlobalInvocationID.x;
+    if(index>=range.word_count)return;
+    uint word=range.word_first+index;
+    uint address=word*4u;
+    uint mask=0u;
+    for(uint byte_index=0u;byte_index<4u;++byte_index)
+        if(address+byte_index>=range.first&&address+byte_index<range.end)
+            mask|=255u<<(8u*byte_index);
+    uint value=source_data.words[word];
+    if(mask!=0xffffffffu)value=(value&mask)|(destination_data.words[word]&~mask);
+    destination_data.words[word]=value;
+}

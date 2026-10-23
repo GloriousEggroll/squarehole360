@@ -1,0 +1,11 @@
+add_executable(gow3-native-direct-atlas-depth-resolve-guard-test
+    "${CMAKE_CURRENT_LIST_DIR}/direct_atlas_depth_resolve_guard_test.cpp")
+target_compile_features(gow3-native-direct-atlas-depth-resolve-guard-test PRIVATE cxx_std_20)
+target_include_directories(gow3-native-direct-atlas-depth-resolve-guard-test PRIVATE "${GOW3_ROOT}/src")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(gow3-native-direct-atlas-depth-resolve-guard-test PRIVATE -ffp-model=strict)
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(gow3-native-direct-atlas-depth-resolve-guard-test PRIVATE -fno-fast-math -ffp-contract=off)
+elseif(MSVC)
+    target_compile_options(gow3-native-direct-atlas-depth-resolve-guard-test PRIVATE /fp:strict)
+endif()

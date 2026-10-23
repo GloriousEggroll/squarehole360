@@ -1,0 +1,190 @@
+"""Shared settings schema and validated, atomic TOML persistence."""
+from dataclasses import dataclass
+from pathlib import Path
+import hashlib
+import math
+import os
+import shutil
+import tempfile
+import tomllib
+import tomli_w
+
+ROOT = Path(__file__).resolve().parents[2]
+CONFIG = ROOT / 'config/gow3.toml'
+
+@dataclass(frozen=True)
+class Setting:
+    key: str
+    label: str
+    default: object
+    section: str
+    help: str = ''
+    choices: tuple = ()
+    minimum: float = 0
+    maximum: float = 1000
+    renderer: str = 'shared'
+
+S = Setting
+SETTINGS = [
+ S('gow3_renderer', 'Renderer', 'native', 'Renderer', 'Changing the renderer requires a game restart.', (('native','Native'),('xenia','Xenia'))),
+ S('fullscreen', 'Window mode', False, 'Display', 'Borderless fullscreen fills the monitor at its desktop resolution. Windowed restores the configured window size.', ((False,'Windowed'),(True,'Borderless fullscreen'))),
+ S('monitor', 'Monitor', 0, 'Display', '0 uses the window manager’s default; other values select a monitor.', minimum=0, maximum=16),
+ S('window_width', 'Window width', 1280, 'Display', 'Logical pixels; used only in windowed mode.', minimum=640, maximum=8192),
+ S('window_height', 'Window height', 720, 'Display', 'Logical pixels; used only in windowed mode.', minimum=360, maximum=8192),
+ S('present_letterbox', 'Preserve aspect ratio', True, 'Display', 'Add bars as needed instead of stretching the image.'),
+ S('vsync', 'Vertical sync', False, 'Display', 'Synchronize presentation to the display. Off allows tearing if the desktop permits it.'),
+ S('gow3_frame_limit_mode', 'Frame-rate limit', 'custom', 'Display', 'A maximum only. Slow frames are never forced to catch up.', (('custom','Custom maximum'),('display','Monitor refresh rate'),('unlimited','Unlimited'))),
+ S('framerate_limit', 'Maximum FPS', 60.0, 'Display', 'Default: 60. Applies when Custom maximum is selected; enter at least 1 FPS.', minimum=0, maximum=1000),
+ S('present_effect', 'Upscaling', 'fsr', 'Image', 'FSR 1 uses the final image and scales it to the window or fullscreen resolution.', (('fsr','AMD FSR 1 (spatial)'),('cas','AMD CAS sharpening'),('bilinear','Bilinear')), renderer='xenia'),
+ S('present_fsr_sharpness_reduction', 'FSR softness', 0.2, 'Image', '0 is the sharpest; larger values reduce sharpening.', minimum=0, maximum=2, renderer='xenia'),
+ S('present_fsr_max_upsampling_passes', 'FSR scaling passes', 2, 'Image', 'Two passes cover 720p to 4K. Each pass scales by at most 2×.', minimum=1, maximum=4, renderer='xenia'),
+ S('present_cas_additional_sharpness', 'CAS sharpness', 0.0, 'Image', 'Additional sharpening when CAS is selected.', minimum=0, maximum=1, renderer='xenia'),
+ S('resolution_scale', 'Internal resolution', 1, 'Image', '1× renders at the game’s original resolution; 2× is about 1440p and 3× about 4K.', ((1,'1× (original resolution)'),(2,'2× (about 1440p)'),(3,'3× (about 4K)')), renderer='xenia'),
+ S('swap_post_effect', 'Post-process anti-aliasing', 'none', 'Image', 'FXAA smooths edges before scaling; it may soften the picture.', (('none','None'),('fxaa','FXAA'),('fxaa_extreme','FXAA (strong)')), renderer='xenia'),
+ S('present_dither', 'Output dithering', False, 'Image', 'Reduce visible color banding in gradients.'),
+ S('native_2x_msaa', 'Native 2× MSAA support', True, 'Image', 'Honor game-requested 2× multisampling when supported.', renderer='xenia'),
+ S('present_hdr', 'HDR output', False, 'HDR', 'Use native HDR10 output when the selected display has HDR enabled. The game checks again at launch and uses SDR if unavailable.'),
+ S('present_hdr_paper_white', 'Paper white (nits)', 203.0, 'HDR', 'Brightness of ordinary scene content before highlight expansion.', minimum=80, maximum=500),
+ S('present_hdr_peak_nits', 'Peak brightness (nits; 0 = automatic)', 0.0, 'HDR', 'Automatic uses the display’s reported peak brightness. Set a custom value to calibrate for your display.', minimum=0, maximum=10000),
+ S('present_hdr_highlights', 'Highlight expansion', 1.0, 'HDR', 'Expand bright highlights toward the peak brightness. 0 keeps the original SDR brightness range inside HDR output.', minimum=0, maximum=1),
+ S('gow3_native_pipeline_prewarm', 'Prepare previously used pipelines', True, 'Shaders', 'Prepare pipeline combinations observed on earlier runs before the game starts.', renderer='native'),
+ S('gow3_native_shader_prewarm', 'Prepare shaders in the background', True, 'Shaders', 'Compile discovered game shaders before their first draw when possible.', renderer='native'),
+ S('gow3_native_shader_prewarm_threads', 'Shader preparation workers', 0, 'Shaders', '0 selects available CPU threads, up to 32.', minimum=0, maximum=32, renderer='native'),
+ S('async_shader_compilation', 'Asynchronous shader compilation', True, 'Shaders', 'Compile new pipelines in the background; effects may briefly appear late.', renderer='xenia'),
+ S('vulkan_async_shader_translation', 'Background shader translation', True, 'Shaders', 'Translate new shaders on workers. Requires asynchronous compilation.', renderer='xenia'),
+ S('vulkan_pipeline_creation_threads', 'Shader worker threads', -1, 'Shaders', '-1 uses every detected logical CPU thread; 0 disables workers.', minimum=-1, maximum=256, renderer='xenia'),
+ S('store_shaders', 'Keep shader cache', True, 'Shaders', 'Keep discovered Xenia shaders for later launches.', renderer='xenia'),
+ S('vulkan_async_skip_incomplete_frames', 'Hold frames with pending shaders', False, 'Shaders', 'Hold the previous frame while shaders compile; this may cause stutter.', renderer='xenia'),
+ S('texture_cache_memory_limit_soft', 'Texture cache target (MB)', 384, 'Advanced', minimum=128, maximum=4096, renderer='xenia'),
+ S('texture_cache_memory_limit_hard', 'Texture cache maximum (MB)', 768, 'Advanced', minimum=128, maximum=8192, renderer='xenia'),
+ S('texture_cache_memory_limit_soft_lifetime', 'Unused texture retention (seconds)', 30, 'Advanced', minimum=1, maximum=3600, renderer='xenia'),
+ S('render_target_path_vulkan', 'Render-target method', 'fsi', 'Advanced', 'Choose fragment interlock or framebuffer objects.', (('fsi','Fragment interlock (validated)'),('fbo','Framebuffer objects')), renderer='xenia'),
+ S('gamma_render_target_as_unorm16', '16-bit gamma render targets', False, 'Advanced', 'Keep disabled for the validated Gears rendering path.', renderer='xenia'),
+ S('vulkan_unclamped_vertex_indices', 'Unclamped vertex indices', True, 'Advanced', 'Required by the validated rendering fixes for this game.', renderer='xenia'),
+ S('depth_float24_round', 'Round 24-bit depth', False, 'Advanced', 'Depth-precision compatibility option.', renderer='xenia'),
+ S('depth_float24_convert_in_pixel_shader', 'Pixel-shader depth conversion', False, 'Advanced', 'Can improve depth matching on some paths at a substantial GPU cost.', renderer='xenia'),
+ S('occlusion_query_enable', 'Occlusion queries', True, 'Advanced', 'Allow the game to query whether geometry is visible.', renderer='xenia'),
+ S('vulkan_async_occlusion_queries', 'Asynchronous visibility queries', True, 'Advanced', 'Collect completed visibility results in batches.', renderer='xenia'),
+ S('vulkan_batch_occlusion_queries', 'Group visibility queries', True, 'Advanced', 'Send visibility queries together. Requires asynchronous visibility queries.', renderer='xenia'),
+ S('readback_memexport', 'Copy shader output to CPU memory', False, 'Advanced', 'Copy shader-written data to CPU memory when needed by the game.', renderer='xenia'),
+ S('readback_memexport_fast', 'Buffered shader readbacks', True, 'Advanced', 'When CPU copies are enabled, reuse a completed previous result when available. Otherwise waits for the GPU; bursts can cause long freezes.', renderer='xenia'),
+ S('gow3_60fps', 'Unlock original 30 FPS game cap', True, 'Advanced', 'Required for limits above 30 FPS. The frame-rate limit setting supplies the actual ceiling.'),
+ S('gow3_movie_pacing', 'Smooth prerecorded movie timing', True, 'Advanced', 'Poll movie timing every millisecond instead of every 25 ms. Keeps the video’s original frame rate.'),
+ S('mnk_mode', 'Mouse and keyboard controls', True, 'Input', 'Emulate an Xbox controller with the mouse and keyboard. Disable to use a gamepad without keyboard/mouse emulation.'),
+]
+BY_KEY = {s.key:s for s in SETTINGS}
+# The C++ watcher applies only these reviewed settings, on their owning threads.
+LIVE_SETTINGS = {
+    'fullscreen', 'window_width', 'window_height', 'gow3_frame_limit_mode', 'framerate_limit',
+    'present_effect', 'present_fsr_sharpness_reduction',
+    'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
+    'present_dither', 'swap_post_effect',
+}
+
+def running_states(path):
+    states = []
+    executable = (ROOT / 'build/bin/gow3').resolve()
+    for status in path.parent.glob(path.name + '.runtime.*.toml'):
+        try:
+            data = tomllib.loads(status.read_text())
+            pid = int(data['pid'])
+            proc = Path('/proc') / str(pid)
+            stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+            if ((proc / 'exe').resolve(strict=True) != executable or
+                    stat[19] != data['start_time'] or
+                    Path(data['config']).resolve() != path.resolve()):
+                continue
+            states.append(data)
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            continue
+    return states
+
+
+def fingerprint(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+def renderer_mode(value):
+    if value == 'reference':
+        return 'xenia'
+    if value not in ('native', 'xenia'):
+        raise ValueError('Renderer: unsupported option')
+    return value
+
+
+def applies(setting, mode):
+    return setting.renderer == 'shared' or setting.renderer == renderer_mode(mode)
+
+
+def visible_settings(values):
+    mode = renderer_mode(values.get('gow3_renderer', 'native'))
+    return [s for s in SETTINGS if applies(s, mode)]
+
+
+def validate_setting(s, value):
+    if type(value) is not type(s.default):
+        if not (type(s.default) is float and type(value) is int):
+            raise ValueError(f'{s.label}: incorrect value type')
+    if s.choices:
+        if value not in [v for v, _ in s.choices]:
+            raise ValueError(f'{s.label}: unsupported option')
+    elif type(value) in (float, int):
+        if not math.isfinite(value) or not s.minimum <= value <= s.maximum:
+            raise ValueError(f'{s.label}: use {s.minimum}–{s.maximum}')
+
+
+def widget_value(setting, values):
+    value = values.get(setting.key, setting.default)
+    if setting.key == 'gow3_renderer':
+        return renderer_mode(value)
+    try:
+        validate_setting(setting, value)
+    except ValueError:
+        # Inactive legacy options remain on disk, but never enter a widget with
+        # an invalid type or range. Selecting that renderer edits valid values.
+        return setting.default
+    return value
+
+
+def validate(values):
+    mode = renderer_mode(values.get('gow3_renderer', 'native'))
+    for key, value in values.items():
+        s = BY_KEY.get(key)
+        if s is None or not applies(s, mode):
+            continue
+        validate_setting(s, mode if key == 'gow3_renderer' else value)
+    if mode == 'xenia' and values['texture_cache_memory_limit_soft'] > values['texture_cache_memory_limit_hard']:
+        raise ValueError('Texture cache target must not exceed its maximum.')
+    if values['gow3_frame_limit_mode'] == 'custom' and values['framerate_limit'] < 1:
+        raise ValueError('Custom maximum must be at least 1 FPS. Select Unlimited to remove the cap.')
+
+def load(path=CONFIG):
+    values = {s.key:s.default for s in SETTINGS}
+    if path.exists(): values.update(tomllib.loads(path.read_text()))
+    # Filtering is owned by the game. Legacy overrides are not editable and
+    # must not survive a settings round-trip as an expert/unknown option.
+    values['anisotropic_override'] = -1
+    values['gow3_renderer'] = renderer_mode(values['gow3_renderer'])
+    validate(values)
+    return values
+
+def save(values, path=CONFIG, expected=None):
+    values = dict(values)
+    values['anisotropic_override'] = -1
+    values['gow3_renderer'] = renderer_mode(values['gow3_renderer'])
+    validate(values)
+    if fingerprint(path) != expected:
+        raise ValueError('The config changed on disk. Reload it before saving.')
+    # Other known and unknown keys survive a GUI round-trip. Saves are atomic.
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = '# Gears of War 3 settings. Edit here or run ./tools/settings.sh.\n'
+    body += '# Apply supported changes live; other changes need a game restart. CLI options override this file.\n\n'
+    body += tomli_w.dumps(values)
+    if path.exists(): shutil.copy2(path, path.with_suffix('.toml.bak'))
+    fd, name = tempfile.mkstemp(prefix=path.name+'.', dir=path.parent)
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(body);f.flush();os.fsync(f.fileno())
+        os.replace(name,path)
+    finally:
+        if os.path.exists(name): os.unlink(name)
+    return fingerprint(path)
