@@ -3,7 +3,9 @@
 //   depth   = max(world depth, depth of draws after the world depth was taken)
 //             (reverse-Z, so max is nearest; Gears re-renders the player after
 //             clearing the world depth)
-//   motion  = camera reprojection of that depth, in pixels, previous - current
+//   motion  = camera reprojection of that depth, in pixels, previous - current;
+//             where the game's own velocity pass drew a moving object (or the
+//             camera-attached player), its full screen motion instead
 //   reactive= 1 where the HUD changed the frame after the scene was finished
 #extension GL_EXT_samplerless_texture_functions : require
 
@@ -16,13 +18,19 @@ layout(binding = 3) uniform texture2D hud_after;        // final frame
 layout(binding = 4, r32f) uniform writeonly image2D depth_out;
 layout(binding = 5, rg16f) uniform writeonly image2D motion_out;
 layout(binding = 6, r8) uniform writeonly image2D reactive_out;
+// UE3 velocity buffer at half resolution: clampLength(ndc motion * scale)
+// * 0.5 + 0.5, current minus previous; 0 where nothing was drawn.
+layout(binding = 7) uniform texture2D object_velocity;
 
 layout(push_constant) uniform Constants {
   // Rows of the current-NDC -> previous-clip matrix (row-vector convention).
   vec4 reprojection[4];
   uvec2 size;
-  uint flags;  // 1: late depth valid, 2: HUD snapshot valid, 4: world depth valid
+  uint flags;  // 1: late depth, 2: HUD snapshot, 4: world depth, 8: velocity,
+              // 16: velocity in blue/green (resolve swapped red and blue)
   float min_depth;  // Depth of a point at infinity; sky clears below it.
+  vec2 velocity_scale;  // Screen pixels per encoded unit (x right, y down).
+  vec2 jitter;          // This frame's jitter in pixels; the game's velocity includes it.
 } pc;
 
 void main() {
@@ -44,6 +52,17 @@ void main() {
   if (clip.w > 1e-6) {
     const vec2 previous = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
     motion = (previous - uv) * vec2(pc.size);
+  }
+  if ((pc.flags & 8u) != 0u) {
+    const vec4 texel = texelFetch(object_velocity, p / 2, 0);
+    const vec2 encoded = (pc.flags & 16u) != 0u ? texel.bg : texel.rg;
+    if (any(greaterThan(encoded, vec2(0.5 / 255.0)))) {
+      // Current (jittered) minus previous, in pixels; motion vectors are
+      // previous minus the unjittered current position.
+      // 8-bit UNORM stores the game's 0.5 (no motion) as 128/255.
+      const vec2 velocity = (encoded - 128.0 / 255.0) * 2.0 * pc.velocity_scale;
+      motion = pc.jitter - velocity;
+    }
   }
   imageStore(motion_out, p, vec4(motion, 0.0, 0.0));
 

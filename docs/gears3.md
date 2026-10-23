@@ -176,8 +176,11 @@ The runtime logs the actual swapchain dimensions.
 
 With **Upscaling** set to a temporal mode, the native renderer jitters the
 camera by a sub-pixel amount each frame and hands the upscaler the scene depth,
-camera motion vectors and a mask of the HUD (taken from the frame just before
-the game's first HUD draw, so HUD and subtitles are never smeared by history).
+motion vectors and a mask of the HUD. Motion comes from the camera, and for
+moving characters and objects from the game's own motion-blur velocity pass
+(the player, attached to the camera, is treated as still on screen); cutscenes
+have no velocity pass and use camera motion only. The HUD mask is taken from the frame just before
+the game's first HUD draw, so HUD and subtitles are never smeared by history.
 Menus, movies and loading screens have no 3D scene; they use FSR 1.
 
 | `present_effect` | Upscaler | Platforms |

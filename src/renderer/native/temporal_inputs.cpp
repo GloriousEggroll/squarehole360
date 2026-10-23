@@ -11,7 +11,8 @@ namespace gow3::renderer {
 using namespace plume;
 namespace {
 constexpr size_t kVertexConstants=0x780;
-constexpr uint32_t kFlagLateDepth=1,kFlagHud=2,kFlagWorldDepth=4;
+constexpr size_t kPixelConstants=0x1780;
+constexpr uint32_t kFlagLateDepth=1,kFlagHud=2,kFlagWorldDepth=4,kFlagVelocity=8,kFlagVelocitySwapped=16;
 // Frames handed to the presenter are reused only after this many newer frames,
 // in addition to the presenter having released them.
 constexpr uint64_t kFrameReuseDistance=8;
@@ -26,6 +27,10 @@ void StoreFloat(std::span<uint8_t> state,size_t offset,float value) {
 }
 float Constant(std::span<const uint8_t> state,unsigned reg,unsigned component) {
     return LoadFloat(state,kVertexConstants+reg*16+component*4);
+}
+uint32_t Register(std::span<const uint8_t> state,size_t offset) {
+    uint32_t word;std::memcpy(&word,state.data()+offset,4);
+    return std::byteswap(word);
 }
 float Halton(uint32_t index,uint32_t base) {
     float result=0,fraction=1;
@@ -61,20 +66,22 @@ std::array<double,3> Column(const NativeTemporalCamera& camera,int column) {
     return {camera.view_projection[0][column],camera.view_projection[1][column],camera.view_projection[2][column]};
 }
 double Dot(const std::array<double,3>& a,const std::array<double,3>& b) {return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
-const std::array<RenderDescriptorRange,7> kRanges{{
+const std::array<RenderDescriptorRange,8> kRanges{{
     {RenderDescriptorRangeType::TEXTURE,0,1},
     {RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,1,1},
     {RenderDescriptorRangeType::TEXTURE,2,1},
     {RenderDescriptorRangeType::TEXTURE,3,1},
     {RenderDescriptorRangeType::READ_WRITE_TEXTURE,4,1},
     {RenderDescriptorRangeType::READ_WRITE_TEXTURE,5,1},
-    {RenderDescriptorRangeType::READ_WRITE_TEXTURE,6,1}}};
+    {RenderDescriptorRangeType::READ_WRITE_TEXTURE,6,1},
+    {RenderDescriptorRangeType::TEXTURE,7,1}}};
 struct PushConstants {
     std::array<std::array<float,4>,4> reprojection;
     uint32_t width,height,flags;
     float min_depth;
+    std::array<float,2> velocity_scale,jitter;
 };
-static_assert(sizeof(PushConstants)==80);
+static_assert(sizeof(PushConstants)==96);
 VkFormat Format(const RenderTexture& texture) {return static_cast<const VulkanTexture&>(texture).imageFormat;}
 rex::ui::vulkan::TemporalUpscaleImage Describe(RenderTexture& texture) {
     auto& vk=static_cast<VulkanTexture&>(texture);
@@ -153,6 +160,23 @@ bool NativeTemporalIsHudDraw(std::span<const uint8_t> state,uint32_t width,uint3
            std::abs(Constant(state,9,0)+1.0f)<0.01f&&std::abs(Constant(state,9,1)-1.0f)<0.01f;
 }
 
+bool NativeTemporalIsVelocityDraw(std::span<const uint8_t> state,uint32_t target_width,
+        uint32_t target_height,uint32_t frame_width,uint32_t frame_height) {
+    if(state.size()<0x2940||!frame_width||!frame_height)return false;
+    if(target_width*2!=frame_width||target_height*2!=frame_height)return false;
+    // Scene-view (reverse-Z) viewport, colour writes to red and green only.
+    return LoadFloat(state,0x2918)==-1.f&&LoadFloat(state,0x291c)==1.f&&(Register(state,0x28dc)&15)==3;
+}
+
+std::optional<std::array<float,2>> NativeTemporalVelocityScale(std::span<const uint8_t> state,
+        uint32_t frame_width,uint32_t frame_height) {
+    if(state.size()<kPixelConstants+12*16)return std::nullopt;
+    const float x=LoadFloat(state,kPixelConstants+11*16),y=LoadFloat(state,kPixelConstants+11*16+4);
+    if(!std::isfinite(x)||!std::isfinite(y)||std::abs(x)<1e-6f||std::abs(y)<1e-6f)return std::nullopt;
+    // ndc.x = encoded.x / c11.x; screen y points down while ndc y points up.
+    return std::array<float,2>{0.5f*float(frame_width)/x,-0.5f*float(frame_height)/y};
+}
+
 std::array<std::array<float,4>,4> NativeTemporalReprojection(
         const NativeTemporalCamera& current,const NativeTemporalCamera& previous) {
     // translated_prev = translated_cur + (c5_prev - c5_cur) * w.
@@ -213,6 +237,7 @@ bool NativeTemporalInputs::BeginFrame(uint32_t width,uint32_t height) {
     phase_=uint32_t(frame_id_%std::max(request.jitter_phase_count,1u));
     jitter_=NativeTemporalJitterForPhase(phase_,width,height);
     camera_.reset();world_depth_=nullptr;hud_source_=nullptr;current_.reset();
+    velocity_=nullptr;velocity_swapped_=false;velocity_scale_={};
     return true;
 }
 
@@ -232,6 +257,20 @@ void NativeTemporalInputs::ObserveDepthResolve(RenderTexture* resolved) {
     if(desc.width!=width_||desc.height!=height_)return;
     if(Format(*resolved)!=VK_FORMAT_R32_SFLOAT)return;
     world_depth_=resolved;
+}
+
+void NativeTemporalInputs::ObserveVelocityDraw(std::span<const uint8_t> state) {
+    if(!active_||velocity_scale_[0]!=0)return;
+    // The player's draws write zero velocity with c11 = 0; any other draw of
+    // the pass carries the frame's scale.
+    if(const auto scale=NativeTemporalVelocityScale(state,width_,height_))velocity_scale_=*scale;
+}
+
+void NativeTemporalInputs::ObserveVelocityResolve(RenderTexture* resolved,bool red_blue_swapped) {
+    if(!active_||!resolved)return;
+    const auto& desc=static_cast<const VulkanTexture&>(*resolved).desc;
+    if(desc.width*2!=width_||desc.height*2!=height_)return;
+    velocity_=resolved;velocity_swapped_=red_blue_swapped;
 }
 
 void NativeTemporalInputs::RecordHudSnapshot(RenderCommandList& commands,RenderTexture& surface) {
@@ -277,10 +316,15 @@ std::shared_ptr<NativeTemporalInputs::Frame> NativeTemporalInputs::AcquireFrame(
 }
 
 std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInputs::Finish(
-        RenderCommandList& commands,RenderTexture* world_depth,RenderTexture* late_depth,RenderTexture* hud_final) {
+        RenderCommandList& commands,RenderTexture* world_depth,RenderTexture* late_depth,RenderTexture* hud_final,
+        RenderTexture* velocity) {
     if(!active_)return nullptr;
     active_=false;
     if(world_depth!=world_depth_)world_depth=nullptr;
+    // Per-object motion needs both the buffer and the frame's scale; a frame
+    // with only zero-velocity draws (the player alone) has no scale but its
+    // buffer still marks the player as not moving on screen.
+    if(velocity!=velocity_)velocity=nullptr;
     const auto now=std::chrono::steady_clock::now();
     const float frame_ms=last_finish_.time_since_epoch().count()?
         std::clamp(std::chrono::duration<float,std::milli>(now-last_finish_).count(),1.0f,100.0f):16.667f;
@@ -309,15 +353,19 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     push.reprojection=NativeTemporalReprojection(*camera_,reset?*camera_:*previous_camera_);
     push.width=width_;push.height=height_;
     push.min_depth=std::max(projection.infinity_depth,1e-6f);
+    push.velocity_scale=velocity_scale_;
+    push.jitter={jitter_.pixels_x,jitter_.pixels_y};
 
     const bool hud=frame->hud&&hud_source_&&hud_final==hud_source_;
     const bool late=late_depth&&static_cast<const VulkanTexture&>(*late_depth).desc.width==width_&&
         static_cast<const VulkanTexture&>(*late_depth).desc.height==height_&&
         (Format(*late_depth)==VK_FORMAT_D32_SFLOAT_S8_UINT||Format(*late_depth)==VK_FORMAT_D32_SFLOAT);
-    push.flags=(late?kFlagLateDepth:0)|(hud?kFlagHud:0)|(world_depth?kFlagWorldDepth:0);
+    push.flags=(late?kFlagLateDepth:0)|(hud?kFlagHud:0)|(world_depth?kFlagWorldDepth:0)|
+        (velocity?kFlagVelocity:0)|(velocity&&velocity_swapped_?kFlagVelocitySwapped:0);
+    statistics_.velocity_frames+=velocity!=nullptr;
 
     const BorrowedLayout late_layout(late?late_depth:nullptr),hud_layout(hud?hud_final:nullptr),
-        world_layout(world_depth);
+        world_layout(world_depth),velocity_layout(velocity);
     if(late) {
         commands.barriers(RenderBarrierStage::COPY,RenderTextureBarrier(late_depth,RenderTextureLayout::COPY_SOURCE));
         commands.barriers(RenderBarrierStage::COPY,RenderBufferBarrier(frame->late_depth.get(),RenderBufferAccess::WRITE));
@@ -331,7 +379,9 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     RenderTexture* world=world_depth?world_depth:frame->dummy_texture.get();
     RenderTexture* before=hud?frame->hud.get():frame->dummy_texture.get();
     RenderTexture* after=hud?hud_final:frame->dummy_texture.get();
-    std::array<RenderTextureBarrier,6> barriers{
+    RenderTexture* motion=velocity?velocity:frame->dummy_texture.get();
+    std::array<RenderTextureBarrier,7> barriers{
+        RenderTextureBarrier(motion,RenderTextureLayout::SHADER_READ),
         RenderTextureBarrier(world,RenderTextureLayout::SHADER_READ),
         RenderTextureBarrier(before,RenderTextureLayout::SHADER_READ),
         RenderTextureBarrier(after,RenderTextureLayout::SHADER_READ),
@@ -352,6 +402,7 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     sets->setTexture(4,frame->depth.get(),RenderTextureLayout::GENERAL);
     sets->setTexture(5,frame->motion.get(),RenderTextureLayout::GENERAL);
     sets->setTexture(6,frame->reactive.get(),RenderTextureLayout::GENERAL);
+    sets->setTexture(7,motion,RenderTextureLayout::SHADER_READ);
     commands.setComputePipelineLayout(layout_.get());
     commands.setComputePushConstants(0,&push);
     commands.setComputeDescriptorSet(sets,0);
@@ -363,6 +414,7 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
         RenderTextureBarrier(frame->reactive.get(),RenderTextureLayout::SHADER_READ)};
     commands.barriers(RenderBarrierStage::COMPUTE|RenderBarrierStage::GRAPHICS,done.data(),uint32_t(done.size()));
     late_layout.Restore(commands);hud_layout.Restore(commands);world_layout.Restore(commands);
+    velocity_layout.Restore(commands);
 
     auto inputs=std::make_shared<rex::ui::vulkan::TemporalUpscaleInputs>();
     inputs->width=width_;inputs->height=height_;
@@ -383,15 +435,18 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     previous_camera_=camera_;history_valid_=true;
     if(++statistics_.produced==1||statistics_.produced%3600==0)
         REXLOG_INFO("Temporal inputs {}x{}: frames {} produced {} jittered draws {} HUD snapshots {} resets {}; "
-                    "near {:.2f} fov {:.1f} deg, world depth {}, late depth {}, HUD {}",
+                    "near {:.2f} fov {:.1f} deg, world depth {}, late depth {}, HUD {}; object motion frames {} "
+                    "(scale {:.1f} px)",
                     width_,height_,statistics_.frames,statistics_.produced,statistics_.jittered_draws,
                     statistics_.hud_snapshots,statistics_.resets,projection.near_plane,
-                    projection.fov_y*57.29578f,world_depth!=nullptr,late,hud);
+                    projection.fov_y*57.29578f,world_depth!=nullptr,late,hud,statistics_.velocity_frames,
+                    velocity_scale_[0]);
     return inputs;
 }
 
 void NativeTemporalInputs::Abort() {
     active_=false;history_valid_=false;camera_.reset();world_depth_=nullptr;hud_source_=nullptr;current_.reset();
+    velocity_=nullptr;
 }
 
 }  // namespace gow3::renderer

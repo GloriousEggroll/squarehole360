@@ -134,5 +134,23 @@ int main() {
     assert(NativeTemporalIsHudDraw(hud,w,h));
     assert(!NativeTemporalIsHudDraw(hud,640,360));
     assert(!NativeTemporalIsHudDraw(state,w,h));
+    // Velocity pass: half-size scene-view draw writing red and green, with the
+    // capture's PS c11 = (8.84598, -4.975863): 72.35 px per unit on both axes.
+    std::vector<uint8_t> velocity(0x3600);
+    auto store_word=[&](size_t offset,uint32_t value) {
+        const uint32_t word=std::byteswap(value);std::memcpy(velocity.data()+offset,&word,4);
+    };
+    auto store_float=[&](size_t offset,float value){store_word(offset,std::bit_cast<uint32_t>(value));};
+    store_float(0x2918,-1.f);store_float(0x291c,1.f);store_word(0x28dc,3);
+    store_float(0x1780+11*16,8.84598f);store_float(0x1780+11*16+4,-4.975863f);
+    assert(NativeTemporalIsVelocityDraw(velocity,w/2,h/2,w,h));
+    assert(!NativeTemporalIsVelocityDraw(velocity,w,h,w,h));
+    const auto scale=NativeTemporalVelocityScale(velocity,w,h);
+    assert(scale);
+    Near((*scale)[0],72.35,0.01,"velocity scale x");Near((*scale)[1],72.35,0.01,"velocity scale y");
+    store_word(0x28dc,15);
+    assert(!NativeTemporalIsVelocityDraw(velocity,w/2,h/2,w,h));
+    store_float(0x1780+11*16,0);store_float(0x1780+11*16+4,0);
+    assert(!NativeTemporalVelocityScale(velocity,w,h));  // the player's zero-velocity draws
     std::puts("Temporal inputs PASS");
 }

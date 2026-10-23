@@ -43,6 +43,15 @@ void NativeTemporalApplyJitter(std::span<uint8_t> state,const NativeTemporalJitt
 // True for a UE3 Canvas (HUD) draw: VS c6..c9 hold the pixel orthographic
 // matrix for a width x height target.
 bool NativeTemporalIsHudDraw(std::span<const uint8_t> state,uint32_t width,uint32_t height);
+// UE3 velocity pass (per-object motion): a scene-view draw at half the frame
+// size writing only red and green. It stores clampLength(ndc delta * c11.xy)
+// * 0.5 + 0.5, current minus previous position, with PS c11 the scale; 0 is
+// "no moving object". Returns screen pixels per encoded unit at width x
+// height, or nullopt for a draw that is not one (or writes zero velocity).
+bool NativeTemporalIsVelocityDraw(std::span<const uint8_t> state,uint32_t target_width,
+    uint32_t target_height,uint32_t frame_width,uint32_t frame_height);
+std::optional<std::array<float,2>> NativeTemporalVelocityScale(std::span<const uint8_t> state,
+    uint32_t frame_width,uint32_t frame_height);
 // Row-vector matrix mapping current NDC (x, y, z, 1) to previous clip space.
 std::array<std::array<float,4>,4> NativeTemporalReprojection(
     const NativeTemporalCamera& current,const NativeTemporalCamera& previous);
@@ -68,6 +77,12 @@ public:
     // passes it (still alive) to Finish as `world_depth`.
     void ObserveDepthResolve(plume::RenderTexture* resolved);
     plume::RenderTexture* world_depth() const noexcept {return world_depth_;}
+    // A velocity-pass draw (see NativeTemporalIsVelocityDraw).
+    void ObserveVelocityDraw(std::span<const uint8_t> state);
+    // The resolve of the velocity target; `red_blue_swapped` when the copy
+    // swapped channels (velocity then in blue and green).
+    void ObserveVelocityResolve(plume::RenderTexture* resolved,bool red_blue_swapped);
+    plume::RenderTexture* velocity() const noexcept {return velocity_;}
     bool WantsHudSnapshot() const noexcept {return active_&&camera_&&!hud_source_;}
     // Records a copy of `surface` (the HUD's colour target) into `commands`.
     void RecordHudSnapshot(plume::RenderCommandList& commands,plume::RenderTexture& surface);
@@ -78,11 +93,12 @@ public:
     // `hud_final` the HUD target. Returns nullptr when this frame has no inputs.
     std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> Finish(
         plume::RenderCommandList& commands,plume::RenderTexture* world_depth,
-        plume::RenderTexture* late_depth,plume::RenderTexture* hud_final);
+        plume::RenderTexture* late_depth,plume::RenderTexture* hud_final,
+        plume::RenderTexture* velocity=nullptr);
     // Abandons the frame without producing inputs (e.g. failed presentation).
     void Abort();
 
-    struct Statistics {uint64_t frames=0,produced=0,jittered_draws=0,hud_snapshots=0,resets=0;};
+    struct Statistics {uint64_t frames=0,produced=0,jittered_draws=0,hud_snapshots=0,resets=0,velocity_frames=0;};
     const Statistics& statistics() const noexcept {return statistics_;}
 
 private:
@@ -101,6 +117,9 @@ private:
     NativeTemporalJitter jitter_;
     std::optional<NativeTemporalCamera> camera_,previous_camera_;
     plume::RenderTexture* world_depth_=nullptr;
+    plume::RenderTexture* velocity_=nullptr;
+    bool velocity_swapped_=false;
+    std::array<float,2> velocity_scale_{};
     plume::RenderTexture* hud_source_=nullptr;
     // This frame's output set, acquired at the HUD snapshot or at Finish.
     std::shared_ptr<Frame> current_;

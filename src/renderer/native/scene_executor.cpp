@@ -882,6 +882,8 @@ struct SceneExecutor::State {
     bool temporal_frame_open_=false;
     uint32_t temporal_width_=0,temporal_height_=0;
     std::vector<uint8_t> temporal_constants_;
+    // EDRAM base of this frame's velocity-pass target until it is resolved.
+    int64_t temporal_velocity_base_=-1;
     // False only when every surfaces_ image is clean; lets per-draw commit scans skip the map.
     bool surfaces_maybe_dirty_=false;
     // Working-image <-> packed EDRAM conversions (hardware render targets).
@@ -6309,6 +6311,11 @@ public:
         dest.version=resolve_memory_->Version(layout,address);
         if(temporal_&&slot==4&&conversion==PassTransfer::Conversion::DepthFloat24)
             temporal_->ObserveDepthResolve(dest.texture.get());
+        if(temporal_&&slot!=4&&temporal_velocity_base_>=0&&
+           SurfaceStorage(source).base==uint32_t(temporal_velocity_base_)) {
+            temporal_->ObserveVelocityResolve(dest.texture.get(),destination_swap);
+            temporal_velocity_base_=-1;
+        }
         if(packed_color_source) {
             auto& stats=direct_packed_color_resolve_stats_;++stats.selected;++stats.packed_sources;
             stats.source_pixels+=kNativeDirectPackedColorResolvePixels;
@@ -6998,6 +7005,10 @@ public:
         if(temporal_&&temporal_->active()&&raw.size()>=0x2780&&
            std::bit_cast<float>(BE(raw,0x2918))==-1.f&&std::bit_cast<float>(BE(raw,0x291c))==1.f&&
            temporal_->ObserveSceneDraw(raw)) {
+            if(color&&NativeTemporalIsVelocityDraw(raw,extent_width,extent_height,temporal_width_,temporal_height_)) {
+                temporal_->ObserveVelocityDraw(raw);
+                temporal_velocity_base_=storage(0).base;
+            }
             temporal_constants_.assign(raw.begin(),raw.end());
             NativeTemporalApplyJitter(temporal_constants_,temporal_->jitter());
             constant_source=temporal_constants_;
@@ -8639,7 +8650,7 @@ public:
     // frame-sized target snapshots the colour target before the HUD.
     void TemporalBeforeDraw(const DrawInput& o) {
         if(!temporal_frame_open_) {
-            temporal_frame_open_=true;
+            temporal_frame_open_=true;temporal_velocity_base_=-1;
             temporal_->BeginFrame(temporal_width_,temporal_height_);
         }
         if(!temporal_->WantsHudSnapshot())return;
@@ -8653,9 +8664,11 @@ public:
     }
     std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> TemporalFinish(RenderCommandList& commands) {
         // Every input must still be owned by the executor's caches.
-        RenderTexture* world=nullptr;RenderTexture* late=nullptr;RenderTexture* hud=nullptr;
-        for(const auto& [key,image]:resolved_)
+        RenderTexture* world=nullptr;RenderTexture* late=nullptr;RenderTexture* hud=nullptr;RenderTexture* velocity=nullptr;
+        for(const auto& [key,image]:resolved_) {
             if(image.texture.get()==temporal_->world_depth())world=image.texture.get();
+            if(image.texture.get()==temporal_->velocity())velocity=image.texture.get();
+        }
         for(const auto& [key,image]:surfaces_) {
             if(!image.texture)continue;
             if(image.texture.get()==temporal_->hud_source())hud=image.texture.get();
@@ -8663,8 +8676,8 @@ public:
             if(storage.depth&&storage.base==0&&storage.width==temporal_width_&&storage.height==temporal_height_)
                 late=image.texture.get();
         }
-        temporal_frame_open_=false;
-        return temporal_->Finish(commands,world,late,hud);
+        temporal_frame_open_=false;temporal_velocity_base_=-1;
+        return temporal_->Finish(commands,world,late,hud,velocity);
     }
     void EndFrame(const Json& o) {
         if(config_.diagnose_texture_eviction_reloads)try {SetTextureCensusFrame(o.at("frame").get<uint32_t>());}
