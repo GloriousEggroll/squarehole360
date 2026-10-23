@@ -25,6 +25,10 @@ War 2** and **Gears of War: Judgment** next.
 - **Threading.** The game's render thread only captures each draw. Planning,
   command recording and driver submission run on their own threads.
 - **Presentation.** Native Wayland with HDR10 and VRR; X11 fallback.
+- **Upscaling.** FSR 1, plus temporal FSR 3.1, DLSS and XeSS fed with the
+  renderer's depth, motion vectors and jitter; FSR 3.1 frame generation; a
+  low-latency mode and AMD Anti-Lag. See the
+  [guide](docs/gears3.md#temporal-upscaling-frame-generation-and-latency-native).
 
 [docs/renderer-vs-xenia.md](docs/renderer-vs-xenia.md) compares this approach
 with Xenia. [docs/direct-renderer-plan.md](docs/direct-renderer-plan.md)
@@ -51,8 +55,12 @@ The GPU's command processor, not its shaders, is now the limit.
 - Clang, CMake 3.25+, Ninja, Python 3.11+
 - A modern Vulkan GPU and driver (developed and tested on an AMD RX 9070 XT
   with RADV)
+- Wine, to compile the FidelityFX (FSR 3.1) shaders; without it FSR 3.1 and
+  frame generation are left out of the build
 - Optional: jemalloc and OpenSSL development packages (used automatically);
-  PySide6 and tomli-w for the standalone settings editor
+  PySide6 and tomli-w for the standalone settings editor; the NVIDIA DLSS and
+  Intel XeSS SDKs, downloaded from their official releases by
+  `tools/fetch-vendor-sdks.sh --accept-licenses` (not redistributed here)
 - Your own Gears of War 3 disc image. The supported executable is
   `default.xex` with SHA-256 `4e5d00b8…f8f790`; the importer checks it.
 

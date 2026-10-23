@@ -100,8 +100,9 @@ Run `./tools/settings.sh` to edit them separately from the game (Python 3.11+,
 PySide6 and tomli-w are required). **Window mode** offers **Windowed** and
 **Borderless fullscreen**. Returning to Windowed restores the configured client
 size (1280×720 by default). Click **Apply**: window mode and size, the frame-rate
-ceiling and dithering can update while playing. Xenia also supports live
-FSR/CAS/bilinear selection, sharpening, FSR pass count and FXAA. The editor waits for the running game to
+ceiling, dithering, the upscaler (FSR 1, FSR 3.1, DLSS, XeSS, CAS, bilinear),
+sharpening, frame generation and the latency options can update while playing.
+Xenia also supports live FSR pass count and FXAA. The editor waits for the running game to
 acknowledge the saved file; resource/compatibility options show **Game restart
 needed** at the bottom. Reverting those options clears the notice. The editor
 preserves unknown settings, keeps a `.toml.bak`, and refuses to overwrite external
@@ -115,8 +116,8 @@ Native owns all scene drawing, copies, visibility queries and frame sources;
 it never switches to Xenia after an error. Unsupported native work stops the run
 with an error. Native currently uses 1× internal resolution, hardware render targets
 (the exact fragment-interlock mode remains selectable with
-`gow3_native_hardware_render_targets = false`), exact occlusion queries and
-bilinear output scaling. These prerequisites are
+`gow3_native_hardware_render_targets = false`) and exact occlusion queries.
+These prerequisites are
 selected automatically without overwriting saved Xenia preferences.
 To explicitly select Xenia:
 
@@ -158,9 +159,10 @@ framerate_limit = 60.0         # used by "custom"
 vsync = false
 ```
 
-Xenia image settings include 1×/2×/3× internal rendering, FSR 1, CAS, bilinear
-scaling, sharpening, FXAA, and MSAA support. Native uses 1× internal resolution
-and bilinear scaling; select Xenia to use its additional image options.
+Both renderers offer FSR 1, CAS and bilinear output scaling and sharpening.
+Native also offers temporal upscalers, which use depth, motion vectors and
+sub-pixel jitter from the scene (see below). Xenia adds 1×/2×/3× internal
+rendering, FXAA and MSAA support.
 Dithering is available in both renderers. Both always use the game's original
 per-texture filtering; legacy `anisotropic_override` values normalize to `-1`.
 FSR 1 scales to the actual window or fullscreen surface; for 720p to 4K use
@@ -168,8 +170,44 @@ native internal resolution and a 3840×2160 desktop surface. Fractional desktop
 scaling uses Wayland's preferred fractional scale and viewport protocol, so
 fullscreen can use the physical 4K output. Xwayland fallback may expose a
 smaller surface that the compositor scales.
-The runtime logs the actual swapchain dimensions. **FSR 4 is not implemented**;
-the existing presentation path lacks its motion, depth and jitter inputs.
+The runtime logs the actual swapchain dimensions.
+
+### Temporal upscaling, frame generation and latency (Native)
+
+With **Upscaling** set to a temporal mode, the native renderer jitters the
+camera by a sub-pixel amount each frame and hands the upscaler the scene depth,
+camera motion vectors and a mask of the HUD (taken from the frame just before
+the game's first HUD draw, so HUD and subtitles are never smeared by history).
+Menus, movies and loading screens have no 3D scene; they use FSR 1.
+
+| `present_effect` | Upscaler | Platforms |
+|---|---|---|
+| `fsr3` | AMD FSR 3.1 | All GPUs, Linux and Windows |
+| `dlss` | NVIDIA DLSS Super Resolution (NGX) | NVIDIA RTX, Linux and Windows |
+| `xess` | Intel XeSS Super Resolution | Windows (also Proton/Wine); any recent GPU |
+
+DLSS and XeSS need the vendor SDKs fetched at build time
+(`tools/fetch-vendor-sdks.sh`) and fall back to FSR 3.1 when the GPU, driver or
+library cannot run them; the log says which upscaler is active. FSR 4 and XeSS
+frame generation exist only for Direct3D 12 and are not available to this
+Vulkan renderer.
+
+**Frame generation** (`present_frame_generation = true`, with any temporal
+upscaler) uses FSR 3.1 frame interpolation: between two game frames it shows a
+generated frame, then the real frame half a frame later. Motion looks smoother;
+input still follows the real frame rate and the real frame is shown slightly
+later, so it suits a base rate of 60 FPS or more. The HUD of the real frame is
+drawn over generated frames. On an RX 9070 XT at 4K the base rate in the Act 1
+pan drops from about 135 to about 83 FPS, presenting about 166 frames per second.
+
+**Low latency** (`gow3_low_latency = true`) keeps the game at most one frame
+ahead of the renderer and applies the frame-rate limit on the game thread just
+before the next frame reads input, instead of holding finished frames back. It
+cost no measurable throughput in testing. **AMD Anti-Lag**
+(`present_anti_lag = true`) additionally uses the driver's `VK_AMD_anti_lag`:
+built into AMD's Windows driver, and on Linux provided by Mesa's anti-lag layer,
+which the game enables at startup (so turning it on takes effect after a
+restart there). Both options can be combined with frame generation.
 
 Native Wayland presentation is the default. The launcher first checks Vulkan
 Wayland support; if unavailable it uses X11/Xwayland with HDR disabled. Set
