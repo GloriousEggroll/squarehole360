@@ -63,6 +63,20 @@ if(GOW3_ENABLE_FIDELITYFX)
     endif()
 endif()
 
+# Vendor upscaler SDKs fetched by tools/fetch-vendor-sdks.sh (not part of
+# this repository). Present SDKs are built in; absent ones are skipped.
+option(GOW3_VENDOR_UPSCALERS "Build DLSS and XeSS when their SDKs are in vendor-sdks/" ON)
+if(GOW3_VENDOR_UPSCALERS)
+    set(GOW3_DLSS_SDK "${CMAKE_CURRENT_SOURCE_DIR}/vendor-sdks/dlss-v310.9.16")
+    set(GOW3_XESS_SDK "${CMAKE_CURRENT_SOURCE_DIR}/vendor-sdks/xess-v3.0.2")
+    if(EXISTS "${GOW3_DLSS_SDK}/.complete")
+        set(REXGLUE_DLSS_SDK_DIR "${GOW3_DLSS_SDK}" CACHE PATH "" FORCE)
+    endif()
+    if(EXISTS "${GOW3_XESS_SDK}/.complete")
+        set(REXGLUE_XESS_SDK_DIR "${GOW3_XESS_SDK}" CACHE PATH "" FORCE)
+    endif()
+endif()
+
 include(generated/rexglue.cmake)
 
 # Applies to this directory's targets only, not the SDK added above: keep
@@ -140,6 +154,13 @@ if(TARGET rex_hdr_detection)
         target_include_directories(hdr_transfer_test PRIVATE ${CMAKE_BINARY_DIR})
         target_link_libraries(hdr_transfer_test PRIVATE Vulkan::Vulkan)
     endif()
+endif()
+
+if(WIN32 AND REXGLUE_XESS_SDK_DIR AND GOW3_VULKAN_IMPLIB)
+    add_executable(gow3-xess-context-test tests/xess_context_test.cpp)
+    target_include_directories(gow3-xess-context-test PRIVATE "${REXGLUE_XESS_SDK_DIR}/inc"
+        "${REXSDK_DIR}/thirdparty/vulkan-headers/include")
+    target_link_libraries(gow3-xess-context-test PRIVATE "${GOW3_VULKAN_IMPLIB}")
 endif()
 
 if(TARGET amd_fidelityfx_vk AND NOT WIN32)
@@ -233,6 +254,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
                 "$<TARGET_FILE:Microsoft::DirectXShaderCompiler>" "$<TARGET_FILE_DIR:gow3>"
             VERBATIM)
     endif()
+    foreach(runtime ${REXGLUE_VENDOR_UPSCALER_RUNTIMES})
+        add_custom_command(TARGET gow3 POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${runtime}" "$<TARGET_FILE_DIR:gow3>"
+            VERBATIM)
+    endforeach()
     if(GOW3_ENABLE_GUEST_TRACE)
         target_compile_definitions(gow3 PRIVATE REXGLUE_ENABLE_GUEST_FUNCTION_TRACE=1)
     endif()

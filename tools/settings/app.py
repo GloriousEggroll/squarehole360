@@ -312,9 +312,10 @@ class SettingsWindow(QMainWindow):
             self.widgets['gow3_frame_limit_mode'].currentData() == 'custom')
         self.refresh_vrr_status()
         effect = self.widgets['present_effect'].currentData()
-        self.widgets['present_fsr_sharpness_reduction'].setEnabled(effect in ('fsr', 'fsr3'))
+        temporal = effect in ('fsr3', 'dlss', 'xess')
+        self.widgets['present_fsr_sharpness_reduction'].setEnabled(effect == 'fsr' or temporal)
         self.widgets['present_fsr_max_upsampling_passes'].setEnabled(effect == 'fsr')
-        self.widgets['present_frame_generation'].setEnabled(effect == 'fsr3')
+        self.widgets['present_frame_generation'].setEnabled(temporal)
         self.widgets['present_cas_additional_sharpness'].setEnabled(effect == 'cas')
         for key in ('window_width', 'window_height'):
             self.widgets[key].setEnabled(not self.widgets['fullscreen'].currentData())

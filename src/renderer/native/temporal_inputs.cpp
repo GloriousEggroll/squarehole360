@@ -194,7 +194,15 @@ NativeTemporalInputs::NativeTemporalInputs(RenderDevice& device,std::span<const 
     supported_=pipeline_&&static_cast<VulkanComputePipeline&>(*pipeline_).vk;
     if(!supported_)REXLOG_WARN("Temporal upscaling inputs unavailable: compute pipeline creation failed");
 }
-NativeTemporalInputs::~NativeTemporalInputs()=default;
+NativeTemporalInputs::~NativeTemporalInputs() {
+    // The presenter may still hold frames through TemporalUpscaleInputs::
+    // keep_alive, but Plume objects must go with the device that owns them.
+    // The renderer is idle at this point and produces no further inputs.
+    for(auto& frame:frames_) {
+        frame->descriptors.reset();frame->late_depth.reset();frame->hud.reset();
+        frame->depth.reset();frame->motion.reset();frame->reactive.reset();frame->dummy_texture.reset();
+    }
+}
 
 bool NativeTemporalInputs::BeginFrame(uint32_t width,uint32_t height) {
     const auto request=rex::ui::vulkan::GetTemporalUpscaleRequest();

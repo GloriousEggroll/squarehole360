@@ -140,7 +140,8 @@ void Apply(Watch& w, const Values& desired) {
     } else {
       using Effect = rex::ui::Presenter::GuestOutputPaintConfig::Effect;
       if (key == "present_effect")
-        paint.SetEffect(value == "fsr" ? Effect::kFsr : value == "fsr3" ? Effect::kFsr3
+        paint.SetEffect(value == "fsr" ? Effect::kFsr
+                        : value == "fsr3" || value == "dlss" || value == "xess" ? Effect::kFsr3
                         : value == "cas" ? Effect::kCas : Effect::kBilinear);
       if (key == "present_fsr_sharpness_reduction") paint.SetFsrSharpnessReduction(std::stof(value));
       if (key == "present_fsr_max_upsampling_passes") paint.SetFsrMaxUpsamplingPasses(std::stoi(value));
