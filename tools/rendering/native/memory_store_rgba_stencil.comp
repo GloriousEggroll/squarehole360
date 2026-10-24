@@ -26,7 +26,7 @@ uint address(uvec2 p) {
         uint wide=pc.log_bytes==3?1u:0u,width=wide!=0?40u:80u;
         uint tile=(p.y/16)*pc.pitch*(wide+1)+(p.x/width),column=p.x%width;
         if(pc.tiled==3)column=column<40?column+40:column-40;
-        return (pc.offset+tile*5120+((p.y%16)*80+column*(wide+1))*4)%(2048*5120);
+        return (pc.offset+tile*5120+((p.y%16)*80+column*(wide+1))*4)%(pc.word_count*4u);
     }
     if(pc.tiled==0)return pc.offset+((p.y*pc.pitch+p.x)<<pc.log_bytes);
     uint macro=((p.x>>5)+(p.y>>5)*((pc.pitch+31)>>5))<<(pc.log_bytes+7);

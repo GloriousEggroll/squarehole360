@@ -1,5 +1,6 @@
 #pragma once
 
+#include "edram_extent.h"
 #include "fsi_state.h"
 #include <optional>
 #include <span>
@@ -45,7 +46,8 @@ inline bool BuiltinReadonlyQueryAllowed(const NativeFsiConstants& raster,
     const uint64_t columns = (uint64_t(width) + 79) / 80;
     const uint64_t rows = (uint64_t(height) + 15) / 16;
     const uint64_t pitch = (uint64_t(raster.pitch) + 79) / 80;
-    return pitch >= columns && (rows - 1) * pitch + columns - 1 < 2048;
+    return pitch >= columns && (rows - 1) * pitch + columns - 1 < 2048 &&
+           NativeEdramLegacyWrapSafe(raster.depth_base, (rows - 1) * pitch + columns - 1);
 }
 
 } // namespace gow3::renderer

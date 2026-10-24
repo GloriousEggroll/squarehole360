@@ -1,5 +1,6 @@
 #pragma once
 
+#include "edram_extent.h"
 #include "fsi_state.h"
 #include <optional>
 #include <span>
@@ -41,7 +42,8 @@ inline bool BuiltinAtomicDepthAllowed(const NativeFsiConstants& raster,
     const uint64_t pitch = (uint64_t(raster.pitch) + 79) / 80;
     // Depth's half-tile bank swap is a permutation. Unique tile displacements
     // below2048 remain unique after adding a wrapping base modulo2048.
-    return pitch >= columns && (rows - 1) * pitch + columns - 1 < 2048;
+    return pitch >= columns && (rows - 1) * pitch + columns - 1 < 2048 &&
+           NativeEdramLegacyWrapSafe(raster.depth_base, (rows - 1) * pitch + columns - 1);
 }
 
 } // namespace gow3::renderer

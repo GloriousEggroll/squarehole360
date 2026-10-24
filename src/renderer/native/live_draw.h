@@ -80,6 +80,10 @@ struct TypedLiveDraw {
     std::vector<TypedGeometry> geometry,up_geometry;
     std::vector<uint32_t> vertex_fetch_slots;
     std::vector<TypedTexture> textures;
+    // A texture the shader samples has no texture bound (the guest fetch
+    // constant is not a texture); the executor skips the draw. Slot and type
+    // of the first such binding, for diagnostics.
+    std::optional<std::pair<uint32_t,uint32_t>> invalid_texture_fetch;
 };
 // Occlusion query control (query_begin/query_end). Holds exactly the fields of
 // the legacy JSON envelope; ToJson reproduces it byte-for-byte, including the

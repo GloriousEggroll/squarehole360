@@ -1,4 +1,5 @@
 #pragma once
+#include "edram_extent.h"
 #include <array>
 #include <cstdint>
 #include <stdexcept>
@@ -67,6 +68,6 @@ inline std::array<uint32_t,16> NativeAtlasDepthRegionLoadParameters(uint32_t wid
         throw std::invalid_argument("Invalid canonical atlas source dispatch");
     return {uint32_t(rectangle[2]-rectangle[0]),uint32_t(rectangle[3]-rectangle[1]),
         uint32_t(rectangle[0]),uint32_t(rectangle[1]),0,0,(pitch+79)/80,2,3,0,
-        22,0,base*5120,2048*1280,0,0};
+        22,0,base*5120,NativeEdramTiles()*1280,0,0};
 }
 } // namespace gow3::renderer

@@ -182,6 +182,18 @@ fullscreen can use the physical 4K output. Xwayland fallback may expose a
 smaller surface that the compositor scales.
 The runtime logs the actual swapchain dimensions.
 
+### Render resolution (experimental)
+
+`gow3_render_height` (default 720) makes the game itself render at a higher
+resolution, for example `--gow3_render_height=1080` for 1920x1080. The engine
+sizes its scene buffers from it and the Scaleform menus scale to fit; no assets
+change. Heights round to a multiple of 8 with a 16:9 width. Above 720p the
+native renderer models 8192 EDRAM tiles instead of the console's 2048, since
+1080p buffers no longer fit in 10 MB. 1080p is the practical maximum: the game
+stores EDRAM positions in 12 bits. Shadow map resolutions are unchanged, and
+gameplay at higher sizes is only partly tested. Requires the native renderer
+and a restart.
+
 ### Temporal upscaling, frame generation and latency (Native)
 
 With **Upscaling** set to a temporal mode, the native renderer jitters the

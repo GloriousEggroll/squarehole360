@@ -9,6 +9,12 @@ namespace rex::ppc { union Register; }
 bool Gow3UncapFrameRate();
 void Gow3SetPresentInterval(rex::ppc::Register& interval);
 void Gow3ConfigureFrameRate(const uint8_t* guest_base);
+void Gow3OverrideScreenSize();
+void Gow3ScreenWidthConstant(rex::ppc::Register& value);
+void Gow3ScreenHeightConstant(rex::ppc::Register& value);
+void Gow3ScaleformScaleMode(rex::ppc::Register& mode);
+void Gow3ScreenWidthFloat(rex::ppc::Register& value);
+void Gow3ScreenHeightFloat(rex::ppc::Register& value);
 void Gow3CaptureUpEnd(rex::ppc::Register& device,rex::ppc::Register& command_end);
 void Gow3CapturePrimitiveChunk(rex::ppc::Register& device,rex::ppc::Register& topology,
     rex::ppc::Register& first,rex::ppc::Register& count,rex::ppc::Register& command_end);

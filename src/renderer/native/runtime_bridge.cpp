@@ -1,3 +1,4 @@
+#include "renderer/native/edram_extent.h"
 #include "renderer/game_profile.h"
 #include "published_query_results.h"
 #include "runtime_bridge.h"
@@ -4248,6 +4249,9 @@ void Gow3StartNativeRenderer(rex::graphics::GraphicsSystem* graphics, const std:
     if (!unsupported.empty()) throw std::runtime_error(unsupported);
     if(NativeRasterRequested()&&(!description.ordered_pixel_interlock||!description.features.fragmentStoresAndAtomics))
       throw std::runtime_error("Native raster authority requires enabled ordered pixel interlock and fragment storage writes");
+    // Render sizes above 720p place surfaces past the console's 2048 EDRAM tiles.
+    SetNativeEdramTiles(REXCVAR_QUERY(int32_t,gow3_render_height)>720?kNativeEdramMaxTiles:2048);
+    if(NativeEdramTiles()!=2048)REXLOG_INFO("Native EDRAM model: {} tiles for the larger render size",NativeEdramTiles());
     state = std::make_shared<RuntimeState>(processor, graphics->memory(), std::move(description), true, cache_root);
     if(state->direct&&(!state->native_raster||!state->deferred_queries||!state->retire_query_prefixes))
       throw std::runtime_error("Direct execution requires native raster with deferred, retired query prefixes");

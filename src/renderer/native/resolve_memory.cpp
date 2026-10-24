@@ -1,5 +1,6 @@
 #include "defined_byte_ranges.h"
 #include "resolve_memory.h"
+#include "edram_extent.h"
 #include "synchronous_gpu_timing.h"
 #include "cpu_write_policy.h"
 #include "live_device.h"
@@ -105,13 +106,13 @@ bool LoadIdentityViewEquivalent(const VulkanTexture& texture,const VulkanDevice&
 uint32_t SurfaceByteOffsetImpl(const SurfaceLayout& s,uint32_t x,uint32_t y) {
     // Addressing derived from Xenia's FSI_LoadEdramOffsets. BSD attribution:
     // texture_data.LICENSE in this directory.
-    if(!s.width||!s.height||!s.pitch||s.pitch>16383||s.base>=2048||x>=s.width||y>=s.height)
+    if(!s.width||!s.height||!s.pitch||s.pitch>16383||s.base>=NativeEdramTiles()||x>=s.width||y>=s.height)
         throw std::runtime_error("Invalid EDRAM surface coordinates");
     const bool wide=Surface64(s);
     const uint32_t tile=(y/16)*((s.pitch+79)/80)*(wide?2:1)+x/(wide?40:80);
     uint32_t column=x%(wide?40:80);
     if(s.depth)column=column<40?column+40:column-40;
-    const uint32_t word=((s.base+tile)*1280+(y%16)*80+column*(wide?2:1))%(2048*1280);
+    const uint32_t word=((s.base+tile)*1280+(y%16)*80+column*(wide?2:1))%((NativeEdramTiles()*1280));
     return word*4;
 }
 // Plume's public depth view selects the depth aspect. Create an additional
@@ -877,9 +878,11 @@ bool ResolveMemory::CanQueueVolumeLoad(const TextureLayout& t,uint32_t address) 
     if(uint64_t(t.width)*t.height*t.layers*32>kMaxQueuedVolumeImageBytes)return false;
     uint32_t format=t.format;
     if(format>=27&&format<=29)format+=3;
-    if(format==54)format=7;
+    // 2_10_10_10_FLOAT_AS_16_16_16_16 stores raw 7e3 bits (64), as the
+    // guest resolve does; titles also sample those bytes as UNorm 2_10_10_10.
+    if(format==54)format=64;
     if(format!=2&&format!=6&&format!=7&&format!=22&&format!=23&&format!=24&&format!=25&&format!=26&&
-       format!=30&&format!=31&&format!=32&&format!=36&&format!=37&&format!=38)return false;
+       format!=30&&format!=31&&format!=32&&format!=36&&format!=37&&format!=38&&format!=64)return false;
     for(uint32_t z=0;z<t.layers;++z) {
         const auto& level=t.levels[z];
         if(level.mip||level.mips||level.layer!=z||level.width!=t.width||level.height!=t.height||
@@ -1039,9 +1042,11 @@ void ResolveMemory::Transfer(RenderTexture& image,const TextureLayout& t,const R
         throw std::runtime_error("Unsupported resolved storage region/layout");
     uint32_t format=t.format;
     if(format>=27&&format<=29)format+=3;
-    if(format==54)format=7;
+    // 2_10_10_10_FLOAT_AS_16_16_16_16 stores raw 7e3 bits (64), as the
+    // guest resolve does; titles also sample those bytes as UNorm 2_10_10_10.
+    if(format==54)format=64;
     if(format!=2&&format!=6&&format!=7&&format!=22&&format!=23&&format!=24&&format!=25&&format!=26&&
-       format!=30&&format!=31&&format!=32&&format!=36&&format!=37&&format!=38)
+       format!=30&&format!=31&&format!=32&&format!=36&&format!=37&&format!=38&&format!=64)
         throw std::runtime_error("Unsupported resolved storage format");
     const auto& level=t.levels.front();
     // Validate all reachable addresses, including tiled swizzles at odd pitches.
@@ -1159,7 +1164,7 @@ void ResolveMemory::Dispatch(RenderTexture& image,Parameters push,bool store,Ren
 }
 const ResolveMemory::Ranges& ResolveMemory::SurfaceFootprint(const SurfaceLayout& s) const {
     SurfaceStorageFormat(s);
-    if(capacity_<2048*5120||!s.width||!s.height||!s.pitch||s.pitch>16383||s.base>=2048||s.width>8192||s.height>8192)
+    if(capacity_<NativeEdramBytes()||!s.width||!s.height||!s.pitch||s.pitch>16383||s.base>=NativeEdramTiles()||s.width>8192||s.height>8192)
         throw std::runtime_error("Invalid EDRAM backing/extent");
     // Layout is independent of contents and ownership. Raster writes update
     // page versions every draw, but cannot change these exact byte ranges.
@@ -1249,8 +1254,8 @@ void ResolveMemory::TransferSurface(RenderTexture& image,const SurfaceLayout& s,
     const auto& desc=static_cast<VulkanTexture&>(image).desc;
     if(desc.width!=s.width||desc.height!=s.height)throw std::runtime_error("EDRAM image extent mismatch");
     const Parameters push{s.width,s.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,s.depth?3u:2u,0,
-        SurfaceStorageFormat(s)|(s.depth&&store?0x80000000u:0),0,s.base*5120,2048*1280,0,0};
-    Dispatch(image,push,store,s.depth&&store?&image:nullptr,0,2048*5120);
+        SurfaceStorageFormat(s)|(s.depth&&store?0x80000000u:0),0,s.base*5120,(NativeEdramTiles()*1280),0,0};
+    Dispatch(image,push,store,s.depth&&store?&image:nullptr,0,NativeEdramBytes());
     if(store)Define(footprint);
 }
 void ResolveMemory::EnableRawFloatCpuTextures(std::span<const uint32_t> code) {
@@ -1372,7 +1377,7 @@ bool ResolveMemory::RestoreColorSurface(RenderTexture& target,const SurfaceLayou
         pipeline=std::move(created);
     }
     // Identical to TransferSurface's load parameters over the whole EDRAM window.
-    constexpr uint32_t bytes=2048*5120;
+    const uint32_t bytes=NativeEdramBytes();
     const Parameters push{s.width,s.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,2u,0,
         SurfaceStorageFormat(s),0,s.base*5120,bytes/4,0,0};
     const RenderDescriptorRange range(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1);
@@ -1402,7 +1407,7 @@ bool ResolveMemory::EnablePackedStencilClear(std::span<const uint32_t> code) {
     if(packed_stencil_clear_configured_||mutation_serial_)
         throw std::logic_error("Packed stencil clear pipeline must be configured once before use");
     packed_stencil_clear_configured_=true;
-    constexpr uint32_t bytes=2048*5120;
+    const uint32_t bytes=NativeEdramBytes();
     if(code.size()<5||code[0]!=0x07230203||capacity_<bytes||descriptor_range_<bytes)return false;
     try {
         const RenderDescriptorRange range(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1);
@@ -1431,7 +1436,7 @@ bool ResolveMemory::ClearPrimaryStencilFromPacked(const SurfaceLayout& s,const R
        !SurfaceFullyDefined(s))return false;
     const auto& footprint=SurfaceFootprint(s);
     for(const auto& [first,last]:footprint)
-        if(first>=last||last>2048*5120||(first&3)||(last&3))
+        if(first>=last||last>NativeEdramBytes()||(first&3)||(last&3))
             throw std::runtime_error("Packed stencil clear full footprint is invalid");
     const auto push=NativePackedPrimaryStencilClearParameters(rectangle,stencil);
     const bool queued=batch_&&batch_->active();
@@ -1454,7 +1459,7 @@ bool ResolveMemory::EnablePackedSecondaryStencilClear(std::span<const uint32_t> 
     if(packed_secondary_stencil_clear_configured_||mutation_serial_)
         throw std::logic_error("Packed secondary stencil clear pipeline must be configured once before use");
     packed_secondary_stencil_clear_configured_=true;
-    constexpr uint32_t bytes=2048*5120;
+    const uint32_t bytes=NativeEdramBytes();
     if(code.size()<5||code[0]!=0x07230203||capacity_<bytes||descriptor_range_<bytes)return false;
     try {
         const RenderDescriptorRange range(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1);
@@ -1483,7 +1488,7 @@ bool ResolveMemory::ClearSecondaryStencilFromPacked(const SurfaceLayout& s,const
        !SurfaceFullyDefined(s))return false;
     const auto& footprint=SurfaceFootprint(s);
     for(const auto& [first,last]:footprint)
-        if(first>=last||last>2048*5120||(first&3)||(last&3))
+        if(first>=last||last>NativeEdramBytes()||(first&3)||(last&3))
             throw std::runtime_error("Packed secondary stencil clear full footprint is invalid");
     const auto push=NativePackedSecondaryStencilClearParameters(rectangle,stencil);
     const bool queued=batch_&&batch_->active();
@@ -1506,7 +1511,7 @@ bool ResolveMemory::EnableAtlasDepthClear(std::span<const uint32_t> packed_code,
     if(atlas_depth_clear_configured_||mutation_serial_)
         throw std::logic_error("Atlas clear pipelines must be configured once before use");
     atlas_depth_clear_configured_=true;
-    if(packed_code.empty()||host_code.empty()||capacity_<2048*5120||descriptor_range_<2048*5120)return false;
+    if(packed_code.empty()||host_code.empty()||capacity_<NativeEdramBytes()||descriptor_range_<NativeEdramBytes())return false;
     try {
         std::array<std::unique_ptr<RenderShader>,2> shaders;
         std::array<std::unique_ptr<RenderPipelineLayout>,2> layouts;
@@ -1549,7 +1554,7 @@ bool ResolveMemory::ClearAtlasDepthOneFromPacked(const SurfaceLayout& s,const Re
     const unsigned index=host_source?1:0;
     if(!atlas_depth_clear_pipelines_[index]||receipt.source||receipt.packed_version||
        !NativeAtlasDepthClearLayoutAllowed(s.width,s.height,s.pitch,s.base,s.format,s.depth,rectangle)||
-       capacity_<2048*5120||descriptor_range_<2048*5120||!SurfaceFullyDefined(s))return false;
+       capacity_<NativeEdramBytes()||descriptor_range_<NativeEdramBytes()||!SurfaceFullyDefined(s))return false;
     if(host_source) {
         const auto& native=static_cast<const VulkanTexture&>(*host_source);const auto& d=native.desc;
         if(native.device!=static_cast<const VulkanDevice*>(&device_)||!native.vk||!native.ownership||
@@ -1599,7 +1604,7 @@ bool ResolveMemory::ClearAtlasDepthOneFromPacked(const SurfaceLayout& s,const Re
         view=image->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::R32G32B32A32_FLOAT));
         if(!view||!static_cast<const VulkanTextureView&>(*view).vk)
             throw std::runtime_error("Atlas clear receipt view allocation failed");
-        set->setBuffer(0,bytes_.get(),2048*5120);
+        set->setBuffer(0,bytes_.get(),NativeEdramBytes());
         set->setTexture(1,image.get(),RenderTextureLayout::GENERAL,view.get());
         if(host_source) {
             host_view=host_source->createTextureView(RenderTextureViewDesc::Texture2D(RenderFormat::D32_FLOAT_S8_UINT));
@@ -1689,7 +1694,7 @@ std::shared_ptr<RenderTexture> ResolveMemory::LoadSurfaceSharedRegion(const Surf
     if(batch_)batch_->KeepImage(image,uint64_t(s.width)*s.height*16);
     Parameters push;static_assert(sizeof(push)==sizeof(values));
     std::memcpy(&push,values.data(),sizeof(push));
-    Dispatch(*image,push,false,nullptr,0,2048*5120);
+    Dispatch(*image,push,false,nullptr,0,NativeEdramBytes());
     return image;
 }
 

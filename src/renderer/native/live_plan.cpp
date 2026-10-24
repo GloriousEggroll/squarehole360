@@ -1,3 +1,4 @@
+#include "renderer/native/edram_extent.h"
 #include "renderer/game_profile.h"
 #include "live_plan.h"
 #include "texture_data.h"
@@ -959,7 +960,7 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
         auto b=data(kind); if (b.size()!=64) throw std::runtime_error("Invalid live surface header");
         const auto info=Word(b,24), format=Word(b,28), dimensions=Word(b,36);
         draw_surfaces[kind-6]=TypedSurface{blocks[kind]->address,((dimensions>>18)&0x3fff)+1,
-            ((dimensions>>3)&0x7fff)+1,info,format,format&2047,(format>>16)&(kind==10?1u:15u),kind==10};
+            ((dimensions>>3)&0x7fff)+1,info,format,format&NativeEdramBaseMask(),(format>>16)&(kind==10?1u:15u),kind==10};
     }
     const bool ordinary_draw=draw&&(data(2).empty()||!(Word(data(2),0)&0x10));
     // Query controls are typed; their ToJson rebuilds the same envelope.
@@ -1136,7 +1137,10 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
             // queued CPU invalidations above. Do not read unused/owned textures.
             required.ForEachTexture([&](unsigned slot) {
                 const auto fetch=Fetch(state,0x480+slot*24);
-                if((fetch[0]&3)!=2)throw std::runtime_error("Invalid live texture fetch binding");
+                if((fetch[0]&3)!=2) {
+                    if(!typed.invalid_texture_fetch)typed.invalid_texture_fetch=std::pair{slot,fetch[0]};
+                    return;
+                }
                 TypedTexture binding;binding.slot=slot;binding.fetch=fetch;
                 if(((fetch[5]>>9)&3)==1)binding.identity=TypedIdentity(fetch);
                 if(binding.identity&&s.GPUOnlyTexture(fetch))binding.source=TextureSource::GpuPreviousOrAlias;
@@ -1159,7 +1163,10 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
         } else {
         required.ForEachTexture([&](unsigned slot) {
             const auto fetch=Fetch(state,0x480+slot*24);
-            if ((fetch[0]&3)!=2) throw std::runtime_error("Invalid live texture fetch binding");
+            if ((fetch[0]&3)!=2) {
+                if(!typed.invalid_texture_fetch)typed.invalid_texture_fetch=std::pair{slot,fetch[0]};
+                return;
+            }
             TypedTexture binding;binding.slot=slot;binding.fetch=fetch;
             if (((fetch[5]>>9)&3)==1) binding.identity=TypedIdentity(fetch);
             if(binding.identity&&s.GPUOnlyTexture(fetch)) {

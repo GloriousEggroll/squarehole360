@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <string>
 
 namespace gow3::renderer {
 using namespace plume;
@@ -13,7 +14,9 @@ RenderDescriptorRange ImageRange() { return {RenderDescriptorRangeType::TEXTURE,
 void CheckRect(const RenderTexture& image, const RenderRect& r) {
     const auto& d = static_cast<const VulkanTexture&>(image).desc;
     if (r.left < 0 || r.top < 0 || r.right > int32_t(d.width) || r.bottom > int32_t(d.height) || r.isEmpty())
-        throw std::runtime_error("Native pass rectangle exceeds its image");
+        throw std::runtime_error("Native pass rectangle exceeds its image: (" + std::to_string(r.left) + "," +
+            std::to_string(r.top) + ")-(" + std::to_string(r.right) + "," + std::to_string(r.bottom) + ") in " +
+            std::to_string(d.width) + "x" + std::to_string(d.height));
 }
 }
 PassTransfer::PassTransfer(RenderDevice& device, RenderCommandQueue& queue,
@@ -127,7 +130,9 @@ void PassTransfer::Resolve(RenderTexture& source, RenderTexture& destination,
                            uint32_t channel_swizzle,const NativeSynchronousGpuTimingContext* presentation_timing) {
     if (&source == &destination) throw std::runtime_error("Resolve source aliases its destination image");
     CheckRect(source, src); CheckRect(destination, dst);
-    if (src.right - src.left != dst.right - dst.left || src.bottom - src.top != dst.bottom - dst.top ||
+    const int32_t factor = conversion == Conversion::Average2x2 ? 2 : 1;
+    if (src.right - src.left != (dst.right - dst.left) * factor || src.bottom - src.top != (dst.bottom - dst.top) * factor ||
+        (factor == 2 && ((src.left | src.top) & 1)) ||
         exponent_bias < -32 || exponent_bias > 31) throw std::runtime_error("Invalid native resolve extent/exponent");
     if(channel_swizzle>>12)throw std::runtime_error("Invalid native channel swizzle");
     for(unsigned c=0;c<4;++c)if(((channel_swizzle>>(c*3))&7)>5)
@@ -156,7 +161,7 @@ void PassTransfer::Resolve(RenderTexture& source, RenderTexture& destination,
             throw std::runtime_error("Native resolve pipeline creation failed");
     }
     struct Push { int32_t x, y; float scale; uint32_t conversion,swizzle; };
-    const Push push{src.left - dst.left, src.top - dst.top, std::ldexp(1.0f, exponent_bias), uint32_t(conversion),channel_swizzle};
+    const Push push{src.left / factor - dst.left, src.top / factor - dst.top, std::ldexp(1.0f, exponent_bias), uint32_t(conversion),channel_swizzle};
     const bool batched=batch_&&batch_->active();
     auto* commands=batched?&batch_->BeginStage():commands_.get();
     auto* framebuffer_ptr=framebuffer.get();

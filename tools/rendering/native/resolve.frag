@@ -26,6 +26,11 @@ float unpack7e3(float value) {
     return e == 0 ? float(m) / 512.0 : float(m + 128u) * exp2(float(int(e) - 10));
 }
 void main() {
+    if (pc.conversion == 9) {
+        ivec2 p = (ivec2(gl_FragCoord.xy) + pc.offset) * 2;
+        result = (texelFetch(source_image, p, 0) + texelFetch(source_image, p + ivec2(1, 0), 0) +
+                  texelFetch(source_image, p + ivec2(0, 1), 0) + texelFetch(source_image, p + ivec2(1, 1), 0)) * (0.25 * pc.scale);
+    } else
     result = texelFetch(source_image, ivec2(gl_FragCoord.xy) + pc.offset, 0) * pc.scale;
     if (pc.conversion == 1) {
         uint d = uint(roundEven(clamp(result.r, 0.0, 1.0) * 16777215.0));

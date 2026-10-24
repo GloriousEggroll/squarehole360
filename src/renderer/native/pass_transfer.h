@@ -16,7 +16,9 @@ class NativeSynchronousGpuTimingScope;
 class PassTransfer {
 public:
     enum class Conversion : uint32_t { Color, DepthUNorm24, DepthFloat24, UNorm10, Float7e3ToUNorm10, UNorm10ToFloat7e3,
-                                      UNorm8ToUNorm10, UNorm10ToUNorm8, UNorm8 };
+                                      UNorm8ToUNorm10, UNorm10ToUNorm8, UNorm8,
+                                      // Each destination texel averages a 2x2 source block (4x MSAA resolve).
+                                      Average2x2 };
     PassTransfer(plume::RenderDevice& device, plume::RenderCommandQueue& queue,
                  std::span<const uint32_t> vertex, std::span<const uint32_t> pixel,
                  std::span<const uint32_t> depth_pixel={}, NativeTransferBatch* batch=nullptr,

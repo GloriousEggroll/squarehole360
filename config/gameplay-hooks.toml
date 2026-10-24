@@ -21,6 +21,142 @@ name = "Gow3MoviePollInterval"
 registers = ["f0"]
 after_instruction = true
 
+# Experimental render size (gow3_render_height): rewrite the engine's stored
+# screen size just before CreateDevice reads it.
+[[midasm_hook]]
+address = 0x82960D04
+name = "Gow3OverrideScreenSize"
+after_instruction = false
+# Literal 1280x720 viewport rectangles (li r,1280 / li r,720).
+[[midasm_hook]]
+address = 0x8287AA94
+name = "Gow3ScreenWidthConstant"
+registers = ["r7"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AA9C
+name = "Gow3ScreenHeightConstant"
+registers = ["r6"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AB50
+name = "Gow3ScreenWidthConstant"
+registers = ["r7"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AB58
+name = "Gow3ScreenHeightConstant"
+registers = ["r6"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82F9E968
+name = "Gow3ScreenWidthConstant"
+registers = ["r7"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82F9E980
+name = "Gow3ScreenHeightConstant"
+registers = ["r8"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AABC
+name = "Gow3ScreenWidthFloat"
+registers = ["f11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AAC0
+name = "Gow3ScreenHeightFloat"
+registers = ["f10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AB80
+name = "Gow3ScreenWidthFloat"
+registers = ["f11"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8287AB88
+name = "Gow3ScreenHeightFloat"
+registers = ["f10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82F9E984
+name = "Gow3ScreenHeightFloat"
+registers = ["f12"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82F9E98C
+name = "Gow3ScreenWidthFloat"
+registers = ["f10"]
+after_instruction = true
+
+# Scaleform movie viewports default to 1280x720 without an attached viewport.
+
+[[midasm_hook]]
+address = 0x82923684
+name = "Gow3ScreenWidthConstant"
+registers = ["r31"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x8292368C
+name = "Gow3ScreenWidthConstant"
+registers = ["r29"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82923690
+name = "Gow3ScreenHeightConstant"
+registers = ["r3"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x82923694
+name = "Gow3ScreenHeightConstant"
+registers = ["r10"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x829238A8
+name = "Gow3ScreenWidthConstant"
+registers = ["r30"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x829238AC
+name = "Gow3ScreenWidthConstant"
+registers = ["r29"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x829238B0
+name = "Gow3ScreenHeightConstant"
+registers = ["r9"]
+after_instruction = true
+
+[[midasm_hook]]
+address = 0x829238B4
+name = "Gow3ScreenHeightConstant"
+registers = ["r5"]
+after_instruction = true
+
+# Scaleform Stage.scaleMode setter, after mr r4,r31 (the mode argument).
+[[midasm_hook]]
+address = 0x82C3FB2C
+name = "Gow3ScaleformScaleMode"
+registers = ["r4"]
+after_instruction = true
+
 # Diagnostic-only engine counter observations. Original stores and completion
 # remain authoritative; these observations are not allocation lifetime pins.
 

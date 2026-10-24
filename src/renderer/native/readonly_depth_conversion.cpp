@@ -1,3 +1,4 @@
+#include "edram_extent.h"
 #include "readonly_depth_conversion.h"
 #include "resolve_memory.h"
 #include "transfer_batch.h"
@@ -32,7 +33,7 @@ std::unique_ptr<NativeReadonlyDepthConversion::Prepared> NativeReadonlyDepthConv
     if(!supported_||!version||!generation||!s.depth||s.format!=1||!s.width||!s.height||s.width>8192||s.height>8192||
        !s.pitch||s.pitch>16383||s.base>=2048)return {};
     const uint64_t columns=(uint64_t(s.width)+79)/80,rows=(uint64_t(s.height)+15)/16,pitch=(uint64_t(s.pitch)+79)/80;
-    if(pitch<columns||(rows-1)*pitch+columns-1>=2048)return {};
+    if(pitch<columns||(rows-1)*pitch+columns-1>=2048||!NativeEdramLegacyWrapSafe(s.base,(rows-1)*pitch+columns-1))return {};
     const uint64_t logical=uint64_t(s.width)*s.height*4;
     // Conservative candidate-size admission before any image or scratch
     // allocation. Actual retained accounting below still uses VMA size.

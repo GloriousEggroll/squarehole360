@@ -1,4 +1,5 @@
 #pragma once
+#include "edram_extent.h"
 #include "shader_compiler.h"
 #include "opaque_color_overwrite.h"
 #include "fsi_state.h"
@@ -36,7 +37,9 @@ inline bool OpaqueColorOverwriteAllowed(const NativeFsiConstants& raster,
        raster.depth_format!=1||raster.depth_control!=0x700766u)return false;
     const uint64_t columns=(uint64_t(width)+79)/80,rows=(uint64_t(height)+15)/16;
     const uint64_t pitch_tiles=(uint64_t(raster.pitch)+79)/80;
-    return pitch_tiles>=columns&&(rows-1)*pitch_tiles+columns-1<2048;
+    const uint64_t last=(rows-1)*pitch_tiles+columns-1;
+    return pitch_tiles>=columns&&last<2048&&NativeEdramLegacyWrapSafe(raster.color[0].base,last)&&
+        NativeEdramLegacyWrapSafe(raster.depth_base,last);
 }
 struct OpaqueColorOverwriteProgram {
     std::string source_sha256;

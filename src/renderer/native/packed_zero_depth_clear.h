@@ -1,5 +1,6 @@
 #pragma once
 
+#include "edram_extent.h"
 #include <array>
 #include <bit>
 #include <cstdint>
@@ -16,7 +17,7 @@ inline bool PackedZeroDepthLayoutAllowed(uint32_t width,uint32_t height,uint32_t
     const uint64_t columns=(uint64_t(width)+79)/80;
     const uint64_t rows=(uint64_t(height)+15)/16;
     const uint64_t stride=(uint64_t(pitch)+79)/80;
-    return stride>=columns&&(rows-1)*stride+columns<=2048;
+    return stride>=columns&&(rows-1)*stride+columns<=2048&&NativeEdramLegacyWrapSafe(base,(rows-1)*stride+columns-1);
 }
 struct PackedZeroDepthClearInput {
     bool native_fsi,depth_surface;

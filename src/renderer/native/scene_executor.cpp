@@ -1,3 +1,4 @@
+#include "renderer/native/edram_extent.h"
 #include <unordered_map>
 #include <condition_variable>
 #include <thread>
@@ -512,7 +513,7 @@ std::string TextureKey(const Json& t) {return t.dump();}
 using TextureBindingKey=std::array<uint32_t,8>;
 using TextureBindingCache=std::map<TextureBindingKey,TextureBinding>;
 struct Image {
-    std::unique_ptr<RenderTexture> texture; Json identity;uint64_t version=0;bool dirty=false;std::bitset<2048> tiles;
+    std::unique_ptr<RenderTexture> texture; Json identity;uint64_t version=0;bool dirty=false;std::bitset<kNativeEdramMaxTiles> tiles;
     // Pre-encode host floats after a fused clear. This is clean read state,
     // never a dirty working image or a source for a packed commit.
     ResolveMemory::AtlasDepthClearReceipt atlas_clear_receipt;
@@ -744,7 +745,7 @@ struct SceneExecutor::State {
     struct FsiDrawPassStats {uint64_t candidates=0,shape_refusals=0,plane_refusals=0,eligible=0,selected=0,
         continued=0,boundaries=0,groups=0,maximum_group_draws=0,sampled_barriers_avoided=0,queried_selected=0,query_controls_preserved=0;} fsi_draw_pass_stats_;
     bool open_fsi_draw_pass_=false;
-    uint64_t async_shader_skipped_draws_=0;
+    uint64_t async_shader_skipped_draws_=0,invalid_texture_skipped_draws_=0;
     uint32_t fsi_draw_pass_draws_=0;
     NativeFsiPassPlanes open_fsi_draw_planes_{};
     bool open_packed_depth_pass_=false,open_packed_depth_atomic_=false;
@@ -1537,7 +1538,7 @@ struct SceneExecutor::State {
     // Its EDRAM footprint is the 1x one, so a later reinterpretation of the
     // extra sample tiles is not modeled. Every distinct layout is recorded.
     struct MsaaFallbackStatistics {
-        uint64_t surfaces=0;
+        uint64_t surfaces=0,averaged_resolves=0;
         std::vector<std::array<uint32_t,6>> layouts;
     } msaa_fallback_;
     void AdmitMultisampled(uint32_t width,uint32_t height,uint32_t info,uint32_t base,uint32_t format,bool depth) {
@@ -1576,11 +1577,11 @@ struct SceneExecutor::State {
         return SurfaceAt(found->second,SurfaceStorage(s),[&]{return s.ToJson();},write,nullptr,nullptr);
     }
     // Pure function of the layout; a draw asks for it per bound surface.
-    std::map<std::array<uint32_t,6>,std::bitset<2048>> surface_tiles_memo_;
-    const std::bitset<2048>& SurfaceTiles(const SurfaceLayout& s) {
+    std::map<std::array<uint32_t,6>,std::bitset<kNativeEdramMaxTiles>> surface_tiles_memo_;
+    const std::bitset<kNativeEdramMaxTiles>& SurfaceTiles(const SurfaceLayout& s) {
         const std::array<uint32_t,6> key{s.width,s.height,s.pitch,s.base,s.format,uint32_t(s.depth)};
         if(const auto found=surface_tiles_memo_.find(key);found!=surface_tiles_memo_.end())return found->second;
-        std::bitset<2048> tiles;
+        std::bitset<kNativeEdramMaxTiles> tiles;
         // Both 32-bit half-tiles and 64-bit tiles fit within forty pixels.
         for(unsigned y=0;y<s.height;y+=16)for(unsigned x=0;x<s.width;x+=40)
             tiles.set(SurfaceByteOffset(s,x,y)/5120);
@@ -4489,7 +4490,7 @@ public:
         if(config_.compact_resolve_channels)
             resolve_memory_->EnableCompactLoadFormats(memory_load_r32_spv,memory_load_rg32_spv,
                 config_.storage_image_extended_formats_enabled);
-        edram_memory_=std::make_unique<ResolveMemory>(*device_,*queue_,memory_store_spv,memory_load_spv,2048*5120,0,transfer_batch_.get(),false,config_.block_page_versions,false,false,config_.reuse_defined_ranges);
+        edram_memory_=std::make_unique<ResolveMemory>(*device_,*queue_,memory_store_spv,memory_load_spv,NativeEdramBytes(),0,transfer_batch_.get(),false,config_.block_page_versions,false,false,config_.reuse_defined_ranges);
         edram_memory_->SetDescriptorPoolEnabled(config_.recycle_resolve_descriptors);
         edram_memory_->SetIdentityViewReuseEnabled(config_.reuse_resolve_identity_views);
         if(!config_.native_fsi&&transfer_batch_)edram_memory_->EnableDirectColorRestore(fullscreen_spv,memory_restore_frag_spv);
@@ -6185,7 +6186,7 @@ public:
         if(o.at("level")!=0||(o.at("flags").get<unsigned>()&0x2300))throw std::runtime_error("Unsupported resolve flags/mip");
         const auto& identity=o.at("destination");const auto key=TextureKey(identity); const std::string base=identity.at("base");
         frame_resolved_.insert(key);
-        const auto dst=Rectangle(o.at("destination_rectangle"));
+        auto dst=Rectangle(o.at("destination_rectangle"));
         const bool full=dst.left==0&&dst.top==0&&dst.right==identity.at("width")&&dst.bottom==identity.at("height");
         const uint32_t address=std::stoul(base,nullptr,16);
         auto fetch=o.at("destination_fetch").get<std::array<uint32_t,6>>();
@@ -6219,7 +6220,15 @@ public:
         if(identity.at("format")==2)conversion=PassTransfer::Conversion::UNorm8;
         if(identity.at("format")==7)conversion=PassTransfer::Conversion::UNorm10;
         if(slot==4)conversion=source.at("format")==0?PassTransfer::Conversion::DepthUNorm24:PassTransfer::Conversion::DepthFloat24;
-        const auto src=Rectangle(o.at("source_rectangle"));
+        auto src=Rectangle(o.at("source_rectangle"));
+        {
+            // Resolves copy whole 8x8 blocks, so a surface whose height is not
+            // a multiple of 8 (a non-720p render size) is copied past its last
+            // row. Those rows are only EDRAM beyond the surface; drop them.
+            const int32_t over_x=std::max(0,src.right-int32_t(source.at("width").get<uint32_t>()));
+            const int32_t over_y=std::max(0,src.bottom-int32_t(source.at("height").get<uint32_t>()));
+            src.right-=over_x;dst.right-=over_x;src.bottom-=over_y;dst.bottom-=over_y;
+        }
         if(config_.fused_packed_atlas_resolves&&o.contains("copy_dest_swap")&&
            o.at("copy_dest_swap")!=ResolveDestinationSwap(fetch,slot))
             throw std::runtime_error("Resolve destination swap disagrees with captured guest resource");
@@ -6271,6 +6280,38 @@ public:
             src_image=packed_color_source?packed_color_source.get():atlas_rgba_source?atlas_rgba_source.get():
                 &Surface(source,false,nullptr,source_region?&src:nullptr);
             selected_atlas_region=source_region;
+        }
+        // A 4x MSAA colour surface stores 2x2 samples per pixel, so its EDRAM
+        // holds a single-sample surface twice as wide and high at the same base
+        // (Gears points a 4x 640x360 surface at the 1280x720 scene to get a
+        // half-size copy). Average each 2x2 block of that image, as the guest
+        // resolve's sample averaging does, then convert as usual.
+        std::shared_ptr<RenderTexture> msaa_average;
+        if(const uint32_t source_info=source.at("surface_info").get<uint32_t>();
+           slot!=4&&(source_info&0x30000u)==0x20000u&&!packed_color_source&&!atlas_rgba_source) {
+            const uint32_t width=source.at("width").get<uint32_t>(),height=source.at("height").get<uint32_t>();
+            const uint32_t pitch=source_info&16383u,format=source.at("format").get<uint32_t>(),base_tile=source.at("edram_base").get<uint32_t>();
+            RenderTexture* full=nullptr;
+            for(auto& [key,image]:surfaces_) {
+                const auto& id=image.identity;
+                if(!image.texture||id.at("depth").get<bool>()||id.at("edram_base").get<uint32_t>()!=base_tile||
+                   id.at("format").get<uint32_t>()!=format||id.at("width").get<uint32_t>()!=width*2||
+                   id.at("height").get<uint32_t>()!=height*2||(id.at("surface_info").get<uint32_t>()&0x33fffu)!=pitch*2)continue;
+                full=&Surface(id,false);break;
+            }
+            if(!full) {
+                Json single=source;single["width"]=width*2;single["height"]=height*2;
+                single["surface_info"]=(source_info&~0x33fffu)|(pitch*2);
+                full=&Surface(single,false);
+            }
+            const auto& full_desc=static_cast<VulkanTexture&>(*full).desc;
+            msaa_average=device_->createTexture(RenderTextureDesc::ColorTarget(width,height,full_desc.format));
+            if(!msaa_average)throw std::runtime_error("Cannot allocate MSAA resolve image");
+            if(transfer_batch_)transfer_batch_->KeepImage(msaa_average,uint64_t(width)*height*8);
+            transfers_->Resolve(*full,*msaa_average,RenderRect(src.left*2,src.top*2,src.right*2,src.bottom*2),src,0,
+                PassTransfer::Conversion::Average2x2);
+            src_image=msaa_average.get();
+            ++msaa_fallback_.averaged_resolves;
         }
         if(fixed_source) {
             // Float working attachments may contain values outside the guest
@@ -6361,6 +6402,14 @@ public:
             }
         }
         if(config_.shader_ready&&!DrawShadersReady(o)) {++async_shader_skipped_draws_;return;}
+        // On the console a fetch from an unbound slot reads unrelated memory;
+        // without a texture to bind, drop the draw instead of the renderer.
+        if(o.typed&&o.typed->invalid_texture_fetch) {
+            if(invalid_texture_skipped_draws_++<8)
+                REXLOG_WARN("Native renderer: skipped draw {} sampling unbound texture slot {} (fetch word {:08x})",
+                    o.Event(),o.typed->invalid_texture_fetch->first,o.typed->invalid_texture_fetch->second);
+            return;
+        }
         if(temporal_)TemporalBeforeDraw(o);
         std::optional<RetainedPhaseTimingContext> timing_context;
         if(RetainedPhaseGpuTimingEnabled())timing_context.emplace(*this,o);
@@ -9164,7 +9213,7 @@ public:
         if(!config_.native_fsi||queries_->active())
             throw std::runtime_error("Full EDRAM diagnostic requires packed Native with no active query");
         InvalidateEarlyDepth();FlushPendingDraws();FlushCommittedState();
-        return edram_memory_->ReadBytes(0,2048*5120);
+        return edram_memory_->ReadBytes(0,NativeEdramBytes());
     }
     void InitializeEdramFromBuffer(VkBuffer source) {
         InvalidateEarlyDepth();transfer_report_dirty_=true;
@@ -9172,8 +9221,11 @@ public:
         const auto destination=edram_memory_->ExportState();
         NativeStateTransfer transfer(*device_,*queue_);
         ++mutation_serial_;
-        transfer.Copy({source,destination.capacity,{{0,destination.capacity}}},destination.buffer);
-        edram_memory_->RecordImportedBytes(0,destination.capacity);
+        // The reference EDRAM is the console's 10 MB; a larger native model
+        // (render sizes above 720p) leaves the rest undefined.
+        const uint32_t imported=uint32_t(std::min<uint64_t>(destination.capacity,2048u*5120u));
+        transfer.Copy({source,imported,{{0,imported}}},destination.buffer);
+        edram_memory_->RecordImportedBytes(0,imported);
     }
     uint64_t mutation_serial() const {return mutation_serial_+resolve_memory_->mutation_serial()+edram_memory_->mutation_serial();}
     std::vector<uint8_t> ReadPhysical(uint32_t address,uint32_t bytes) {InvalidateEarlyDepth();FlushPendingDraws();return resolve_memory_->ReadBytes(address,bytes);}
