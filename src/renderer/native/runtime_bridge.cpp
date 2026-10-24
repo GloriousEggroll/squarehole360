@@ -470,6 +470,10 @@ REXCVAR_DEFINE_BOOL(gow3_native_submission_worker, true, "Renderer diagnostics",
 REXCVAR_DEFINE_INT32(gow3_native_temporal_trace_frames, 0, "Renderer diagnostics",
                     "Log the draws after the scene for this many frames without a detected HUD")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_temporal_object_motion, true, "Renderer diagnostics",
+                    "Per-object motion vectors from the game's velocity pass for temporal "
+                    "upscaling and frame generation; off uses camera motion only")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_temporal_inputs, true, "Renderer diagnostics",
                    "Jitter the scene and produce depth, motion vectors and a HUD mask when a "
                    "temporal upscaler (FSR 3) is selected; restart required")
@@ -2250,6 +2254,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     REXLOG_INFO("Native raster output: {}", config.native_fsi ? "ordered pixel interlock" : "fixed-function diagnostic path");
     config.temporal_inputs = REXCVAR_GET(gow3_native_temporal_inputs);
     config.temporal_trace_frames = uint32_t(REXCVAR_GET(gow3_native_temporal_trace_frames));
+    config.temporal_object_motion = REXCVAR_GET(gow3_native_temporal_object_motion);
     config.temporal = [this](std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> inputs) {
       output_temporal = std::move(inputs);
     };

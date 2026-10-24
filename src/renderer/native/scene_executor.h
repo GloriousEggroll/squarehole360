@@ -86,6 +86,8 @@ struct SceneExecutorConfig {
     // Diagnostics: log the draws after the last scene-view draw for this many
     // frames in which no HUD was found.
     uint32_t temporal_trace_frames=0;
+    // Use the game's velocity pass for per-object motion vectors.
+    bool temporal_object_motion=true;
     std::function<void(std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs>)> temporal;
     std::filesystem::path capture,compiled,output;
     std::filesystem::path texture_probe_directory;

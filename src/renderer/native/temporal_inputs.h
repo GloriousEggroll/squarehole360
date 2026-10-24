@@ -59,6 +59,12 @@ std::array<std::array<float,4>,4> NativeTemporalReprojection(
 // View depth is depth_scale / (device depth - infinity_depth).
 struct NativeTemporalProjection {float near_plane=1,fov_y=1,infinity_depth=0,depth_scale=1;};
 bool NativeTemporalDescribeProjection(const NativeTemporalCamera&,NativeTemporalProjection&);
+// Median distance, in NDC units (2 = screen width), that points 3 m and 30 m in
+// front of the current camera moved on screen since the previous frame; points
+// behind the previous camera count as 4. Camera cuts in cutscenes often change
+// the shot without moving far, which this catches.
+float NativeTemporalScreenMotion(const NativeTemporalCamera& current,
+    const NativeTemporalCamera& previous,const NativeTemporalProjection& projection);
 
 class NativeTemporalInputs {
 public:
@@ -117,6 +123,7 @@ private:
     uint32_t phase_=0;
     NativeTemporalJitter jitter_;
     float reactive_floor_=0;
+    uint32_t logged_cuts_=0;
     std::optional<NativeTemporalCamera> camera_,previous_camera_;
     plume::RenderTexture* world_depth_=nullptr;
     plume::RenderTexture* velocity_=nullptr;

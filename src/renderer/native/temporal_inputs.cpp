@@ -177,7 +177,13 @@ std::optional<std::array<float,2>> NativeTemporalVelocityScale(std::span<const u
     const float x=LoadFloat(state,kPixelConstants+11*16),y=LoadFloat(state,kPixelConstants+11*16+4);
     if(!std::isfinite(x)||!std::isfinite(y)||std::abs(x)<1e-6f||std::abs(y)<1e-6f)return std::nullopt;
     // ndc.x = encoded.x / c11.x; screen y points down while ndc y points up.
-    return std::array<float,2>{0.5f*float(frame_width)/x,-0.5f*float(frame_height)/y};
+    const std::array<float,2> scale{0.5f*float(frame_width)/x,-0.5f*float(frame_height)/y};
+    // The velocity scale is the same in both directions (square pixels). Some
+    // draws of the pass in cutscenes hold something else in c11 (scales of
+    // -150000 and 30000 px): taken as the frame's scale, every moving object
+    // got motion vectors far off screen, which frame generation follows.
+    if(scale[0]<=0||std::abs(scale[0]-scale[1])>0.02f*scale[0])return std::nullopt;
+    return scale;
 }
 
 std::array<std::array<float,4>,4> NativeTemporalReprojection(
@@ -195,6 +201,24 @@ std::array<std::array<float,4>,4> NativeTemporalReprojection(
     const auto m=Multiply(Multiply(inverse,translate),previous.view_projection);
     for(int i=0;i<4;++i)for(int j=0;j<4;++j)result[i][j]=float(m[i][j]);
     return result;
+}
+
+float NativeTemporalScreenMotion(const NativeTemporalCamera& current,
+        const NativeTemporalCamera& previous,const NativeTemporalProjection& projection) {
+    const auto r=NativeTemporalReprojection(current,previous);
+    std::array<float,18> distances{};
+    size_t n=0;
+    for(const double view_depth:{300.0,3000.0}) {  // Unreal units (cm)
+        const double z=1-(projection.infinity_depth+projection.depth_scale/view_depth);
+        for(const double y:{-0.6,0.0,0.6})for(const double x:{-0.6,0.0,0.6}) {
+            double clip[4];
+            for(int j=0;j<4;++j)clip[j]=x*r[0][j]+y*r[1][j]+z*r[2][j]+r[3][j];
+            distances[n++]=clip[3]<=1e-6?4.0f:
+                float(std::hypot(clip[0]/clip[3]-x,clip[1]/clip[3]-y));
+        }
+    }
+    std::nth_element(distances.begin(),distances.begin()+n/2,distances.begin()+n);
+    return distances[n/2];
 }
 
 bool NativeTemporalDescribeProjection(const NativeTemporalCamera& camera,NativeTemporalProjection& out) {
@@ -305,7 +329,9 @@ std::shared_ptr<NativeTemporalInputs::Frame> NativeTemporalInputs::AcquireFrame(
     if(frames_.size()>=kFrameReuseDistance+4)return nullptr;
     auto frame=std::make_shared<Frame>();
     frame->width=width_;frame->height=height_;
-    const auto storage=RenderTextureFlag::UNORDERED_ACCESS;
+    // STORAGE gives the images VK_IMAGE_USAGE_STORAGE_BIT; without it the
+    // shader's writes are undefined (NVIDIA scrambled all three outputs).
+    const auto storage=RenderTextureFlag::STORAGE|RenderTextureFlag::UNORDERED_ACCESS;
     frame->depth=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R32_FLOAT,storage));
     frame->motion=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R16G16_FLOAT,storage));
     // Red: reactive (current frame over history). Green: HUD coverage.
@@ -342,7 +368,9 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     auto frame=current_?std::move(current_):AcquireFrame();
     if(!frame) {history_valid_=false;previous_camera_=camera_;return nullptr;}
 
-    // A camera cut (teleport or large turn) invalidates history.
+    // A camera cut (teleport, large turn, or a new shot in a cutscene that the
+    // scene jumps across on screen) invalidates history; frame generation
+    // would otherwise blend two unrelated shots.
     bool reset=!history_valid_||!previous_camera_;
     if(!reset) {
         double moved=0;
@@ -352,7 +380,13 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
         }
         const auto w=Column(*camera_,3),pw=Column(*previous_camera_,3);
         const double facing=Dot(w,pw)/std::sqrt(std::max(Dot(w,w)*Dot(pw,pw),1e-24));
-        reset=moved>500.0*500.0||facing<0.7;
+        const float screen=NativeTemporalScreenMotion(*camera_,*previous_camera_,projection);
+        reset=moved>500.0*500.0||facing<0.7||screen>0.6f;
+        if(reset&&logged_cuts_<24) {
+            ++logged_cuts_;
+            REXLOG_INFO("Temporal inputs: camera cut at frame {} (moved {:.0f}, facing {:.3f}, screen {:.2f})",
+                        frame_id_,std::sqrt(moved),facing,screen);
+        }
     }
     statistics_.resets+=reset;
     PushConstants push{};

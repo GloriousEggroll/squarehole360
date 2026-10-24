@@ -6320,7 +6320,7 @@ public:
             temporal_->ObserveDepthResolve(dest.texture.get());
         if(temporal_&&slot!=4&&temporal_velocity_base_>=0&&
            SurfaceStorage(source).base==uint32_t(temporal_velocity_base_)) {
-            temporal_->ObserveVelocityResolve(dest.texture.get(),destination_swap);
+            if(config_.temporal_object_motion)temporal_->ObserveVelocityResolve(dest.texture.get(),destination_swap);
             temporal_velocity_base_=-1;
         }
         if(packed_color_source) {

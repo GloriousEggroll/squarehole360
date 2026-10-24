@@ -105,6 +105,16 @@ int main() {
         Near(clip[0]/clip[3],0.25,1e-5,"still x");Near(clip[1]/clip[3],-0.5,1e-5,"still y");
     }
 
+    // Camera cuts: a still camera and a normal pan stay well under the 0.6
+    // threshold; a new shot from the same spot 60 degrees away exceeds it.
+    assert(NativeTemporalScreenMotion(current,current,projection)<1e-4f);
+    assert(NativeTemporalScreenMotion(current,previous,projection)<0.2f);
+    const auto cut=Camera(0.31+1.05,{8270.0,-3580.0,-2861.0},fov);
+    assert(NativeTemporalScreenMotion(cut,current,projection)>0.6f);
+    // A shot cut to a spot 3 m away facing back across the room.
+    const auto across=Camera(0.31+3.14159265358979,{8570.0,-3580.0,-2861.0},fov);
+    assert(NativeTemporalScreenMotion(across,current,projection)>0.6f);
+
     // Jitter: Halton values in range, and the patched constants move clip.xy
     // by the expected fraction of clip.w.
     for(uint32_t phase=0;phase<72;++phase) {
@@ -150,6 +160,9 @@ int main() {
     Near((*scale)[0],72.35,0.01,"velocity scale x");Near((*scale)[1],72.35,0.01,"velocity scale y");
     store_word(0x28dc,15);
     assert(!NativeTemporalIsVelocityDraw(velocity,w/2,h/2,w,h));
+    // A cutscene draw of the pass with another c11 (-147886 x 31506 px at 720p).
+    store_float(0x1780+11*16,-0.004328f);store_float(0x1780+11*16+4,-0.011427f);
+    assert(!NativeTemporalVelocityScale(velocity,w,h));
     store_float(0x1780+11*16,0);store_float(0x1780+11*16+4,0);
     assert(!NativeTemporalVelocityScale(velocity,w,h));  // the player's zero-velocity draws
     std::puts("Temporal inputs PASS");
