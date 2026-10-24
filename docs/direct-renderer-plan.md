@@ -199,6 +199,31 @@ Still to do: 7e3 output quantization in the pixel shader (needs shader
 generation changes), per-fragment float24 depth rounding, and raw
 reinterpretation transfers.
 
+## Remaining Xenia pieces checked (2026-10-23)
+
+- **Display gamma ramp.** The game's D3D uploads gamma ramps through
+  `sub_82AFDDC8` (256-entry table) and `sub_82AFDEC0` (PWL), from
+  `sub_82AF6848`. Hooks on both showed neither runs during boot, menus or a
+  checkpoint load, so the swap's identity table is what the hardware would use
+  too. The swap's gamma pass also copies the frame into the presenter's image,
+  so it stays.
+- **Idle Xenia GPU objects.** Native start-up still creates Xenia's shared
+  memory, render-target cache, texture cache and pipeline cache. Shared memory
+  is a sparse buffer that native never makes resident, and the rest is a few
+  tens of MB, so separating native start-up from them is not worth the risk.
+- **1 kHz vblank.** With VSync off the guest vblank interrupt runs every
+  millisecond. This keeps the game's own vblank-based presentation interval
+  from capping the frame rate. Pacing it to the display refresh would cap FPS,
+  so it stays.
+
+Fresh profile (Tickers fight, about 1,600 draws per frame, 6.8 ms):
+- The game's render thread is 85% busy:
+  - about 61% of that is native capture inside the D3D hooks;
+  - 35% is game code;
+  - about 4% is the original D3D building PM4.
+- Planner 73%, GPU Commands 72%, GPU 71%.
+- A cheaper device-state copy (streaming stores) gave no frame-time change. Frames are co-limited by the occlusion-query round trip, so stage 3's value is mainly a cleaner, API-level model for porting, with a modest speed gain.
+
 ## Stage 3: native resource model
 
 Identify textures, vertex buffers and index buffers by their guest D3D objects
@@ -206,6 +231,41 @@ Identify textures, vertex buffers and index buffers by their guest D3D objects
 SetStreamSource `0x82AECAF0`, SetIndices `0x82AECC08`, Lock/Unlock `0x82AE9140`).
 Track dirtiness from Lock/Unlock instead of hashing and snapshotting guest memory
 on every draw. This removes most of the per-draw capture CPU cost.
+
+None of these functions are hooked yet. SDK page-write certificates already
+give most of the dirty tracking: Gears writes texture and vertex memory directly
+rather than through Lock. Each phase has its own cvar, keeps the old path for
+A/B, and must pass the offline parity tests (`gow3-native-live-plan-test` and
+`gow3-native-scene-replay` on the weapon-reference-01 and desktop-bundle-02
+captures).
+
+1. **Copy-on-write device state** (`gow3_native_chunked_device_state`). The
+   per-draw 0x3600-byte copy becomes 216 shared 64-byte chunks. Only the chunks
+   that differ from the previous draw are copied (about 4 per draw). Contiguous
+   bytes are rebuilt lazily for digests, diagnostics and rare consumers.
+2. **Executor reads chunks** (`gow3_native_chunked_constant_upload`). Constant
+   upload skips unchanged chunks by identity. Temporal inputs copy only the
+   constant range.
+3. **Typed draw packet** (`gow3_native_draw_packet`). The bridge extracts
+   exactly what the planner and executor read: the 0x2880–0x2A60 register
+   words, bool and loop constants, constant chunks, required fetch words,
+   surfaces, shaders and arguments. Every profile-dependent device offset is
+   read in one place, which is the main portability gain for Gears 2 and
+   Judgment.
+4. **Resource-object census** (`gow3_native_resource_object_census`). Hooks on
+   SetTexture, SetStreamSource, SetIndices, CreateTexture, surfaces and
+   Lock/Unlock check, without acting on it, that object-derived bindings equal
+   the fetch constants. Only if they always match are snapshot lookups keyed
+   by object.
+5. **Dirty masks and native flush** (stage 4 groundwork). Map the device dirty
+   bits to register chunks through the flush helpers, then check native register
+   decoding against PM4 from a non-direct capture.
+
+Assessment (2026-10-23): on hold.
+- The executor reads only the float constants (0x780–0x2780), the bool and loop constants, and the register shadow (0x2880–0x2A60). These follow the Xbox 360 hardware layout, which is the same in every game.
+- Every XDK-specific device offset the bridge and planner use is already in the game profile (`src/renderer/profiles/gears3.h`).
+- So phases 1–3 would mostly save render-thread CPU. That CPU saving does not change frame time today: the frame is co-limited by the occlusion-query round trip.
+- Phases 1 and 2 must ship together. Rebuilding contiguous bytes in the executor would only move the copy to the GPU Commands thread.
 
 ## Stage 4: skip PM4 generation
 
