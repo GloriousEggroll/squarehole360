@@ -105,6 +105,13 @@ editor (`tools/settings.sh`) or in game (L3+R3, or F4). The
 [Gears of War 3 guide](docs/gears3.md) covers controls, display, HDR, the
 frame-rate cap, the renderer choice (native or Xenia) and troubleshooting.
 
+## Multiplayer
+
+Co-op Campaign, Horde, Beast and private Versus work through the game's System
+Link mode: on a local network, or over the internet through `squarehole-lobby`,
+a small lobby and relay server anyone can host. Players connect directly when
+their routers allow it. See [docs/multiplayer.md](docs/multiplayer.md).
+
 ## Repository layout
 
 | Path | Contents |

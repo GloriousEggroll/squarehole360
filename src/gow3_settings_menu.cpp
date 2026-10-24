@@ -106,6 +106,8 @@ class GameSettings final : public rex::ui::ImGuiDialog {
     const std::string key(s.key);
     if (key.starts_with("present_hdr")) return rex::ui::IsNativeHdrAvailable() &&
         (key == "present_hdr" || values_["present_hdr"] == "true");
+    // Free text (gamertag, addresses) is edited in the settings app.
+    if (s.type == 's' && s.choices.empty()) return false;
     if (key == "framerate_limit") return values_["gow3_frame_limit_mode"] == "custom";
     if (key == "window_width" || key == "window_height") return values_["fullscreen"] == "false";
     if (key == "present_frame_generation")
@@ -113,6 +115,7 @@ class GameSettings final : public rex::ui::ImGuiDialog {
              values_["present_effect"] == "xess";
     if (key == "present_fsr_max_upsampling_passes") return values_["present_effect"] == "fsr";
     if (key == "present_fsr3_ghosting_reduction") return values_["present_effect"] == "fsr3";
+    if (key == "network_frame_rate_lock") return values_["network_enabled"] == "true";
     if (key.starts_with("present_fsr_"))
       return values_["present_effect"] == "fsr" || values_["present_effect"] == "fsr3" ||
              values_["present_effect"] == "dlss" || values_["present_effect"] == "xess";

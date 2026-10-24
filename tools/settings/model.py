@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import hashlib
 import math
+import re
 import os
 import shutil
 import tempfile
@@ -111,6 +112,14 @@ SETTINGS = [
  S('readback_memexport_fast', 'Buffered shader readbacks', True, 'Advanced', 'When CPU copies are enabled, reuse a completed previous result when available. Otherwise waits for the GPU; bursts can cause long freezes.', renderer='xenia'),
  S('gow3_60fps', 'Unlock original 30 FPS game cap', True, 'Advanced', 'Required for limits above 30 FPS. The frame-rate limit setting supplies the actual ceiling.'),
  S('gow3_movie_pacing', 'Smooth prerecorded movie timing', True, 'Advanced', 'Poll movie timing every millisecond instead of every 25 ms. Keeps the video’s original frame rate.'),
+ S('user_gamertag', 'Gamertag', 'User', 'Online', 'Your name in multiplayer: 1–15 letters, digits and single spaces, starting with a letter. Each installation also has its own player ID in user/identity.toml.'),
+ S('network_enabled', 'Networking', True, 'Online', 'Off disables System Link and internet play; the game then reports no network cable.'),
+ S('network_lobby_server', 'Lobby server', '', 'Online', 'Internet play: address of a squarehole-lobby server (host or host:port, default port 36360). Leave empty to play System Link on your local network only.'),
+ S('network_lobby_room', 'Room', 'public', 'Online', 'Only players in the same room on the lobby server see each other’s System Link parties.'),
+ S('network_lobby_password', 'Room password', '', 'Online', 'Optional. The first player to enter a room sets its password; others must use the same one.'),
+ S('network_frame_rate_lock', 'Multiplayer frame-rate lock', 60, 'Online', 'Frame-rate limit while other players are connected, so every machine runs the game at the same speed. 0 keeps your normal limit.', minimum=0, maximum=240),
+ S('network_address', 'Network address', '', 'Online', 'Advanced. The IPv4 address other System Link players reach you at; empty detects it.'),
+ S('network_broadcast_peers', 'System Link peers', '', 'Online', 'Advanced. Comma-separated IPv4 addresses that receive System Link broadcasts directly, for networks that block broadcasts or several copies on one PC.'),
  S('mnk_mode', 'Mouse and keyboard controls', True, 'Input', 'Emulate an Xbox controller with the mouse and keyboard. Disable to use a gamepad without keyboard/mouse emulation.'),
 ]
 BY_KEY = {s.key:s for s in SETTINGS}
@@ -195,10 +204,27 @@ def visible_settings(values):
     return [s for s in SETTINGS if applies(s, mode)]
 
 
+GAMERTAG = re.compile(r'[A-Za-z](?:[A-Za-z0-9]| (?! ))*')
+IPV4 = re.compile(r'(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)')
+HOST_PORT = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d\d|6[0-4]\d{3}|[1-5]?\d{1,4}))?')
+
+
 def validate_setting(s, value):
     if type(value) is not type(s.default):
         if not (type(s.default) is float and type(value) is int):
             raise ValueError(f'{s.label}: incorrect value type')
+    if s.key == 'user_gamertag' and (len(value) > 15 or not GAMERTAG.fullmatch(value) or value.endswith(' ')):
+        raise ValueError(f'{s.label}: use 1–15 letters, digits and single spaces, starting with a letter')
+    if s.key == 'network_lobby_server' and value and not HOST_PORT.fullmatch(value):
+        raise ValueError(f'{s.label}: use a host name or IPv4 address, optionally followed by :port')
+    if s.key in ('network_lobby_room', 'network_lobby_password') and (len(value) > 31 or not value.isprintable()):
+        raise ValueError(f'{s.label}: use up to 31 printable characters')
+    if s.key == 'network_lobby_room' and not value.strip():
+        raise ValueError(f'{s.label}: enter a room name')
+    if s.key == 'network_address' and value and not IPV4.fullmatch(value):
+        raise ValueError(f'{s.label}: use an IPv4 address such as 192.168.1.20')
+    if s.key == 'network_broadcast_peers' and value and not all(IPV4.fullmatch(p.strip()) for p in value.split(',')):
+        raise ValueError(f'{s.label}: use comma-separated IPv4 addresses')
     if s.choices:
         if value not in [v for v, _ in s.choices]:
             raise ValueError(f'{s.label}: unsupported option')

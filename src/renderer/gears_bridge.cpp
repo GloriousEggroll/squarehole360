@@ -26,6 +26,7 @@
 #include <rex/graphics/command_processor.h>
 #include <rex/graphics/native_completion_markers.h>
 #include <rex/graphics/frame_limiter.h>
+#include <rex/system/xam/network.h>
 #if GOW3_HAS_NATIVE_RENDERER
 #include "native/runtime_bridge.h"
 #endif
@@ -1710,7 +1711,7 @@ void PaceAfterPresent(uint32_t frame) {
     // One frame in flight in the renderer while this one is simulated.
     if (frame) Gow3WaitForNativeFrame(frame - 1, std::chrono::milliseconds(50));
 #endif
-    limiter.Wait(REXCVAR_GET(framerate_limit));
+    limiter.Wait(rex::system::xam::Network::FrameRateLimit(REXCVAR_GET(framerate_limit)));
   }
   if (REXCVAR_GET(present_anti_lag)) {
     if (capture_processor) capture_processor->UpdateAntiLag(false, uint64_t(frame) + 1);

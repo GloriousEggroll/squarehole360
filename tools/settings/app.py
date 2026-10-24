@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QProcess, QTimer
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QLineEdit,
     QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
 from model import CONFIG, ROOT, WINDOWS, binary, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, widget_value
@@ -59,6 +59,9 @@ class SettingsWindow(QMainWindow):
                 elif isinstance(setting.default, bool):
                     widget = QCheckBox()
                     widget.toggled.connect(self.changed)
+                elif isinstance(setting.default, str):
+                    widget = QLineEdit()
+                    widget.textChanged.connect(self.changed)
                 else:
                     widget = QDoubleSpinBox() if isinstance(setting.default, float) else QSpinBox()
                     widget.setRange(setting.minimum, setting.maximum)
@@ -268,6 +271,8 @@ class SettingsWindow(QMainWindow):
                 w.setCurrentIndex(w.findData(value))
             elif isinstance(setting.default, bool):
                 w.setChecked(value)
+            elif isinstance(setting.default, str):
+                w.setText(value)
             else:
                 w.setValue(value)
             w.blockSignals(False)
@@ -280,7 +285,8 @@ class SettingsWindow(QMainWindow):
         for s in SETTINGS:
             w = self.widgets[s.key]
             value = w.currentData() if s.choices else (
-                w.isChecked() if isinstance(s.default, bool) else w.value())
+                w.isChecked() if isinstance(s.default, bool) else
+                w.text() if isinstance(s.default, str) else w.value())
             if applies(s, mode) or value != self.loaded_widget_values.get(s.key):
                 values[s.key] = value
         return values
@@ -317,6 +323,13 @@ class SettingsWindow(QMainWindow):
         self.widgets['present_fsr_max_upsampling_passes'].setEnabled(effect == 'fsr')
         self.widgets['present_frame_generation'].setEnabled(temporal)
         self.widgets['present_fsr3_ghosting_reduction'].setEnabled(effect == 'fsr3')
+        online = self.widgets['network_enabled'].isChecked()
+        lobby = online and bool(self.widgets['network_lobby_server'].text().strip())
+        for key in ('network_lobby_server', 'network_frame_rate_lock', 'network_address',
+                    'network_broadcast_peers'):
+            self.widgets[key].setEnabled(online)
+        for key in ('network_lobby_room', 'network_lobby_password'):
+            self.widgets[key].setEnabled(lobby)
         self.widgets['present_cas_additional_sharpness'].setEnabled(effect == 'cas')
         for key in ('window_width', 'window_height'):
             self.widgets[key].setEnabled(not self.widgets['fullscreen'].currentData())

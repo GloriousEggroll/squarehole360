@@ -186,6 +186,8 @@ if(TARGET unit_tests)
     target_sources(unit_tests PRIVATE tests/wait_pacing_test.cpp)
     target_sources(unit_tests PRIVATE tests/pending_query_results_test.cpp)
     target_sources(unit_tests PRIVATE tests/async_shader_translation_test.cpp)
+    target_sources(unit_tests PRIVATE tests/network_test.cpp src/gow3_identity.cpp)
+    target_include_directories(unit_tests PRIVATE src)
     target_include_directories(unit_tests PRIVATE "${REXSDK_DIR}/thirdparty/disasm")
 endif()
 
@@ -207,7 +209,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
             ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
         target_include_directories(unit_tests PRIVATE src ${CMAKE_BINARY_DIR})
     endif()
-    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp src/gow3_host.cpp
+    # Self-hostable lobby and relay for internet System Link; header-only use of
+    # the SDK's protocol definition.
+    add_executable(squarehole-lobby tools/lobby/lobby_server.cpp)
+    target_include_directories(squarehole-lobby PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/vendor/rexglue-sdk/include")
+    target_compile_features(squarehole-lobby PRIVATE cxx_std_20)
+    if(WIN32)
+        target_link_libraries(squarehole-lobby PRIVATE ws2_32)
+    endif()
+    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp src/gow3_host.cpp
         src/renderer/gears_bridge.cpp src/renderer/native/getdata_inline_leaf.cpp
         ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
     rexglue_setup_target(gow3)

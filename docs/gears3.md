@@ -61,8 +61,9 @@ From this directory:
 
 Run uses `build/bin/gow3`, mounts `game/`, and stores saves and caches in
 `user/`. This is a Release build. Normal launches do not load RenderDoc or
-enable its capture overlay; graphics capture requires an explicit RenderDoc launch. Xbox Live is unavailable; local socket operations remain enabled
-because even the offline campaign requires them.  Start a **New Campaign** if an older checkpoint loads
+enable its capture overlay; graphics capture requires an explicit RenderDoc launch. Xbox Live is unavailable. Co-op, Horde, Beast and
+private Versus work through System Link, on a LAN or over the internet through
+a lobby server; see [Multiplayer](multiplayer.md).  Start a **New Campaign** if an older checkpoint loads
 the empty world; those saves were preserved, not replaced.
 Normal builds also omit per-function guest tracing checks. For a diagnostic
 build that needs function/state tracing, configure CMake with

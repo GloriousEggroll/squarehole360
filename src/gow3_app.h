@@ -15,6 +15,7 @@
 #include <rex/memory.h>
 #include <rex/graphics/graphics_system.h>
 #include "gameplay_hooks.h"
+#include "gow3_identity.h"
 #include "gow3_settings.h"
 #include "gow3_settings_menu.h"
 #include "renderer/gears_bridge.h"
@@ -43,6 +44,9 @@ class Gow3App : public rex::ReXApp {
   void OnLoadConfig(const std::filesystem::path& path) override {
     Gow3LoadSettingsConfig(path);
   }
+
+  // Before the runtime creates the profile; logging is up by now.
+  void OnPostInitLogging() override { Gow3PrepareIdentity(user_data_root()); }
 
   void OnPostLoadXexImage() override {
     Gow3ConfigureFrameRate(runtime()->memory()->virtual_membase());
@@ -106,7 +110,6 @@ class Gow3App : public rex::ReXApp {
   }
 
   // Override virtual hooks for further customization:
-  // void OnPostInitLogging() override {}
   // void OnPreSetup(rex::RuntimeConfig& config) override {}
   // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostSetup() override {}

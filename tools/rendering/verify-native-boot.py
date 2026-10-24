@@ -701,6 +701,7 @@ def main():
     parser.add_argument("--input-sequence", type=Path, help="JSON list of timed keys/screenshots in the private compositor")
     parser.add_argument("--guest-command-line", default="", help="Pass the original game's command line through SDK --cl for an isolated engine-command test")
     parser.add_argument("--copy-user-data", action="store_true", help="Copy local game saves/profiles into the disposable test installation")
+    parser.add_argument("--user-data-source", type=Path, help="With --copy-user-data, copy saves/profiles from this directory instead of user/ (e.g. a save under user-backups/)")
     parser.add_argument("--ownership", action="store_true", help="Legacy option; Native always owns scene rendering")
     parser.add_argument("--trace-input", action="store_true", help="Log bounded MnK keyboard/focus/polling diagnostics in the isolated test")
     parser.add_argument("--hardware", action="store_true", help="Use the system Vulkan driver with the same isolated compositor and inputs")
@@ -1341,17 +1342,18 @@ def main():
         if args.close_during_pipeline_prewarm:
             (temporary / "close-during-pipeline-prewarm").touch()
         if args.copy_user_data:
+            user_source = (args.user_data_source or ROOT / "user").resolve()
             seed_identity = {"schema": 1, "stage": "before_guest_launch", "verified": False,
                              "scope": "user tree excluding every child named cache",
-                             "source_root": str(ROOT / "user"), "private_root": str(temporary / "user")}
+                             "source_root": str(user_source), "private_root": str(temporary / "user")}
             try:
-                seed_identity["source_before"] = user_data_manifest(ROOT / "user")
+                seed_identity["source_before"] = user_data_manifest(user_source)
             except (OSError, ValueError) as error:
                 seed_identity["error"] = str(error)
-            shutil.copytree(ROOT / "user", temporary / "user", ignore=shutil.ignore_patterns("cache"))
+            shutil.copytree(user_source, temporary / "user", ignore=shutil.ignore_patterns("cache"))
             if "source_before" in seed_identity:
                 try:
-                    seed_identity["source_after"] = user_data_manifest(ROOT / "user")
+                    seed_identity["source_after"] = user_data_manifest(user_source)
                     seed_identity["private_before_launch"] = user_data_manifest(temporary / "user")
                     seed_identity["verified"] = (seed_identity["source_before"] == seed_identity["source_after"] ==
                                                   seed_identity["private_before_launch"])
