@@ -25,7 +25,7 @@ using Values = std::map<std::string, std::string>;
 // Keep tools/settings/model.py LIVE_SETTINGS in sync; checked by settings tests.
 const std::set<std::string> live_keys = {
   "fullscreen", "window_width", "window_height", "gow3_frame_limit_mode", "framerate_limit",
-  "present_effect", "present_fsr_sharpness_reduction",
+  "present_effect", "present_fsr_sharpness_reduction", "present_fsr3_ghosting_reduction",
   "present_fsr_max_upsampling_passes", "present_cas_additional_sharpness",
   "present_dither", "swap_post_effect", "present_frame_generation",
   "gow3_low_latency", "present_anti_lag"

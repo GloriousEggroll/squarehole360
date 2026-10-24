@@ -112,6 +112,7 @@ class GameSettings final : public rex::ui::ImGuiDialog {
       return values_["present_effect"] == "fsr3" || values_["present_effect"] == "dlss" ||
              values_["present_effect"] == "xess";
     if (key == "present_fsr_max_upsampling_passes") return values_["present_effect"] == "fsr";
+    if (key == "present_fsr3_ghosting_reduction") return values_["present_effect"] == "fsr3";
     if (key.starts_with("present_fsr_"))
       return values_["present_effect"] == "fsr" || values_["present_effect"] == "fsr3" ||
              values_["present_effect"] == "dlss" || values_["present_effect"] == "xess";

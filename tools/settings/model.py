@@ -77,6 +77,7 @@ SETTINGS = [
  S('present_effect', 'Upscaling', 'fsr', 'Image', 'FSR 1 scales the final image to the window. FSR 3.1, DLSS and XeSS (native renderer) also use depth and motion from earlier frames for a sharper, steadier image; menus use FSR 1. DLSS or XeSS fall back to FSR 3.1 where unavailable.', (('fsr','AMD FSR 1 (spatial)'),('fsr3','AMD FSR 3.1 (temporal)'),('dlss','NVIDIA DLSS (temporal, NVIDIA RTX)'),('xess','Intel XeSS (temporal, Windows)'),('cas','AMD CAS sharpening'),('bilinear','Bilinear')), renderer='shared'),
  S('present_frame_generation', 'Frame generation', False, 'Image', 'FSR 3.1 shows a generated frame between game frames: smoother motion at the cost of some input latency. Needs FSR 3.1 upscaling; best above 60 FPS.', renderer='shared'),
  S('present_fsr_sharpness_reduction', 'FSR softness', 0.2, 'Image', '0 is the sharpest; larger values reduce sharpening.', minimum=0, maximum=2, renderer='shared'),
+ S('present_fsr3_ghosting_reduction', 'FSR 3.1 ghosting reduction', 1.0, 'Image', 'Shortens FSR 3.1\u2019s history. 0 keeps the sharpest still image; higher values reduce smearing on grass, foliage and animated characters but add shimmer.', minimum=0, maximum=1, renderer='shared'),
  S('present_fsr_max_upsampling_passes', 'FSR scaling passes', 2, 'Image', 'Two passes cover 720p to 4K. Each pass scales by at most 2×. FSR 3.1 always uses one.', minimum=1, maximum=4, renderer='shared'),
  S('present_cas_additional_sharpness', 'CAS sharpness', 0.0, 'Image', 'Additional sharpening when CAS is selected.', minimum=0, maximum=1, renderer='shared'),
  S('resolution_scale', 'Internal resolution', 1, 'Image', '1× renders at the game’s original resolution; 2× is about 1440p and 3× about 4K.', ((1,'1× (original resolution)'),(2,'2× (about 1440p)'),(3,'3× (about 4K)')), renderer='xenia'),
@@ -116,7 +117,7 @@ BY_KEY = {s.key:s for s in SETTINGS}
 # The C++ watcher applies only these reviewed settings, on their owning threads.
 LIVE_SETTINGS = {
     'fullscreen', 'window_width', 'window_height', 'gow3_frame_limit_mode', 'framerate_limit',
-    'present_effect', 'present_fsr_sharpness_reduction',
+    'present_effect', 'present_fsr_sharpness_reduction', 'present_fsr3_ghosting_reduction',
     'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
     'present_dither', 'swap_post_effect', 'present_frame_generation',
     'gow3_low_latency', 'present_anti_lag',

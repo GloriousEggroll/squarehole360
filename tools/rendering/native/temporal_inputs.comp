@@ -6,7 +6,11 @@
 //   motion  = camera reprojection of that depth, in pixels, previous - current;
 //             where the game's own velocity pass drew a moving object (or the
 //             camera-attached player), its full screen motion instead
-//   reactive= 1 where the HUD changed the frame after the scene was finished
+//   mask    = red: reactive, how much the upscaler should trust this frame
+//             over history: high where a surface moved by itself (vertex
+//             animation such as grass in the wind, which has no motion
+//             vectors) and under the HUD; green: HUD coverage, where the HUD
+//             changed the frame after the scene was finished
 #extension GL_EXT_samplerless_texture_functions : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -17,10 +21,12 @@ layout(binding = 2) uniform texture2D hud_before;       // scene before the HUD
 layout(binding = 3) uniform texture2D hud_after;        // final frame
 layout(binding = 4, r32f) uniform writeonly image2D depth_out;
 layout(binding = 5, rg16f) uniform writeonly image2D motion_out;
-layout(binding = 6, r8) uniform writeonly image2D reactive_out;
+layout(binding = 6, rg8) uniform writeonly image2D reactive_out;
 // UE3 velocity buffer at half resolution: clampLength(ndc motion * scale)
 // * 0.5 + 0.5, current minus previous; 0 where nothing was drawn.
 layout(binding = 7) uniform texture2D object_velocity;
+// The previous frame's depth output.
+layout(binding = 8) uniform texture2D previous_depth;
 
 layout(push_constant) uniform Constants {
   // Rows of the current-NDC -> previous-clip matrix (row-vector convention).
@@ -31,7 +37,11 @@ layout(push_constant) uniform Constants {
   float min_depth;  // Depth of a point at infinity; sky clears below it.
   vec2 velocity_scale;  // Screen pixels per encoded unit (x right, y down).
   vec2 jitter;          // This frame's jitter in pixels; the game's velocity includes it.
+  float depth_scale;    // View depth = depth_scale / (device depth - min_depth).
+  float reactive_floor; // Lowest reactive value anywhere (shorter history).
 } pc;
+
+float ViewDepth(float device) { return pc.depth_scale / max(device - pc.min_depth, 1e-7); }
 
 void main() {
   const uvec2 pixel = gl_GlobalInvocationID.xy;
@@ -49,10 +59,15 @@ void main() {
   const vec4 clip = ndc.x * pc.reprojection[0] + ndc.y * pc.reprojection[1] +
                     ndc.z * pc.reprojection[2] + ndc.w * pc.reprojection[3];
   vec2 motion = vec2(0.0);
+  vec2 previous_uv = uv;
+  float expected_previous_depth = -1.0;
   if (clip.w > 1e-6) {
-    const vec2 previous = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
-    motion = (previous - uv) * vec2(pc.size);
+    previous_uv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    motion = (previous_uv - uv) * vec2(pc.size);
+    // Where a static surface at this depth was in the previous frame.
+    if (depth > pc.min_depth) expected_previous_depth = 1.0 - clip.z / clip.w;
   }
+  bool object_motion = false;
   if ((pc.flags & 8u) != 0u) {
     const vec4 texel = texelFetch(object_velocity, p / 2, 0);
     const vec2 encoded = (pc.flags & 16u) != 0u ? texel.bg : texel.rg;
@@ -63,22 +78,46 @@ void main() {
         // Written as still (the camera-attached player uses a zero scale): no
         // jitter is folded into it, so the motion vector is zero too.
         motion = vec2(0.0);
+        object_motion = true;
       } else {
         // Current (jittered) minus previous, in pixels; motion vectors are
         // previous minus the unjittered current position.
         const vec2 velocity = steps * (2.0 / 255.0) * pc.velocity_scale;
         motion = pc.jitter - velocity;
+        object_motion = true;
       }
     }
   }
   imageStore(motion_out, p, vec4(motion, 0.0, 0.0));
 
-  float reactive = 0.0;
+  // Surfaces that moved on their own (vertex animation) have only camera
+  // motion: the previous frame shows a different depth where this surface
+  // should have been. A 3x3 neighbourhood absorbs the sub-pixel jitter on
+  // static edges; disocclusions also count, which the upscaler expects.
+  float moved = 0.0;
+  if ((pc.flags & 32u) != 0u && !object_motion && expected_previous_depth > 0.0) {
+    const ivec2 q = ivec2(floor(previous_uv * vec2(pc.size)));
+    if (all(greaterThanEqual(q, ivec2(1))) && all(lessThan(q, ivec2(pc.size) - 1))) {
+      float nearest = 1e30, farthest = 0.0;
+      for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+          const float view = ViewDepth(texelFetch(previous_depth, q + ivec2(x, y), 0).r);
+          nearest = min(nearest, view);
+          farthest = max(farthest, view);
+        }
+      }
+      const float expected = ViewDepth(expected_previous_depth);
+      const float tolerance = 0.02 * expected + 2.0;  // 2% plus a few cm
+      if (expected < nearest - tolerance || expected > farthest + tolerance) moved = 0.75;
+    }
+  }
+
+  float hud = 0.0;
   if ((pc.flags & 2u) != 0u) {
     const vec4 before = texelFetch(hud_before, p, 0);
     const vec4 after = texelFetch(hud_after, p, 0);
     const vec3 delta = abs(after.rgb - before.rgb);
-    reactive = max(delta.r, max(delta.g, delta.b)) > (1.0 / 255.0) ? 1.0 : 0.0;
+    hud = max(delta.r, max(delta.g, delta.b)) > (1.0 / 255.0) ? 1.0 : 0.0;
   }
-  imageStore(reactive_out, p, vec4(reactive));
+  imageStore(reactive_out, p, vec4(max(max(moved, hud), pc.reactive_floor), hud, 0.0, 0.0));
 }

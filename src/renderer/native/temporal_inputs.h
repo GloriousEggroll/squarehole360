@@ -56,7 +56,8 @@ std::optional<std::array<float,2>> NativeTemporalVelocityScale(std::span<const u
 std::array<std::array<float,4>,4> NativeTemporalReprojection(
     const NativeTemporalCamera& current,const NativeTemporalCamera& previous);
 // Projection parameters for the upscaler; false if the matrix is degenerate.
-struct NativeTemporalProjection {float near_plane=1,fov_y=1,infinity_depth=0;};
+// View depth is depth_scale / (device depth - infinity_depth).
+struct NativeTemporalProjection {float near_plane=1,fov_y=1,infinity_depth=0,depth_scale=1;};
 bool NativeTemporalDescribeProjection(const NativeTemporalCamera&,NativeTemporalProjection&);
 
 class NativeTemporalInputs {
@@ -115,6 +116,7 @@ private:
     uint64_t frame_id_=0;
     uint32_t phase_=0;
     NativeTemporalJitter jitter_;
+    float reactive_floor_=0;
     std::optional<NativeTemporalCamera> camera_,previous_camera_;
     plume::RenderTexture* world_depth_=nullptr;
     plume::RenderTexture* velocity_=nullptr;
@@ -123,6 +125,8 @@ private:
     plume::RenderTexture* hud_source_=nullptr;
     // This frame's output set, acquired at the HUD snapshot or at Finish.
     std::shared_ptr<Frame> current_;
+    // The last frame's outputs; its depth finds surfaces that moved on their own.
+    std::shared_ptr<Frame> previous_;
     std::vector<std::shared_ptr<Frame>> frames_;
     std::chrono::steady_clock::time_point last_finish_{};
     bool history_valid_=false;

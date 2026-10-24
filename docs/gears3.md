@@ -178,8 +178,7 @@ With **Upscaling** set to a temporal mode, the native renderer jitters the
 camera by a sub-pixel amount each frame and hands the upscaler the scene depth,
 motion vectors and a mask of the HUD. Motion comes from the camera, and for
 moving characters and objects from the game's own motion-blur velocity pass
-(the player, attached to the camera, is treated as still on screen); cutscenes
-have no velocity pass and use camera motion only. The HUD mask is taken from the frame just before
+(the player, attached to the camera, is treated as still on screen). The HUD mask is taken from the frame just before
 the game's first HUD draw, so HUD and subtitles are never smeared by history.
 Menus, movies and loading screens have no 3D scene; they use FSR 1.
 
@@ -195,9 +194,19 @@ library cannot run them; the log says which upscaler is active. FSR 4 and XeSS
 frame generation exist only for Direct3D 12 and are not available to this
 Vulkan renderer.
 
+FSR 3.1 at 720p to 4K (a 3× ratio, AMD's Ultra Performance) leans on about
+60 frames of history. Surfaces that animate without motion vectors, such as
+grass in the wind, can smear, and a still image is softer than with FSR 1.
+`present_fsr3_ghosting_reduction` (0 to 1, default 1) shortens that history: it
+writes a minimum reactive value everywhere (up to 0.6) and lowers FSR's
+accumulation per frame (from 0.333 to 0.1). In an offline test against a known
+pattern, 1 cut the error on swaying content by about a quarter, with more
+shimmer from frame to frame. FSR 1 has no history and so no ghosting at all.
+
 **Frame generation** (`present_frame_generation = true`, with any temporal
 upscaler) uses FSR 3.1 frame interpolation: between two game frames it shows a
-generated frame, then the real frame half a frame later. Motion looks smoother;
+generated frame, then the real frame half a game frame after the generated
+one has finished on the GPU. Motion looks smoother;
 input still follows the real frame rate and the real frame is shown slightly
 later, so it suits a base rate of 60 FPS or more. The HUD of the real frame is
 drawn over generated frames. On an RX 9070 XT at 4K the base rate in the Act 1

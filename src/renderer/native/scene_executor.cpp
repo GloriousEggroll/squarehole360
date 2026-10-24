@@ -8653,8 +8653,6 @@ public:
             readonly_query_read_physical_=edram_memory_->physical_serial();
         } else readonly_query_read_owner_.reset();
     }
-    // First draw of a frame opens temporal capture; a UE3 Canvas draw into a
-    // frame-sized target snapshots the colour target before the HUD.
     // First draw of a frame opens temporal capture. The colour target is
     // copied before the HUD: at a UE3 Canvas draw into a frame-sized target, or
     // at the next full-frame draw into the target of the tonemap (the first
@@ -8705,6 +8703,8 @@ public:
             } else hud=temporal_tonemap_base_==base;
         }
         if(!hud)return;
+        if(config_.temporal_trace_frames>temporal_trace_logged_&&temporal_trace_.size()<64)
+            temporal_trace_.push_back("^ HUD snapshot before this draw");
         auto& surface=Surface(surfaces[0]);
         RunTransferScope([&]{temporal_->RecordHudSnapshot(transfer_batch_->BeginStage(),surface);},0);
     }
@@ -8724,11 +8724,12 @@ public:
         }
         temporal_frame_open_=false;temporal_velocity_base_=-1;
         auto inputs=temporal_->Finish(commands,world,late,hud,velocity);
-        if(config_.temporal_trace_frames>temporal_trace_logged_&&inputs&&!inputs->hudless_color.image&&
-           temporal_->statistics().frames%240==0) {
+        if(config_.temporal_trace_frames>temporal_trace_logged_&&inputs&&
+           temporal_->statistics().frames%60==0) {
             ++temporal_trace_logged_;
-            REXLOG_INFO("Temporal trace {}: {} draws after the last scene-view draw, no HUD found",
-                        temporal_trace_logged_,temporal_trace_.size());
+            REXLOG_INFO("Temporal trace {} (frame {}): {} draws after the last scene-view draw, HUD {}",
+                        temporal_trace_logged_,temporal_->statistics().frames,temporal_trace_.size(),
+                        inputs->hudless_color.image?"found":"not found");
             for(const auto& entry:temporal_trace_)REXLOG_INFO("  {}",entry);
         }
         temporal_trace_.clear();

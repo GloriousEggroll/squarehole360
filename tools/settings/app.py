@@ -316,6 +316,7 @@ class SettingsWindow(QMainWindow):
         self.widgets['present_fsr_sharpness_reduction'].setEnabled(effect == 'fsr' or temporal)
         self.widgets['present_fsr_max_upsampling_passes'].setEnabled(effect == 'fsr')
         self.widgets['present_frame_generation'].setEnabled(temporal)
+        self.widgets['present_fsr3_ghosting_reduction'].setEnabled(effect == 'fsr3')
         self.widgets['present_cas_additional_sharpness'].setEnabled(effect == 'cas')
         for key in ('window_width', 'window_height'):
             self.widgets[key].setEnabled(not self.widgets['fullscreen'].currentData())
