@@ -26,7 +26,7 @@ struct IndexGeometryParameters {
 // never incorporated into these index words.
 inline uint32_t IndexGeometryCount(std::span<const uint8_t> bytes,const IndexGeometryParameters& p) {
     if(!p.count||p.count>4u*1024*1024)throw std::runtime_error("Invalid draw count");
-    if(p.primitive!=4&&p.primitive!=6&&p.primitive!=13&&!(p.primitive==8&&p.rectangle))
+    if(p.primitive!=2&&p.primitive!=3&&p.primitive!=4&&p.primitive!=6&&p.primitive!=13&&!(p.primitive==8&&p.rectangle))
         throw std::runtime_error("Unsupported scene primitive "+std::to_string(p.primitive));
     if(p.rectangle&&(p.source!=IndexGeometrySource::Sequential||!p.up_padding||p.primitive!=8||p.count!=3))
         throw std::runtime_error("Unsupported rectangle vertex program/layout");
@@ -41,7 +41,11 @@ inline uint32_t IndexGeometryCount(std::span<const uint8_t> bytes,const IndexGeo
     } else if(p.primitive==6) {
         if(p.strip_restart)throw std::runtime_error("Strip restart unsupported");
         count=p.count>2?uint64_t(p.count-2)*3:0;
-    }
+    } else if(p.primitive==3) {
+        // Line strips draw as line lists, like triangle strips as lists.
+        if(p.strip_restart)throw std::runtime_error("Strip restart unsupported");
+        count=p.count>1?uint64_t(p.count-1)*2:0;
+    } else if(p.primitive==2)count=p.count/2*2;
     if(p.rectangle)count=6;
     if(!count||count*4>16u*1024*1024)throw std::runtime_error("Invalid draw upload extent");
     return uint32_t(count);
@@ -53,9 +57,12 @@ inline std::vector<uint32_t> BuildIndexGeometry(std::span<const uint8_t> bytes,c
     if(p.source==IndexGeometrySource::Sequential) {
         source.resize(p.count);std::iota(source.begin(),source.end(),p.first_index);
     } else source=DecodeIndexPayload(bytes,p.count,p.width,p.endian,p.up_padding);
-    if(p.primitive!=6&&p.primitive!=13)return source;
+    if(p.primitive==2)source.resize(count);
+    if(p.primitive!=3&&p.primitive!=6&&p.primitive!=13)return source;
     std::vector<uint32_t> triangles;triangles.reserve(count);
-    if(p.primitive==13) {
+    if(p.primitive==3) {
+        for(uint32_t i=1;i<p.count;++i){triangles.push_back(source[i-1]);triangles.push_back(source[i]);}
+    } else if(p.primitive==13) {
         for(uint32_t i=0;i<p.count;i+=4)for(auto j:{0u,1u,2u,0u,2u,3u})triangles.push_back(source[i+j]);
     } else {
         for(uint32_t i=2;i<p.count;++i) {

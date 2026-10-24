@@ -6410,7 +6410,7 @@ public:
         unsigned count=function=="BeginIndexedVertices"?args[4]:up?args[2]:args[3],primitive=args[1];
         const bool rectangle=o.Rectangle();
         if(!count||count>4*1024*1024)throw std::runtime_error("Invalid draw count");
-        if(primitive!=4&&primitive!=6&&primitive!=13&&!(primitive==8&&rectangle))throw std::runtime_error("Unsupported scene primitive "+std::to_string(primitive));
+        if(primitive!=2&&primitive!=3&&primitive!=4&&primitive!=6&&primitive!=13&&!(primitive==8&&rectangle))throw std::runtime_error("Unsupported scene primitive "+std::to_string(primitive));
         struct DrawAttachment {DrawSurfaceInput identity;std::optional<SurfaceLayout> storage;};
         std::array<DrawAttachment,5> attachments;
         const auto surfaces=o.Surfaces();
@@ -6434,7 +6434,9 @@ public:
             decoded_words[(0x2934-kDrawStateOffset)/4]=0;
             decoded_words[(0x2948-kDrawStateOffset)/4]&=~(7u<<11);
         }
-        auto state=DecodeDrawState(decoded_words,extent_width,extent_height,rectangle?8:4,config_.native_fsi);
+        // Indices are expanded to lists, so strips use the list topology.
+        const bool lines=primitive==2||primitive==3;
+        auto state=DecodeDrawState(decoded_words,extent_width,extent_height,rectangle?8:lines?2:4,config_.native_fsi);
         NativeFsiShaderConstants fsi_shared;auto& shared=fsi_shared.shared;
         shared.half_pixel=state.half_pixel;shared.alpha_threshold=state.alpha_reference;
         if(config_.native_fsi) {

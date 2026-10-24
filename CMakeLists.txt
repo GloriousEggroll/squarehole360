@@ -103,6 +103,8 @@ if(GOW3_ENABLE_NATIVE_RENDERER)
 endif()
 
 add_executable(gow3-texture-layout-test tests/native_texture_test.cpp src/renderer/native/texture_data.cpp)
+add_executable(gow3-index-geometry-test tests/index_geometry_test.cpp)
+target_include_directories(gow3-index-geometry-test PRIVATE src)
 add_executable(gow3-certified-snapshot-test tools/rendering/native/certified_snapshot_test.cpp)
 target_include_directories(gow3-certified-snapshot-test PRIVATE src)
 target_link_libraries(gow3-certified-snapshot-test PRIVATE rex::runtime)
@@ -217,7 +219,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     if(WIN32)
         target_link_libraries(squarehole-lobby PRIVATE ws2_32)
     endif()
-    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp src/gow3_host.cpp
+    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_content.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp src/gow3_host.cpp
         src/renderer/gears_bridge.cpp src/renderer/native/getdata_inline_leaf.cpp
         ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
     rexglue_setup_target(gow3)

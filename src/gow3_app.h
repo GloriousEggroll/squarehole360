@@ -15,6 +15,7 @@
 #include <rex/memory.h>
 #include <rex/graphics/graphics_system.h>
 #include "gameplay_hooks.h"
+#include "gow3_content.h"
 #include "gow3_identity.h"
 #include "gow3_settings.h"
 #include "gow3_settings_menu.h"
@@ -50,6 +51,7 @@ class Gow3App : public rex::ReXApp {
 
   void OnPostLoadXexImage() override {
     Gow3ConfigureFrameRate(runtime()->memory()->virtual_membase());
+    Gow3InstallDownloadedContent(runtime()->kernel_state(), user_data_root());
   }
 
   void OnPostSetup() override {

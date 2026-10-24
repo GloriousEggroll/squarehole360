@@ -50,6 +50,15 @@ The normal launcher checks the imported inventory, sizes and executable hash;
 See [the asset tool documentation](../tools/assets/README.md) for native shader
 compilation, recovery, and the boundary between extracted and converted assets.
 
+### Downloadable content
+
+Put your own DLC packages (the files named like
+`4D5308AB/00000002/85F354E7...`, without folders) in `user/dlc/`. The next
+start installs each new package once into `user/0000000000000000/4D5308AB/00000002/`,
+where the game finds it like content on a console hard drive; the packages in
+`user/dlc/` can be deleted afterwards. The map packs, the Horde Command Pack and
+RAAM's Shadow are supported. Booster's "Swamp" map is listed as Bullet Marsh.
+
 From this directory:
 
 ```sh
