@@ -121,6 +121,24 @@ for the tactical view, the middle button or V to zoom, 1 to 4 or the wheel for
 weapons, Tab for the scoreboard and Escape to pause. Input settings apply while
 the game runs.
 
+Button prompts name the bound keys while the keyboard and mouse was used more
+recently than a controller (and at start when `mnk_mode` is on), and switch
+back and forth as soon as the other device is used. Menus and
+message boxes get their button glyphs from the localized
+`GearGameUI.ControllerFont` strings, so `Localize` (`0x822FC8D0`) returns the
+key, such as `[SPACE]`, for those entries instead. Menus resolve this text when
+they set it, through `UGFxObject::SetString` (`0x8292D488`), `SetText`
+(`0x8292D5C0`), `TranslateString` (`0x82942C38`) or ActionScript calls
+(`0x82941BB0`, `0x82B6B5A8`). Text and calls that name controller buttons are
+remembered with their markup and, when the device changes, set or made again on
+the game thread from the viewport's input processing, for objects that still
+exist. The HUD's action prompts are
+tiles of the `WarfareHUD_ActionIcons`, `HUD_ActionIcons2`, `Gears_WeaponIcons`
+and `Gears3_WeaponIcons` atlases drawn through `UCanvas::DrawTile`
+(`0x82736CE0`); when a tile contains a button glyph (A, B, X, Y, the sticks and
+their clicks, LT, RT, RB) the game draws the tile, then a key cap over the glyph with the canvas's
+default texture and the key name with `UCanvas::WrappedPrint` (`0x82737010`).
+
 Stereo output now uses the runtime's normalized downmix to avoid the observed
 clipping when six game channels were mixed by the audio server. The latest
 interactive campaign checkpoint is now in the normal `user/` save root:

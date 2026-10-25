@@ -66,6 +66,7 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   mouse_look_enabled = ReadInstruction(guest_base, 0x8296DCB8) == 0x7D8802A6 &&
       HasUtf16Name(guest_base, 0x82146AA8, "MouseX") && HasUtf16Name(guest_base, 0x82146AB8, "MouseY");
   if (!mouse_look_enabled) REXLOG_WARN("Gears mouse look disabled: executable does not match");
+  Gow3ConfigureInputPrompts(guest_base);
   supported_image = ReadInstruction(guest_base, 0x8253D9B0) == 0xC02304C8 &&
                     ReadInstruction(guest_base, 0x82AF66BC) == 0x39600002;
   enabled = supported_image && REXCVAR_GET(gow3_60fps);
@@ -150,11 +151,14 @@ void Gow3OverrideScreenSize() {
 // passes each controller's sticks and triggers to the viewport client's
 // InputAxis. Afterwards pass mouse motion as the MouseX and MouseY keys, as the
 // engine's PC viewports do; the game binds them to its PlayerInput mouse look.
+void Gow3RefreshInputPrompts(PPCContext& ctx, uint8_t* base);
+
 REX_EXTERN(__imp__sub_8296DCB8);
 REX_EXTERN(sub_8296DCB8) {
   const uint32_t viewport = ctx.r3.u32;
   const double delta_time = ctx.f1.f64;
   __imp__sub_8296DCB8(ctx, base);
+  Gow3RefreshInputPrompts(ctx, base);
   if (!mouse_look_enabled) return;
   for (uint32_t controller = 0; controller < 4; ++controller) {
     double dx = 0.0, dy = 0.0;

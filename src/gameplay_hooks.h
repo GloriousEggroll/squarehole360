@@ -9,6 +9,7 @@ namespace rex::ppc { union Register; }
 bool Gow3UncapFrameRate();
 void Gow3SetPresentInterval(rex::ppc::Register& interval);
 void Gow3ConfigureFrameRate(const uint8_t* guest_base);
+void Gow3ConfigureInputPrompts(const uint8_t* guest_base);
 void Gow3OverrideScreenSize();
 void Gow3ScreenWidthConstant(rex::ppc::Register& value);
 void Gow3ScreenHeightConstant(rex::ppc::Register& value);
