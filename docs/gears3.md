@@ -18,12 +18,24 @@ by default. The Xenia-derived renderer remains available for compatibility.
 
 ## Run and build
 
-Each user supplies their own Xbox 360 ISO. Import it once before building or
-launching; game content and converted renderer data are not release inputs:
+Each user supplies their own copy of the game; game content and converted
+renderer data are not release inputs. When the game files are missing, the
+launcher opens a setup wizard (`tools/setup-wizard.py`, a window with PySide6
+or prompts in a terminal). It asks for your Xbox 360 disc image (ISO) or a
+folder with the extracted disc files, imports them, then offers to add DLC from
+folders or `.zip`, `.tar.gz` and `.tar.xz` archives. The same steps work from
+the command line:
 
 ```sh
-python3 tools/import-assets.py import "/path/to/gow3.iso"
+python3 tools/import-assets.py import "/path/to/gow3.iso"   # or a game folder
+python3 tools/import-assets.py dlc ~/Downloads               # DLC folders/archives
+python3 tools/setup-wizard.py --dlc                          # add DLC later
 ```
+
+Each game has a definition in `tools/assets/games/` (`gow3.json` here): its
+executable, every base-game file with its size and SHA-256, and its known DLC
+packages. Folders and archives may contain other files; only the listed ones
+are used, and each is checked before it is copied.
 
 The portable Python tool extracts the disc into `game/`, verifies checksums,
 and prepares a local asset catalog and native shader inputs in
@@ -52,8 +64,9 @@ compilation, recovery, and the boundary between extracted and converted assets.
 
 ### Downloadable content
 
-Put your own DLC packages (the files named like
-`4D5308AB/00000002/85F354E7...`, without folders) in `user/dlc/`. The next
+The setup wizard and `import-assets.py dlc` find your own DLC packages (files
+named like `4D5308AB/00000002/85F354E7...`) in folders and archives, check them,
+and copy them to `user/dlc/`; packages can also be put there by hand. The next
 start installs each new package once into `user/0000000000000000/4D5308AB/00000002/`,
 where the game finds it like content on a console hard drive; the packages in
 `user/dlc/` can be deleted afterwards. The map packs, the Horde Command Pack and

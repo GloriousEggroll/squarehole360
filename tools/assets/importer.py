@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 
+from .games import load_game
 from .xdvdfs import AssetError, DiscImage, safe_path
 
 
@@ -218,7 +219,7 @@ def check_ready(root, progress):
     return manifest
 
 
-def prepare_assets(game, target, files, progress, compile_shaders=False):
+def prepare_assets(game, target, files, progress, compile_shaders=False, global_shaders=None):
     """All asset-dependent native preparation belongs here, in versioned steps.
 
     Preserve cooked packages/texture caches for the existing engine loader.
@@ -226,7 +227,8 @@ def prepare_assets(game, target, files, progress, compile_shaders=False):
     target; no shader, texture, or mesh extracted from a developer's game is
     an input shipped with the application.
     """
-    source = game / GLOBAL_SHADERS
+    global_shaders = global_shaders or GLOBAL_SHADERS
+    source = game / global_shaders
     relative_source = "native/shaders/source"
     destination = target / relative_source
     destination.mkdir(parents=True)
@@ -247,7 +249,7 @@ def prepare_assets(game, target, files, progress, compile_shaders=False):
         shaders[digest] = dict(path=name, sha256=digest, offsets=[offset], **info)
     if not shaders:
         raise AssetError("No supported shader containers in the global shader cache")
-    source_manifest = dict(source=GLOBAL_SHADERS, source_sha256=hashlib.sha256(data).hexdigest(),
+    source_manifest = dict(source=global_shaders, source_sha256=hashlib.sha256(data).hexdigest(),
                            status="Local native renderer inputs; not a whole-game pipeline cache",
                            shaders=list(shaders.values()))
     write_json(destination / MANIFEST, source_manifest)
@@ -358,6 +360,121 @@ def import_iso(iso, output, progress, adopt=False, compile_shaders=False):
                     stage.rename(root)
                 progress("complete", 1, 1, f"Imported {len(records)} files into {root}")
                 return manifest
+
+
+def find_game_root(source, game, depth=3):
+    """The directory under source (itself included) that holds the game's executable."""
+    source = Path(source).expanduser().resolve()
+    pending = [(source, 0)]
+    while pending:
+        directory, level = pending.pop(0)
+        try:
+            names = {path.name.casefold(): path for path in directory.iterdir()}
+        except OSError:
+            continue
+        executable = names.get(game.executable.casefold())
+        if executable and executable.is_file():
+            return directory
+        if level < depth:
+            pending += [(path, level + 1) for path in sorted(names.values())
+                        if path.is_dir() and not is_link(path)]
+    raise AssetError(f"No {game.title} files found in {source}: {game.executable} is missing")
+
+
+def locate(root, relative):
+    """A file under root by relative path, matching each component case-insensitively."""
+    path = root
+    for part in safe_path(relative).parts:
+        exact = path / part
+        if exact.exists():
+            path = exact
+            continue
+        match = next((child for child in path.iterdir() if child.name.casefold() == part.casefold()), None) \
+            if path.is_dir() else None
+        if match is None:
+            return None
+        path = match
+    return path if path.is_file() and not is_link(path) else None
+
+
+def import_folder(source, output, progress, game=None, compile_shaders=False):
+    """Import the game's listed files from an extracted folder, verifying every digest."""
+    game = game or load_game()
+    root = output_root(output)
+    source_root = find_game_root(source, game)
+    progress("inspect", 0, 1, f"Checking {source_root}")
+    missing, sources = [], []
+    for entry in game.files:
+        path = locate(source_root, entry["path"])
+        if path is None or path.stat().st_size != entry["size"]:
+            missing.append(entry["path"])
+        else:
+            sources.append((entry, path))
+    if missing:
+        raise AssetError(f"{len(missing)} {game.title} files are missing or have the wrong size in {source_root}, "
+                         f"for example {missing[0]}")
+    progress("inspect", 1, 1, f"Found all {len(sources)} {game.title} files")
+    in_place = source_root == root
+    with destination_lock(root):
+        if (root / META / MANIFEST).exists():
+            verify(root, progress)
+            progress("complete", 1, 1, "The game is already imported and verified")
+            return read_manifest(root)
+        has_files = root.exists() and (not root.is_dir() or any(root.iterdir()))
+        if has_files and not in_place:
+            raise AssetError(f"Destination is not empty: {root}. Existing files will not be overwritten.")
+        total = sum(entry["size"] for entry, _ in sources)
+        if not in_place and shutil.disk_usage(root.parent).free < total + 64 * 1024 * 1024:
+            raise AssetError(f"Not enough space: at least {total + 64 * 1024 * 1024:,} free bytes required")
+        with tempfile.TemporaryDirectory(prefix=f".{root.name}.import-", dir=root.parent) as temporary:
+            stage = Path(temporary) / "game"
+            stage.mkdir()
+            game_dir = root if in_place else stage
+            if not in_place:
+                for directory in game.directories:
+                    (stage / directory).mkdir(parents=True, exist_ok=True)
+            records, done = [], 0
+            for entry, path in sources:
+                digest = hashlib.sha256()
+                target = None if in_place else asset_path(stage, entry["path"])
+                if target:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("rb") as stream, (target.open("xb") if target else open(os.devnull, "wb")) as out:
+                    while chunk := stream.read(4 * 1024 * 1024):
+                        out.write(chunk)
+                        digest.update(chunk)
+                        done += len(chunk)
+                        progress("verify" if in_place else "copy", done, total, entry["path"])
+                if digest.hexdigest() != entry["sha256"]:
+                    raise AssetError(f"{entry['path']} does not match {game.title} (checksum differs)")
+                records.append(dict(path=entry["path"], size=entry["size"], sha256=entry["sha256"],
+                                    kind=kind(entry["path"])))
+            if in_place:
+                check_tree(root, records, list(game.directories), False)
+            metadata = stage / META
+            prepared = prepare_assets(game_dir, metadata, records, progress, compile_shaders, game.global_shaders)
+            manifest = dict(format="gow3.asset-import", version=1, title_id=game.title_id,
+                            xex_sha256=game.xex_sha256, imported_at=datetime.now(timezone.utc).isoformat(),
+                            source=dict(format="folder", name=source_root.name),
+                            directories=list(game.directories), files=records, prepared=prepared)
+            write_json(metadata / MANIFEST, manifest)
+            check_files(game_dir, records, progress, "verify-game")
+            check_files(metadata, prepared["files"], progress, "verify-native")
+            if in_place:
+                metadata.rename(root / META)
+            else:
+                if root.exists():
+                    root.rmdir()
+                stage.rename(root)
+            progress("complete", 1, 1, f"Imported {len(records)} files into {root}")
+            return manifest
+
+
+def import_source(source, output, progress, game=None, compile_shaders=False):
+    """Import from an ISO file or an extracted folder."""
+    if Path(source).expanduser().is_dir():
+        return import_folder(source, output, progress, game, compile_shaders)
+    return import_iso(source, output, progress, False, compile_shaders)
 
 
 def hash_disc(disc, progress):

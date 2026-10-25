@@ -30,12 +30,20 @@ for ($i = 0; $i -lt $args.Count; $i++) {
 if ($checkAssets) {
     $python = Find-Python
     if ($python) {
-        $pythonArgs = @($python | Select-Object -Skip 1) + @('tools/import-assets.py', 'check', '--output', $gameDataRoot)
-        & $python[0] @pythonArgs
+        $prefix = @($python | Select-Object -Skip 1)
+        $checkArgs = $prefix + @('tools/import-assets.py', 'check', '--output', $gameDataRoot)
+        & $python[0] @checkArgs *> $null
         if ($LASTEXITCODE -ne 0) {
-            Write-Error ('Import your own ISO first: python tools/import-assets.py import "C:\path\to\gow3.iso"' +
-                "`nFor an existing extraction, add --adopt-existing; for a custom directory, add --output `"C:\path\to\game`".")
-            exit 1
+            # First run (or damaged files): the setup wizard imports your own
+            # copy of the game, then optionally its DLC.
+            $wizardArgs = $prefix + @('tools/setup-wizard.py', '--output', $gameDataRoot)
+            & $python[0] @wizardArgs
+            if ($LASTEXITCODE -eq 0) { & $python[0] @checkArgs }
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error ('The game files are not set up. Run tools/setup-wizard.py, or import your own ISO:' +
+                    "`n  python tools/import-assets.py import `"C:\path\to\gow3.iso`"")
+                exit 1
+            }
         }
     } else {
         Write-Warning 'Python not found; skipping the asset check.'

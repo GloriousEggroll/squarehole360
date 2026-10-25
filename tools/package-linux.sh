@@ -75,14 +75,16 @@ fi
 cp README.md LICENSE THIRD_PARTY_NOTICES.md "$stage/"
 cp docs/gears3.md docs/multiplayer.md "$stage/docs/"
 git show HEAD:config/gow3.toml > "$stage/config/gow3.toml"
-cp tools/run-linux.sh tools/settings.sh tools/import-assets.py "$stage/tools/"
+cp tools/run-linux.sh tools/settings.sh tools/import-assets.py tools/setup-wizard.py "$stage/tools/"
 cp -r tools/settings tools/assets "$stage/tools/"
 find "$stage/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
 cat > "$stage/README-LINUX.txt" <<'EOF'
 squarehole360 - Gears of War 3, Linux build (x86-64, Vulkan)
 
-1. Without the full package: import your own disc image first,
-   python3 tools/import-assets.py import "/path/to/gow3.iso"
+1. Without the full package, the first start opens a setup wizard: choose your
+   own Xbox 360 disc image (ISO) or extracted game folder, then optionally your
+   DLC (folders or .zip/.tar.gz/.tar.xz archives). Add DLC later with
+   python3 tools/setup-wizard.py --dlc
    (the full package already contains game/ and a shader cache).
 2. Run tools/run-linux.sh (for example: setsid mangohud ./tools/run-linux.sh).
 3. Settings: tools/settings.sh, config/gow3.toml, or F4 / L3+R3 in game.

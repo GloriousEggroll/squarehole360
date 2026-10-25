@@ -109,10 +109,15 @@ if [[ "$check_assets" == true ]] && ! command -v python3 >/dev/null && [[ -d "$g
   check_assets=false
 fi
 if [[ "$check_assets" == true ]]; then
-  if ! python3 tools/import-assets.py check --output "$game_data_root"; then
-    echo 'Import your own ISO first: python3 tools/import-assets.py import "/path/to/gow3.iso"' >&2
-    echo 'For an existing extraction, add --adopt-existing; for a custom directory, add --output "/path/to/game".' >&2
-    exit 1
+  if ! python3 tools/import-assets.py check --output "$game_data_root" >/dev/null 2>&1; then
+    # First run (or damaged files): the setup wizard imports your own copy of
+    # the game, then optionally its DLC.
+    if ! python3 tools/setup-wizard.py --output "$game_data_root" ||
+       ! python3 tools/import-assets.py check --output "$game_data_root"; then
+      echo 'The game files are not set up. Run tools/setup-wizard.py, or import your own ISO:' >&2
+      echo '  python3 tools/import-assets.py import "/path/to/gow3.iso"' >&2
+      exit 1
+    fi
   fi
 fi
 mkdir -p user logs
