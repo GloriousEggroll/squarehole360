@@ -1799,6 +1799,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       pending_changed.wait(lock, [&] { return stopping || failed || pending.empty(); });
       if (stopping || failed) return;
       pending.push_back(std::move(frame));
+      lock.unlock();pending_changed.notify_all();
     } catch (const std::exception& error) {
       SaveFailure(event, error.what());
       Fail(frame_number, error.what());
@@ -1901,6 +1902,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       }
       if(stopping||failed)return;
       pending.push_back(std::move(frame));
+      lock.unlock();pending_changed.notify_all();
     } catch(const std::exception& error) {
       SaveFailure(item.event,error.what());
       Fail(frame_number,error.what());
@@ -4013,7 +4015,14 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       // immutable snapshot. A new frame must be present in the bounded queue.
       while (output_frame != frame) {
         {
-          std::lock_guard lock(pending_mutex);
+          std::unique_lock lock(pending_mutex);
+          // At startup the first swap can arrive before the planner has
+          // queued its API frame; wait for it rather than failing.
+          if (pending.empty() &&
+              !pending_changed.wait_for(lock, std::chrono::seconds(2),
+                  [&] { return stopping || failed || !pending.empty(); }))
+            throw std::runtime_error("No API frame matches the GPU swap marker");
+          if (stopping || failed) return std::nullopt;
           if (pending.empty() || pending.front()->frame > frame)
             throw std::runtime_error("No API frame matches the GPU swap marker");
           active_frame = std::move(pending.front());

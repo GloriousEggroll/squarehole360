@@ -1,6 +1,7 @@
 // Xenos addressing/mip layout follows the BSD-licensed Xenia/ReXGlue texture
 // utilities. Copyright 2022 Ben Vanik. See texture_data.LICENSE.
 #include "texture_data.h"
+#include "footprint_ranges.h"
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -351,4 +352,80 @@ std::vector<std::pair<uint32_t,uint32_t>> TextureMemoryRanges(const TextureLayou
   if(ranges.capacity()>ranges.size())return {ranges.begin(),ranges.end()};
   return ranges;
 }
+
+void AppendTextureLevelFootprint(TextureFootprintRanges& ranges, const TextureLayout& layout,
+    const TextureLevel& level, uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
+    uint64_t address, uint64_t limit, bool reference) {
+  const uint32_t bytes = layout.block.bytes;
+  const unsigned endian_xor[] = {0, 1, 3, 2};
+  const auto append_row = [&](uint32_t first_x, uint32_t last_x, uint32_t y) {
+    for (uint32_t x = first_x; x < last_x; ++x) {
+      uint64_t offset = address + TextureBlockOffset(layout, level, x, y, 0);
+      if (bytes < 4) offset ^= endian_xor[layout.endian] & ~(bytes - 1u);
+      if (offset + bytes > limit) throw std::runtime_error("Texture footprint exceeds its memory");
+      AppendFootprintRange(ranges, uint32_t(offset), uint32_t(offset + bytes));
+    }
+  };
+  // A tiled 2D level stores each aligned 32x32-block tile contiguously and a
+  // linear level each block row, so those are one range; partial tiles at the
+  // edges are enumerated block by block. Unstacked 2D levels at their own
+  // origin (not inside a packed mip tail) with blocks of at least four bytes
+  // (no endian sub-dword aliasing) and a 32-block-aligned pitch.
+  // tests/texture_footprint_test.cpp checks against the enumeration.
+  const bool plain = !reference && layout.dimension == 1 && bytes >= 4 && layout.layers == 1 &&
+      !(layout.fetch[1] & 1024u) && !level.x && !level.y && !level.z && level.depth == 1 &&
+      level.pitch_blocks && level.pitch_blocks <= 16352 && !(level.pitch_blocks & 31u);
+  if (plain && !layout.tiled) {
+    for (uint32_t y = top; y < bottom && left < right; ++y) {
+      const uint64_t first = address + TextureBlockOffset(layout, level, left, y, 0);
+      const uint64_t last = first + uint64_t(right - left) * bytes;
+      if (last > limit) throw std::runtime_error("Texture footprint exceeds its memory");
+      AppendFootprintRange(ranges, uint32_t(first), uint32_t(last));
+    }
+    return;
+  }
+  const uint32_t tile_left = (left + 31u) & ~31u, tile_right = right & ~31u;
+  const uint32_t tile_top = (top + 31u) & ~31u, tile_bottom = bottom & ~31u;
+  if (plain && tile_left < tile_right && tile_top < tile_bottom) {
+    const uint32_t tile_bytes = 1024u * bytes;
+    for (uint32_t y = top; y < bottom; ++y) {
+      if (y < tile_top || y >= tile_bottom) { append_row(left, right, y); continue; }
+      append_row(left, tile_left, y);
+      if (!(y & 31u))
+        for (uint32_t x = tile_left; x < tile_right; x += 32) {
+          const uint64_t first = address + TextureBlockOffset(layout, level, x, y, 0);
+          if (first + tile_bytes > limit) throw std::runtime_error("Texture footprint exceeds its memory");
+          AppendFootprintRange(ranges, uint32_t(first), uint32_t(first + tile_bytes));
+        }
+      append_row(tile_right, right, y);
+    }
+    return;
+  }
+  for (uint32_t y = top; y < bottom; ++y) append_row(left, right, y);
+}
+
+std::vector<std::pair<uint32_t,uint32_t>> TextureBaseFootprint(std::array<uint32_t, 6> fetch,
+    std::optional<std::array<int32_t, 4>> rectangle, bool reference) {
+  fetch[4] &= ~((15u << 2) | (15u << 6));
+  const auto layout = DescribeTexture(fetch);
+  const auto r = rectangle.value_or(std::array<int32_t, 4>{0, 0, int32_t(layout.width), int32_t(layout.height)});
+  if (r[0] < 0 || r[1] < 0 || r[2] <= r[0] || r[3] <= r[1] || uint32_t(r[2]) > layout.width || uint32_t(r[3]) > layout.height)
+    throw std::runtime_error("Invalid live resolve rectangle");
+  FootprintRanges ranges;
+  const auto bw = layout.block.block_width, bh = layout.block.block_height;
+  for (const auto& level : layout.levels) {
+    if (level.mip || level.mips) continue;
+    AppendTextureLevelFootprint(ranges, layout, level, uint32_t(r[0]) / bw, uint32_t(r[1]) / bh,
+        (uint32_t(r[2]) + bw - 1) / bw, (uint32_t(r[3]) + bh - 1) / bh, layout.base_address,
+        512u * 1024 * 1024, reference);
+  }
+  std::sort(ranges.begin(), ranges.end());
+  FootprintRanges merged;
+  for (auto [first, last] : ranges) {
+    if (!merged.empty() && first <= merged.back().second) merged.back().second = std::max(last, merged.back().second);
+    else merged.emplace_back(first, last);
+  }
+  return merged;
+}
+
 } // namespace gow3::renderer

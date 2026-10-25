@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -39,6 +40,20 @@ uint64_t TextureBlockOffset(const TextureLayout& texture, const TextureLevel& le
 // allocation padding. Base and mip regions retain their distinct provenance.
 std::vector<std::pair<uint32_t,uint32_t>> TextureMemoryRanges(const TextureLayout&,bool mips,
                                                           bool coalesce_blocks=false);
+// Appends the physical byte ranges of blocks [left, right) x [top, bottom)
+// (block coordinates) of one level at address + level offsets, unsorted.
+// Whole tiled 32x32-block tiles and linear rows are appended as one range;
+// reference enumerates every block. Throws past limit bytes.
+using TextureFootprintRanges = std::vector<std::pair<uint32_t, uint32_t>>;
+void AppendTextureLevelFootprint(TextureFootprintRanges& ranges, const TextureLayout& layout,
+    const TextureLevel& level, uint32_t left, uint32_t top, uint32_t right, uint32_t bottom,
+    uint64_t address, uint64_t limit, bool reference = false);
+// Exact physical bytes of a texture's base level (or a rectangle of it),
+// including packed/stacked views and endian sub-dword aliases, as sorted
+// merged [first, last) ranges. Resolve residency is base-only regardless of
+// the sampler's mip range. reference enumerates every block (tests only).
+std::vector<std::pair<uint32_t,uint32_t>> TextureBaseFootprint(std::array<uint32_t, 6> fetch,
+    std::optional<std::array<int32_t, 4>> rectangle = {}, bool reference = false);
 TextureData DecodeTexture(const std::array<uint32_t, 6>& fetch,
                           std::span<const uint8_t> base, std::span<const uint8_t> mips);
 }  // namespace gow3::renderer

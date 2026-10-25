@@ -96,74 +96,8 @@ const char* FunctionName(uint32_t function) {
     }
 }
 
-// Exact base-level touched bytes, including packed/stacked views and endian
-// sub-dword aliases. Adjacent bytes are merged before residency comparisons.
-Ranges Footprint(std::array<uint32_t, 6> fetch, std::optional<std::array<int32_t, 4>> rectangle = {}) {
-    // Resolve residency is base-only regardless of the sampler's mip range.
-    fetch[4] &= ~((15u << 2) | (15u << 6));
-    auto layout=DescribeTexture(fetch);
-    const auto r=rectangle.value_or(std::array<int32_t,4>{0,0,int32_t(layout.width),int32_t(layout.height)});
-    if (r[0]<0 || r[1]<0 || r[2]<=r[0] || r[3]<=r[1] || uint32_t(r[2])>layout.width || uint32_t(r[3])>layout.height)
-        throw std::runtime_error("Invalid live resolve rectangle");
-    Ranges ranges;
-    const auto bw=layout.block.block_width, bh=layout.block.block_height, bytes=layout.block.bytes;
-    const unsigned endian_xor[]={0,1,3,2};
-    for (const auto& level : layout.levels) {
-        if (level.mip || level.mips) continue;
-        const auto append_row = [&](uint32_t first_x,uint32_t last_x,uint32_t y) {
-            for (uint32_t x=first_x; x<last_x; ++x) {
-                uint64_t offset=uint64_t(layout.base_address)+TextureBlockOffset(layout,level,x,y,0);
-                if (bytes<4) offset^=endian_xor[layout.endian]&~(bytes-1u);
-                if (offset+bytes>512u*1024*1024) throw std::runtime_error("Live texture exceeds physical memory");
-                AppendFootprintRange(ranges,uint32_t(offset),uint32_t(offset+bytes));
-            }
-        };
-        // Narrow admission: ordinary 2D, one unpacked/unstacked base level,
-        // uncompressed four-byte blocks, and bounded aligned storage. Keep
-        // every unsupported layout on the original point enumeration below.
-        const bool tiled_base_4=layout.tiled && layout.dimension==1 &&
-            bw==1 && bh==1 && bytes==4 && layout.depth==1 && layout.layers==1 &&
-            layout.levels.size()==1 && !layout.min_mip && !layout.max_mip &&
-            !(fetch[1]&1024u) && !(fetch[5]&2048u) &&
-            !level.layer && !level.x && !level.y && !level.z && !level.offset &&
-            level.depth==1 && level.pitch_blocks && level.pitch_blocks<=16352 &&
-            !(level.pitch_blocks&31u) && layout.width<=8192 && layout.height<=8192;
-        if(tiled_base_4) {
-            const uint32_t left=uint32_t(r[0]),top=uint32_t(r[1]);
-            const uint32_t right=uint32_t(r[2]),bottom=uint32_t(r[3]);
-            const uint32_t tile_left=(left+31u)&~31u,tile_right=right&~31u;
-            const uint32_t tile_top=(top+15u)&~15u,tile_bottom=bottom&~15u;
-            if(tile_left<tile_right && tile_top<tile_bottom) {
-                for(uint32_t y=top;y<bottom;++y) {
-                    if(y<tile_top || y>=tile_bottom) {
-                        append_row(left,right,y);
-                        continue;
-                    }
-                    append_row(left,tile_left,y);
-                    if(!(y&15u))for(uint32_t x=tile_left;x<tile_right;x+=32) {
-                        // Tiled2D at an aligned 32x16 origin is the minimum
-                        // of exactly 512 four-byte blocks. Its address-bit
-                        // permutation covers this entire 2048-byte interval
-                        // bijectively, including either half of a 32x32 tile.
-                        const uint64_t first=uint64_t(layout.base_address)+TextureBlockOffset(layout,level,x,y,0);
-                        if(first+2048u>512u*1024*1024) throw std::runtime_error("Live texture exceeds physical memory");
-                        AppendFootprintRange(ranges,uint32_t(first),uint32_t(first+2048u));
-                    }
-                    append_row(tile_right,right,y);
-                }
-                continue;
-            }
-        }
-        for (uint32_t y=uint32_t(r[1])/bh; y<(uint32_t(r[3])+bh-1)/bh; ++y)
-            append_row(uint32_t(r[0])/bw,(uint32_t(r[2])+bw-1)/bw,y);
-    }
-    std::sort(ranges.begin(),ranges.end());
-    Ranges merged;
-    for (auto [first,last] : ranges) {
-        if (!merged.empty() && first<=merged.back().second) merged.back().second=std::max(last,merged.back().second);
-        else merged.emplace_back(first,last);
-    }
-    return merged;
+Ranges Footprint(const std::array<uint32_t, 6>& fetch, std::optional<std::array<int32_t, 4>> rectangle = {}) {
+    return TextureBaseFootprint(fetch, rectangle);
 }
 // GPU byte ownership in API order. The planner and the guest-thread replica
 // used by the asynchronous planner run exactly this code on the same inputs.
@@ -197,11 +131,17 @@ struct OwnershipRanges {
     }
     const Ranges& TextureFootprint(const std::array<uint32_t,6>& fetch,
                                   std::optional<std::array<int32_t,4>> rectangle={}) {
-        const FootprintKey key{fetch,rectangle};
+        // Only the layout bits: fetch type, pitch and tiling; format, endian,
+        // stacking and base; extent; dimension and packed mips. Sampler state
+        // and mip ranges (footprints are base-only) would duplicate entries.
+        const std::array<uint32_t,6> layout{fetch[0]&0xffc00003u,fetch[1],fetch[2],0,0,fetch[5]&0xe00u};
+        const FootprintKey key{layout,rectangle};
         auto it=texture_footprints.find(key);
         if (it==texture_footprints.end()) {
-            if (texture_footprints.size()>=2048) texture_footprints.clear();
-            it=texture_footprints.emplace(key,Footprint(fetch,rectangle)).first;
+            // Fights stream in many textures; a small cap cleared everything
+            // and recomputed footprints in bursts (frame-time spikes).
+            if (texture_footprints.size()>=16384) texture_footprints.clear();
+            it=texture_footprints.emplace(key,Footprint(layout,rectangle)).first;
         }
         return it->second;
     }

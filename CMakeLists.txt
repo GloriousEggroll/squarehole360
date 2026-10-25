@@ -103,6 +103,8 @@ if(GOW3_ENABLE_NATIVE_RENDERER)
 endif()
 
 add_executable(gow3-texture-layout-test tests/native_texture_test.cpp src/renderer/native/texture_data.cpp)
+add_executable(gow3-texture-footprint-test tests/texture_footprint_test.cpp src/renderer/native/texture_data.cpp)
+target_include_directories(gow3-texture-footprint-test PRIVATE src)
 add_executable(gow3-index-geometry-test tests/index_geometry_test.cpp)
 target_include_directories(gow3-index-geometry-test PRIVATE src)
 add_executable(gow3-certified-snapshot-test tools/rendering/native/certified_snapshot_test.cpp)

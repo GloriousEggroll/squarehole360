@@ -187,34 +187,34 @@ NativeGpuAliasFootprint& ResolveMemory::CachedFootprint(const TextureLayout& t,c
     if(address%4||t.levels.size()!=t.layers||!t.layers||t.min_mip||t.max_mip||t.block.block_width!=1||t.dimension!=1||
        r.isEmpty()||r.left<0||r.top<0||r.right>int32_t(t.width)||r.bottom>int32_t(t.height))
         throw std::runtime_error("Unsupported storage footprint");
+    // Only the layout bits of the fetch (type, pitch, tiling; format, endian,
+    // stacking, base; extent; mip range; dimension, packed, mip base): the
+    // footprint is the same for every sampler state of a texture.
+    const std::array<uint32_t,6> fetch{t.fetch[0]&0xffc00003u,t.fetch[1],t.fetch[2],0,
+        t.fetch[4]&((15u<<2)|(15u<<6)),t.fetch[5]&0xfffffe00u};
     // Slot choice only; equality below is exact over all eleven key words.
     uint64_t h=0x9e3779b97f4a7c15ull;
-    for(const auto word:t.fetch)h=(h^word)*0xff51afd7ed558ccdull;
+    for(const auto word:fetch)h=(h^word)*0xff51afd7ed558ccdull;
     for(const uint32_t word:{address,uint32_t(r.left),uint32_t(r.top),uint32_t(r.right),uint32_t(r.bottom)})
         h=(h^word)*0xff51afd7ed558ccdull;
     h^=h>>33;
     auto& slot=footprint_lookaside_[h%footprint_lookaside_.size()];
     if(slot.entry&&slot.key[6]==address&&slot.key[7]==uint32_t(r.left)&&slot.key[8]==uint32_t(r.top)&&
        slot.key[9]==uint32_t(r.right)&&slot.key[10]==uint32_t(r.bottom)&&
-       std::equal(t.fetch.begin(),t.fetch.end(),slot.key.begin()))
+       std::equal(fetch.begin(),fetch.end(),slot.key.begin()))
         return *slot.entry;
     std::array<uint32_t,11> key;
-    std::copy(t.fetch.begin(),t.fetch.end(),key.begin());
+    std::copy(fetch.begin(),fetch.end(),key.begin());
     key[6]=address;key[7]=r.left;key[8]=r.top;key[9]=r.right;key[10]=r.bottom;
     if(auto it=footprints_.find(key);it!=footprints_.end()) {
         slot={key,&it->second};return it->second;
     }
     Ranges ranges;
-    for(const auto& level:t.levels)for(int32_t y=r.top;y<r.bottom;++y)for(int32_t x=r.left;x<r.right;++x) {
-        uint64_t start=TextureBlockOffset(t,level,x,y,0)+address;
-        constexpr uint32_t swaps[]{0,1,3,2};
-        if(t.block.bytes<4)start^=swaps[t.endian]&~(t.block.bytes-1u);
-        if(start+t.block.bytes>capacity_)throw std::runtime_error("Resolved texture exceeds backing allocation");
-        // Tiled/endian traversal is not globally ordered. Join only a touching
-        // consecutive run after the original per-point capacity validation;
-        // the exact final sort/union below remains authoritative.
-        AppendFootprintRange(ranges,uint32_t(start),uint32_t(start+t.block.bytes));
-    }
+    // Tiled/endian traversal is not globally ordered; the exact final
+    // sort/union below remains authoritative.
+    for(const auto& level:t.levels)
+        AppendTextureLevelFootprint(ranges,t,level,uint32_t(r.left),uint32_t(r.top),uint32_t(r.right),
+            uint32_t(r.bottom),address,capacity_);
     std::sort(ranges.begin(),ranges.end());
     size_t count=0;
     for(const auto& r:ranges) {
@@ -223,7 +223,7 @@ NativeGpuAliasFootprint& ResolveMemory::CachedFootprint(const TextureLayout& t,c
     }
     ranges.resize(count);
     ReleaseFootprintRangeCapacity(ranges);
-    if(footprints_.size()>=2048) {
+    if(footprints_.size()>=16384) {
         footprint_lookaside_.fill({});
         footprints_.clear();if(gpu_alias_state_stats_.requests)++gpu_alias_state_stats_.cache_clears;
     }
