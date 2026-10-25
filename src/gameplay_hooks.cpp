@@ -1,10 +1,12 @@
 #include "gameplay_hooks.h"
+#include "gow3_renderer_mode.h"
 
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
 #include <algorithm>
+#include <string>
 #include <utility>
 
 REXCVAR_DEFINE_BOOL(gow3_60fps, true, "Game",
@@ -15,8 +17,8 @@ REXCVAR_DEFINE_BOOL(gow3_movie_pacing, true, "Game",
                    "Use millisecond idle-render polling for prerecorded movie pacing")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
-REXCVAR_DEFINE_INT32(gow3_render_height, 720, "Game",
-                    "Experimental: the game's own render height (16:9 width); 720 is the original")
+REXCVAR_DEFINE_INT32(gow3_render_height, 1080, "Game",
+                    "The game's own render height (16:9 width); 720 is the console's, 1080 the maximum")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace {
@@ -37,7 +39,9 @@ uint32_t ReadInstruction(const uint8_t* base, uint32_t address) {
 void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   // lwz r11,0(r30) loads the stored screen width into CreateDevice's
   // presentation parameters.
+  // Only the native renderer models EDRAM beyond the console's 10 MB.
   if (REXCVAR_GET(gow3_render_height) != 720 &&
+      ParseGow3RendererMode(REXCVAR_QUERY(std::string, gow3_renderer)) == Gow3RendererMode::Native &&
       ReadInstruction(guest_base, 0x82960D04) == 0x817E0000)
     screen_size_base = const_cast<uint8_t*>(guest_base);
   movie_pacing_enabled = REXCVAR_GET(gow3_movie_pacing) &&
@@ -122,5 +126,5 @@ void Gow3OverrideScreenSize() {
       REXLOG_WARN("Gears render size: no 1280x720 at {:08X}", address);
     }
   }
-  REXLOG_INFO("Gears render size: {}x{} (experimental)", width, height);
+  REXLOG_INFO("Gears render size: {}x{}", width, height);
 }
