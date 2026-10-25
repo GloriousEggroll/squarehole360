@@ -7,7 +7,7 @@
 
 REXCVAR_DEFINE_STRING(gow3_config, "", "Game", "Path to the game settings TOML file");
 REXCVAR_DEFINE_STRING(gow3_renderer, "native", "Graphics",
-                     "Renderer: Native or Xenia (restart required)")
+                     "Renderer: Native or Emulated (Xenia) (restart required)")
     .allowed({"native", "xenia", "reference"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_STRING(gow3_frame_limit_mode, "custom", "Game",

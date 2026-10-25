@@ -332,7 +332,7 @@ class SettingsTest(unittest.TestCase):
     def test_only_selected_renderer_options_are_visible(self):
         window = SettingsWindow(self.path, hdr_probe=False)
         picker = window.widgets['gow3_renderer']
-        self.assertEqual([picker.itemText(i) for i in range(picker.count())], ['Native', 'Xenia'])
+        self.assertEqual([picker.itemText(i) for i in range(picker.count())], ['Native', 'Emulated (Xenia)'])
         shared = ['gow3_renderer', 'present_hdr', 'fullscreen', 'mnk_mode', 'present_dither', 'present_effect']
         native = ['gow3_native_pipeline_prewarm', 'gow3_native_shader_prewarm_threads']
         xenia = ['resolution_scale', 'swap_post_effect', 'texture_cache_memory_limit_soft', 'async_shader_compilation']

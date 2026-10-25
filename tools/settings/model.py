@@ -64,7 +64,7 @@ class Setting:
 
 S = Setting
 SETTINGS = [
- S('gow3_renderer', 'Renderer', 'native', 'Renderer', 'Changing the renderer requires a game restart.', (('native','Native'),('xenia','Xenia'))),
+ S('gow3_renderer', 'Renderer', 'native', 'Renderer', 'Changing the renderer requires a game restart.', (('native','Native'),('xenia','Emulated (Xenia)'))),
  S('fullscreen', 'Window mode', False, 'Display', 'Borderless fullscreen fills the monitor at its desktop resolution. Windowed restores the configured window size.', ((False,'Windowed'),(True,'Borderless fullscreen'))),
  S('monitor', 'Monitor', 0, 'Display', '0 uses the window manager’s default; other values select a monitor.', minimum=0, maximum=16),
  S('window_width', 'Window width', 1280, 'Display', 'Logical pixels; used only in windowed mode.', minimum=640, maximum=8192),
