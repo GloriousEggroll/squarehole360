@@ -2,6 +2,7 @@
 #include "gow3_renderer_mode.h"
 
 #include <rex/cvar.h>
+#include <rex/input/mnk/mnk_input_driver.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
@@ -26,6 +27,19 @@ bool supported_image = false;
 uint8_t* screen_size_base = nullptr;
 bool enabled = false;
 bool movie_pacing_enabled = false;
+bool mouse_look_enabled = false;
+
+// The engine's MouseX and MouseY key names (FName, index and number), set up
+// at startup from the UTF-16 names at 0x82146AA8 and 0x82146AB8.
+constexpr uint32_t kKeyMouseX = 0x834440C8;
+constexpr uint32_t kKeyMouseY = 0x834440D0;
+
+bool HasUtf16Name(const uint8_t* base, uint32_t address, const char* name) {
+  for (;; ++name, address += 2) {
+    if (base[address] != 0 || base[address + 1] != uint8_t(*name)) return false;
+    if (!*name) return true;
+  }
+}
 
 uint32_t ReadInstruction(const uint8_t* base, uint32_t address) {
   const auto* p = base + address;
@@ -49,6 +63,9 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
       ReadInstruction(guest_base, 0x823F414C) == 0xFF1F0000 &&
       ReadInstruction(guest_base, 0x820CDB5C) == 0x3CCCCCCD;
   REXLOG_INFO("Gears movie pacing: {}", movie_pacing_enabled ? "1 ms polling" : "original polling");
+  mouse_look_enabled = ReadInstruction(guest_base, 0x8296DCB8) == 0x7D8802A6 &&
+      HasUtf16Name(guest_base, 0x82146AA8, "MouseX") && HasUtf16Name(guest_base, 0x82146AB8, "MouseY");
+  if (!mouse_look_enabled) REXLOG_WARN("Gears mouse look disabled: executable does not match");
   supported_image = ReadInstruction(guest_base, 0x8253D9B0) == 0xC02304C8 &&
                     ReadInstruction(guest_base, 0x82AF66BC) == 0x39600002;
   enabled = supported_image && REXCVAR_GET(gow3_60fps);
@@ -127,4 +144,37 @@ void Gow3OverrideScreenSize() {
     }
   }
   REXLOG_INFO("Gears render size: {}x{}", width, height);
+}
+
+// FXenonViewport::ProcessInput (0x8296DCB8, r3 = viewport, f1 = DeltaTime)
+// passes each controller's sticks and triggers to the viewport client's
+// InputAxis. Afterwards pass mouse motion as the MouseX and MouseY keys, as the
+// engine's PC viewports do; the game binds them to its PlayerInput mouse look.
+REX_EXTERN(__imp__sub_8296DCB8);
+REX_EXTERN(sub_8296DCB8) {
+  const uint32_t viewport = ctx.r3.u32;
+  const double delta_time = ctx.f1.f64;
+  __imp__sub_8296DCB8(ctx, base);
+  if (!mouse_look_enabled) return;
+  for (uint32_t controller = 0; controller < 4; ++controller) {
+    double dx = 0.0, dy = 0.0;
+    if (!rex::input::mnk::TakeMouseLook(controller, dx, dy)) continue;
+    const uint32_t client = ReadInstruction(base, viewport + 52);
+    if (!client) return;
+    // UGameViewportClient::InputAxis(Viewport, ControllerId, Key, Delta,
+    // DeltaTime, bGamepad), the client's vtable slot 7; mouse Y is up-positive.
+    const uint32_t input_axis = ReadInstruction(base, ReadInstruction(base, client) + 28);
+    for (const auto& [key, delta] : {std::pair{kKeyMouseX, dx}, std::pair{kKeyMouseY, -dy}}) {
+      if (delta == 0.0) continue;
+      ctx.r3.u64 = client;
+      ctx.r4.u64 = viewport == 4 ? 0 : viewport;
+      ctx.r5.u64 = controller;
+      ctx.r6.u64 = uint64_t(ReadInstruction(base, key)) << 32 | ReadInstruction(base, key + 4);
+      ctx.f1.f64 = float(delta);
+      ctx.f2.f64 = delta_time;
+      ctx.r9.u64 = 0;
+      rex::runtime::ResolveIndirectFunction(input_axis)(ctx, base);
+    }
+    return;
+  }
 }

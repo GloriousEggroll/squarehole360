@@ -101,11 +101,25 @@ package is available at configure time. Otherwise it uses the bundled portable
 implementation with identical cache keys. Set `-DGOW3_NATIVE_ACCELERATED_HASH=OFF`
 to build without that optional dependency. Accelerated dynamic builds require
 the matching OpenSSL Crypto runtime library on the destination machine.
-Mouse and keyboard controller emulation is enabled by default in the game
-config (`mnk_mode = true`). Disable it in the settings GUI's Input tab or launch
-with `./tools/run-linux.sh --mnk_mode=false`; SDK defaults map Start to Escape,
-A to Space, B to Shift, and the D-pad to arrow keys. These menu controls have
-been exercised in the diagnostic runs.
+Mouse and keyboard controls (`mnk_mode`) are switched on in the settings GUI's
+Input tab or with `--mnk_mode=true`; a controller keeps working alongside them.
+Keys act as controller buttons. The mouse aims with the engine's own mouse look:
+after the engine passes the controllers' axes to its viewport client
+(`0x8296DCB8`), the game also passes mouse motion as the `MouseX` and `MouseY`
+keys, which Gears binds to its PlayerInput mouse axes, as on PC builds of the
+engine. `mnk_mouse_mode = "stick"` makes the mouse move the right stick instead,
+with the game's stick aiming feel, for example for a gyro mapped to the mouse.
+`mnk_sensitivity` scales either. While the window has focus the pointer is
+locked: Wayland pointer constraints with unaccelerated relative motion, or a
+grab with re-centering on X11.
+
+The Controls tab binds each action to one or more keys (`keybind_*`, a
+comma-separated list; `WheelUp` and `WheelDown` press briefly per wheel step).
+Defaults: WASD to move, the left and right mouse buttons to aim and fire, Space
+for cover, E to use, F to melee, R to reload, Q for points of interest, Shift
+for the tactical view, the middle button or V to zoom, 1 to 4 or the wheel for
+weapons, Tab for the scoreboard and Escape to pause. Input settings apply while
+the game runs.
 
 Stereo output now uses the runtime's normalized downmix to avoid the observed
 clipping when six game channels were mixed by the audio server. The latest

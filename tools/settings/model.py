@@ -120,7 +120,34 @@ SETTINGS = [
  S('network_frame_rate_lock', 'Multiplayer frame-rate lock', 60, 'Online', 'Frame-rate limit while other players are connected, so every machine runs the game at the same speed. 0 keeps your normal limit.', minimum=0, maximum=240),
  S('network_address', 'Network address', '', 'Online', 'Advanced. The IPv4 address other System Link players reach you at; empty detects it.'),
  S('network_broadcast_peers', 'System Link peers', '', 'Online', 'Advanced. Comma-separated IPv4 addresses that receive System Link broadcasts directly, for networks that block broadcasts or several copies on one PC.'),
- S('mnk_mode', 'Mouse and keyboard controls', True, 'Input', 'Emulate an Xbox controller with the mouse and keyboard. Disable to use a gamepad without keyboard/mouse emulation.'),
+ S('mnk_mode', 'Mouse and keyboard controls', True, 'Input', 'Play with the mouse and keyboard; a controller keeps working alongside them. Keys act as controller buttons.'),
+ S('mnk_mouse_mode', 'Mouse aiming', 'look', 'Input', 'Mouse look turns the camera directly with the mouse. Right stick moves the stick instead, with the game’s stick aiming feel, for example for a gyro mapped to the mouse.', (('look','Mouse look'),('stick','As right stick'))),
+ S('mnk_sensitivity', 'Mouse sensitivity', 1.0, 'Input', 'Multiplies the game’s mouse sensitivity, or the stick speed when the mouse acts as the right stick.', minimum=0.01, maximum=10),
+ S('keybind_lstick_up', 'Move forward', 'W', 'Controls', 'Left stick up.'),
+ S('keybind_lstick_down', 'Move back', 'S', 'Controls', 'Left stick down.'),
+ S('keybind_lstick_left', 'Move left', 'A', 'Controls', 'Left stick left.'),
+ S('keybind_lstick_right', 'Move right', 'D', 'Controls', 'Left stick right.'),
+ S('keybind_right_trigger', 'Fire', 'LMB', 'Controls', 'Right trigger.'),
+ S('keybind_left_trigger', 'Aim', 'RMB', 'Controls', 'Left trigger.'),
+ S('keybind_a', 'Cover, roadie run, roll', 'Space,Return', 'Controls', 'A button; also accepts in menus.'),
+ S('keybind_x', 'Use, pick up, revive', 'E', 'Controls', 'X button.'),
+ S('keybind_b', 'Melee', 'F,Backspace', 'Controls', 'B button; also goes back in menus.'),
+ S('keybind_right_shoulder', 'Reload', 'R', 'Controls', 'Right bumper.'),
+ S('keybind_y', 'Point of interest', 'Q', 'Controls', 'Y button.'),
+ S('keybind_left_shoulder', 'Tactical view', 'Shift', 'Controls', 'Left bumper.'),
+ S('keybind_rstick_press', 'Zoom', 'MMB,V', 'Controls', 'Right stick click.'),
+ S('keybind_lstick_press', 'Left stick click', 'C', 'Controls', 'Left stick click.'),
+ S('keybind_dpad_left', 'Weapon: left', '1,Left,WheelDown', 'Controls', 'D-pad left.'),
+ S('keybind_dpad_right', 'Weapon: right', '2,Right,WheelUp', 'Controls', 'D-pad right.'),
+ S('keybind_dpad_down', 'Weapon: pistol', '3,Down', 'Controls', 'D-pad down.'),
+ S('keybind_dpad_up', 'Weapon: grenades', '4,Up', 'Controls', 'D-pad up.'),
+ S('keybind_back', 'Scoreboard', 'Tab', 'Controls', 'Back button.'),
+ S('keybind_start', 'Pause', 'Escape', 'Controls', 'Start button.'),
+ S('keybind_rstick_up', 'Look up (keys)', '', 'Controls', 'Right stick up, in addition to the mouse.'),
+ S('keybind_rstick_down', 'Look down (keys)', '', 'Controls', 'Right stick down.'),
+ S('keybind_rstick_left', 'Look left (keys)', '', 'Controls', 'Right stick left.'),
+ S('keybind_rstick_right', 'Look right (keys)', '', 'Controls', 'Right stick right.'),
+ S('keybind_guide', 'Guide button', '', 'Controls', 'Xbox Guide button.'),
 ]
 BY_KEY = {s.key:s for s in SETTINGS}
 # The C++ watcher applies only these reviewed settings, on their owning threads.
@@ -130,7 +157,7 @@ LIVE_SETTINGS = {
     'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
     'present_dither', 'swap_post_effect', 'present_frame_generation',
     'gow3_low_latency', 'present_anti_lag',
-}
+} | {s.key for s in SETTINGS if s.section in ('Input', 'Controls')}
 
 def game_running():
     executable = binary('gow3').resolve()
@@ -204,6 +231,24 @@ def visible_settings(values):
     return [s for s in SETTINGS if applies(s, mode)]
 
 
+# Key names the keyboard/mouse driver accepts (vendor/rexglue-sdk/src/ui/keybinds.cpp),
+# plus the wheel, which presses a bind briefly per step.
+KEY_NAMES = frozenset(
+    [f'F{n}' for n in range(1, 25)] + [chr(c) for c in range(ord('A'), ord('Z') + 1)] +
+    [str(n) for n in range(10)] + [f'Numpad{n}' for n in range(10)] +
+    ['Backtick', 'Minus', 'Plus', 'Comma', 'Period', 'Semicolon', 'Slash', 'Backslash',
+     'LBracket', 'RBracket', 'Quote', 'Escape', 'Return', 'Space', 'Tab', 'Backspace', 'Delete',
+     'Insert', 'Home', 'End', 'PageUp', 'PageDown', 'Left', 'Right', 'Up', 'Down', 'Shift',
+     'Control', 'Alt', 'NumpadEnter', 'NumpadPlus', 'NumpadMinus', 'NumpadStar', 'NumpadSlash',
+     'PrintScreen', 'Pause', 'CapsLock', 'NumLock', 'ScrollLock', 'LMB', 'RMB', 'MMB', 'Mouse4',
+     'Mouse5', 'WheelUp', 'WheelDown'])
+
+
+def bind_keys(value):
+    """The keys of a binding: a comma-separated list, empty for none."""
+    return [key.strip() for key in value.split(',') if key.strip()]
+
+
 GAMERTAG = re.compile(r'[A-Za-z](?:[A-Za-z0-9]| (?! ))*')
 IPV4 = re.compile(r'(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)')
 HOST_PORT = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252})(?::(?:6553[0-5]|655[0-2]\d|65[0-4]\d\d|6[0-4]\d{3}|[1-5]?\d{1,4}))?')
@@ -219,6 +264,10 @@ def validate_setting(s, value):
         raise ValueError(f'{s.label}: use a host name or IPv4 address, optionally followed by :port')
     if s.key in ('network_lobby_room', 'network_lobby_password') and (len(value) > 31 or not value.isprintable()):
         raise ValueError(f'{s.label}: use up to 31 printable characters')
+    if s.key.startswith('keybind_'):
+        unknown = [key for key in bind_keys(value) if key not in KEY_NAMES]
+        if unknown:
+            raise ValueError(f'{s.label}: unknown key {unknown[0]}')
     if s.key == 'network_lobby_room' and not value.strip():
         raise ValueError(f'{s.label}: enter a room name')
     if s.key == 'network_address' and value and not IPV4.fullmatch(value):

@@ -423,5 +423,34 @@ class SettingsTest(unittest.TestCase):
         declaration = source.split('live_keys = {', 1)[1].split('};', 1)[0]
         self.assertEqual(set(re.findall(r'"([a-z0-9_]+)"', declaration)), LIVE_SETTINGS)
 
+    def test_key_bindings_validate_and_match_the_driver_defaults(self):
+        values = load(self.path)
+        validate(values)
+        values['keybind_x'] = 'E, Mouse5,WheelUp'
+        validate(values)
+        values['keybind_x'] = 'E,Hyper'
+        with self.assertRaisesRegex(ValueError, 'unknown key Hyper'):
+            validate(values)
+        driver = (Path(__file__).resolve().parents[1] /
+                  'vendor/rexglue-sdk/src/input/mnk/mnk_input_driver.cpp').read_text()
+        defaults = dict(re.findall(r'REXCVAR_DEFINE_STRING\((keybind_\w+), "([^"]*)"', driver))
+        self.assertEqual(defaults, {s.key: s.default for s in SETTINGS if s.key.startswith('keybind_')})
+
+    def test_key_capture_sets_and_adds_keys(self):
+        from app import KeyBindEdit, KeyCaptureDialog, Qt
+        edit = KeyBindEdit('Use')
+        edit.setText('E')
+        def press(key, modifiers=Qt.KeyboardModifier.NoModifier):
+            def exec_(dialog):
+                QTest.keyClick(dialog, key, modifiers)
+                return dialog.result()
+            return patch.object(KeyCaptureDialog, 'exec', exec_)
+        with press(Qt.Key.Key_Tab):
+            edit.capture(append=True)
+        self.assertEqual(edit.text(), 'E,Tab')
+        with press(Qt.Key.Key_Exclam, Qt.KeyboardModifier.ShiftModifier):
+            edit.capture(append=False)
+        self.assertEqual(edit.text(), '1')
+
 
 if __name__ == '__main__': unittest.main()

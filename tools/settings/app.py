@@ -6,11 +6,133 @@ from pathlib import Path
 import subprocess
 import sys
 
-from PySide6.QtCore import Qt, QProcess, QTimer
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QLineEdit,
+from PySide6.QtCore import Qt, QProcess, QTimer, Signal
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLineEdit,
     QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
-from model import CONFIG, ROOT, WINDOWS, binary, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, widget_value
+from model import CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, widget_value
+
+
+def _qt_key_names():
+    names = {getattr(Qt.Key, f'Key_{c}'): c for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'}
+    names.update({getattr(Qt.Key, f'Key_F{n}'): f'F{n}' for n in range(1, 25)})
+    for qt, name in (('Escape', 'Escape'), ('Return', 'Return'), ('Enter', 'Return'), ('Space', 'Space'),
+                     ('Tab', 'Tab'), ('Backtab', 'Tab'), ('Backspace', 'Backspace'), ('Delete', 'Delete'),
+                     ('Insert', 'Insert'), ('Home', 'Home'), ('End', 'End'), ('PageUp', 'PageUp'),
+                     ('PageDown', 'PageDown'), ('Left', 'Left'), ('Right', 'Right'), ('Up', 'Up'),
+                     ('Down', 'Down'), ('Shift', 'Shift'), ('Control', 'Control'), ('Alt', 'Alt'),
+                     ('Meta', 'Control') if sys.platform == 'darwin' else ('Meta', ''),
+                     ('Print', 'PrintScreen'), ('Pause', 'Pause'), ('CapsLock', 'CapsLock'),
+                     ('NumLock', 'NumLock'), ('ScrollLock', 'ScrollLock'), ('QuoteLeft', 'Backtick'),
+                     ('AsciiTilde', 'Backtick'), ('Minus', 'Minus'), ('Underscore', 'Minus'),
+                     ('Equal', 'Plus'), ('Plus', 'Plus'), ('Comma', 'Comma'), ('Less', 'Comma'),
+                     ('Period', 'Period'), ('Greater', 'Period'), ('Semicolon', 'Semicolon'),
+                     ('Colon', 'Semicolon'), ('Slash', 'Slash'), ('Question', 'Slash'),
+                     ('Backslash', 'Backslash'), ('Bar', 'Backslash'), ('BracketLeft', 'LBracket'),
+                     ('BraceLeft', 'LBracket'), ('BracketRight', 'RBracket'), ('BraceRight', 'RBracket'),
+                     ('Apostrophe', 'Quote'), ('QuoteDbl', 'Quote'), ('Exclam', '1'), ('At', '2'),
+                     ('NumberSign', '3'), ('Dollar', '4'), ('Percent', '5'), ('AsciiCircum', '6'),
+                     ('Ampersand', '7'), ('Asterisk', '8'), ('ParenLeft', '9'), ('ParenRight', '0')):
+        if name:
+            names[getattr(Qt.Key, f'Key_{qt}')] = name
+    return names
+
+
+QT_KEY_NAMES = _qt_key_names()
+QT_KEYPAD_NAMES = {Qt.Key.Key_Enter: 'NumpadEnter', Qt.Key.Key_Plus: 'NumpadPlus',
+                   Qt.Key.Key_Minus: 'NumpadMinus', Qt.Key.Key_Asterisk: 'NumpadStar',
+                   Qt.Key.Key_Slash: 'NumpadSlash',
+                   **{getattr(Qt.Key, f'Key_{n}'): f'Numpad{n}' for n in range(10)}}
+QT_BUTTON_NAMES = {Qt.MouseButton.LeftButton: 'LMB', Qt.MouseButton.RightButton: 'RMB',
+                   Qt.MouseButton.MiddleButton: 'MMB', Qt.MouseButton.BackButton: 'Mouse4',
+                   Qt.MouseButton.ForwardButton: 'Mouse5'}
+
+
+class KeyCaptureDialog(QDialog):
+    """Waits for one key, mouse button or wheel step over its capture area."""
+    def __init__(self, parent, title):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.key = None
+        layout = QVBoxLayout(self)
+        self.area = QLabel('Press a key, click a mouse button here or turn the wheel.')
+        self.area.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.area.setMinimumSize(360, 140)
+        self.area.setStyleSheet('border: 1px solid palette(mid); padding: 12px;')
+        layout.addWidget(self.area)
+        cancel = QPushButton('Cancel')
+        cancel.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        cancel.setAutoDefault(False)
+        cancel.clicked.connect(self.reject)
+        layout.addWidget(cancel, 0, Qt.AlignmentFlag.AlignRight)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def finish(self, key):
+        if key:
+            self.key = key
+            self.accept()
+
+    def event(self, event):
+        # Tab, Enter and Escape would otherwise move focus or close the dialog.
+        if event.type() == event.Type.KeyPress:
+            self.keyPressEvent(event)
+            return True
+        return super().event(event)
+
+    def keyPressEvent(self, event):
+        key = Qt.Key(event.key())
+        keypad = event.modifiers() & Qt.KeyboardModifier.KeypadModifier
+        self.finish(QT_KEYPAD_NAMES.get(key) if keypad and key in QT_KEYPAD_NAMES else QT_KEY_NAMES.get(key))
+
+    def mousePressEvent(self, event):
+        if self.area.geometry().contains(event.position().toPoint()):
+            self.finish(QT_BUTTON_NAMES.get(event.button()))
+
+    def wheelEvent(self, event):
+        if event.angleDelta().y():
+            self.finish('WheelUp' if event.angleDelta().y() > 0 else 'WheelDown')
+
+
+class KeyBindEdit(QWidget):
+    """A binding's keys as text, with buttons that capture a key to set or add."""
+    textChanged = Signal(str)
+
+    def __init__(self, label):
+        super().__init__()
+        self.label = label
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.edit = QLineEdit()
+        self.edit.setPlaceholderText('Not bound')
+        self.edit.textChanged.connect(self.textChanged)
+        layout.addWidget(self.edit, 1)
+        for text, tip, append in (('Set…', 'Replace with the next key you press', False),
+                                  ('Add…', 'Add another key for this action', True)):
+            button = QPushButton(text)
+            button.setToolTip(tip)
+            button.clicked.connect(lambda _=False, append=append: self.capture(append))
+            layout.addWidget(button)
+        clear = QPushButton('Clear')
+        clear.clicked.connect(lambda: self.edit.setText(''))
+        layout.addWidget(clear)
+
+    def capture(self, append):
+        dialog = KeyCaptureDialog(self, f'{self.label}: press a key')
+        if dialog.exec() and dialog.key:
+            keys = bind_keys(self.edit.text()) if append else []
+            if dialog.key not in keys:
+                keys.append(dialog.key)
+            self.edit.setText(','.join(keys))
+
+    def text(self):
+        return self.edit.text()
+
+    def setText(self, value):
+        self.edit.setText(value)
+
+    def blockSignals(self, block):
+        self.edit.blockSignals(block)
+        return super().blockSignals(block)
 
 
 class SettingsWindow(QMainWindow):
@@ -59,6 +181,9 @@ class SettingsWindow(QMainWindow):
                 elif isinstance(setting.default, bool):
                     widget = QCheckBox()
                     widget.toggled.connect(self.changed)
+                elif setting.key.startswith('keybind_'):
+                    widget = KeyBindEdit(setting.label)
+                    widget.textChanged.connect(self.changed)
                 elif isinstance(setting.default, str):
                     widget = QLineEdit()
                     widget.textChanged.connect(self.changed)
