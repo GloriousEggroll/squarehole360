@@ -29,6 +29,7 @@ const std::set<std::string> live_keys = {
   "present_fsr_max_upsampling_passes", "present_cas_additional_sharpness",
   "present_dither", "swap_post_effect", "present_frame_generation",
   "gow3_low_latency", "present_anti_lag", "mnk_mode", "mnk_mouse_mode", "mnk_sensitivity",
+  "gyro_mode", "gyro_activation", "gyro_turn_axis", "gyro_sensitivity", "gyro_invert_y",
   // The keyboard/mouse driver keeps its own copy of these, refreshed on change.
   "keybind_a", "keybind_b", "keybind_x", "keybind_y", "keybind_left_trigger",
   "keybind_right_trigger", "keybind_left_shoulder", "keybind_right_shoulder",
@@ -140,7 +141,7 @@ void Apply(Watch& w, const Values& desired) {
       w.error += "Rejected setting: " + key + ". "; continue;
     }
     if (key == "fullscreen" || key == "window_width" || key == "window_height") window_changed = true;
-    else if (key.starts_with("mnk_") || key.starts_with("keybind_")) {
+    else if (key.starts_with("mnk_") || key.starts_with("keybind_") || key.starts_with("gyro_")) {
       // Input settings take effect on the next controller poll.
     } else if (key == "swap_post_effect") {
       using Effect = rex::graphics::CommandProcessor::SwapPostEffect;

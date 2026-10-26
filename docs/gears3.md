@@ -113,6 +113,17 @@ with the game's stick aiming feel, for example for a gyro mapped to the mouse.
 locked: Wayland pointer constraints with unaccelerated relative motion, or a
 grab with re-centering on X11.
 
+Controllers with a gyro (DualSense, DualShock 4, Switch Pro and others SDL
+reads motion sensors from) can aim with it; it is off by default
+(`gyro_mode = "off"`). `"mouse"` passes the rotation through the same mouse
+look, at one camera degree per controller degree times `gyro_sensitivity` (the
+game turns 60/65536 of a turn per mouse count); `"joystick"` adds it to the
+right stick instead, starting at `gyro_stick_deadzone` (the game's 0.3 look dead
+zone). Like Steam Input, it is then always on unless
+`gyro_activation = "aiming"` limits it to while the left trigger is held, and
+`gyro_turn_axis` picks yaw (the default), roll or player space. The gyro
+calibrates itself whenever the controller rests.
+
 The Controls tab binds each action to one or more keys (`keybind_*`, a
 comma-separated list; `WheelUp` and `WheelDown` press briefly per wheel step).
 Defaults: WASD to move, the left and right mouse buttons to aim and fire, Space

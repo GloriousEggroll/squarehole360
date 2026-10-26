@@ -3,6 +3,7 @@
 
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
+#include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
 
@@ -161,8 +162,17 @@ REX_EXTERN(sub_8296DCB8) {
   Gow3RefreshInputPrompts(ctx, base);
   if (!mouse_look_enabled) return;
   for (uint32_t controller = 0; controller < 4; ++controller) {
-    double dx = 0.0, dy = 0.0;
-    if (!rex::input::mnk::TakeMouseLook(controller, dx, dy)) continue;
+    double dx = 0.0, dy = 0.0, gyro_dx = 0.0, gyro_dy = 0.0;
+    const bool mouse = rex::input::mnk::TakeMouseLook(controller, dx, dy);
+    if (rex::input::sdl::TakeGyroLook(controller, gyro_dx, gyro_dy)) {
+      // PlayerInput turns MouseSensitivity (60) rotation units, 1/65536 of a
+      // turn, per mouse count.
+      constexpr double kCountsPerDegree = 65536.0 / 360.0 / 60.0;
+      dx += gyro_dx * kCountsPerDegree;
+      dy += gyro_dy * kCountsPerDegree;
+    } else if (!mouse) {
+      continue;
+    }
     const uint32_t client = ReadInstruction(base, viewport + 52);
     if (!client) return;
     // UGameViewportClient::InputAxis(Viewport, ControllerId, Key, Delta,
@@ -179,6 +189,5 @@ REX_EXTERN(sub_8296DCB8) {
       ctx.r9.u64 = 0;
       rex::runtime::ResolveIndirectFunction(input_axis)(ctx, base);
     }
-    return;
   }
 }
