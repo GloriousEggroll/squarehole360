@@ -168,9 +168,11 @@ public:
     static constexpr size_t kBlockBytes=detail::kConstantDeltaBlockBytes;
     void Invalidate()noexcept {valid_=false;}
     bool valid()const noexcept {return valid_;}
+    // first_block, when given, replaces the first float-constant block of
+    // guest (guest byte order) in both the destination and the mirror.
     template<class Flush>
     Writes Pack(std::span<const uint8_t> guest,std::span<const uint8_t> shared,
-                std::span<uint8_t> destination,Flush&& flush) {
+                std::span<uint8_t> destination,Flush&& flush,const uint8_t* first_block=nullptr) {
         const auto bytes=PackedDrawConstantSize(guest,shared);
         if(destination.size()!=bytes)throw std::runtime_error("Invalid shader constant destination extent");
         const auto overlaps=[&](std::span<const uint8_t> input) {
@@ -201,6 +203,10 @@ public:
             // Reported counters keep their meaning: blocks whose bits changed.
             writes.unchanged_blocks=unchanged;
             writes.float_bytes=last_changed_blocks_*kBlockBytes;
+        }
+        if(first_block) {
+            detail::CopyConstantBlock(first_block,destination.data());
+            std::memcpy(previous_.data(),first_block,kBlockBytes);
         }
         // Shared constants depend on current draw/FSI bindings. Always write
         // their complete original ABI and retain the original full-range flush.

@@ -1,4 +1,5 @@
 #include "gears_bridge.h"
+#include "boundary_buffer_recycler.h"
 #include "native/shader_block_discovery.h"
 #include "native/content_hash.h"
 #include "native/up_commit_sites.h"
@@ -418,13 +419,19 @@ void RecordMoveProbeChunk(const gow3::renderer::MemoryExportCopy& chunk) {
 
 // Blocks retain guest byte order. Record headers are little endian. Missing
 // memory is explicit (size zero), never substituted with invented zero data.
+// Buffers the planner has finished with, reused by this (the guest render)
+// thread for the next events' blocks. See BoundaryBufferRecycler.
+thread_local gow3::renderer::BoundaryBufferRecycler::Stash boundary_stash;
+
 void DataBlock(uint32_t kind, uint32_t address, const uint8_t* data, uint32_t size,bool physical=false) {
   if (live_event) {
     auto& block = live_event->blocks.emplace_back();
     block.kind = kind; block.address = address;
     if (physical&&size>=4096)block.shared_bytes=live_snapshots.Get(address,{data,size});
     else if (size) {
-      if (size == gow3::renderer::LazyDeviceState::kBytes) gow3::renderer::DeviceStateBufferPool::Take(block.bytes);
+      block.bytes = boundary_stash.Take(size);
+      if (block.bytes.capacity() < size && size == gow3::renderer::LazyDeviceState::kBytes)
+        gow3::renderer::DeviceStateBufferPool::Take(block.bytes);
       block.bytes.assign(data, data + size);
     }
   }
@@ -813,7 +820,13 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
       last_observed_sequence=event.sequence;
       if(span) {span->generation=++command_generation;span->api_sequence=event.sequence;event.command_span=std::move(span);}
       event.frame = frame; event.lr = original ? original_lr : ctx.lr;
-      event.args = args; event.result = ctx.r3.u32; event.blocks.reserve(103);
+      event.args = args; event.result = ctx.r3.u32;
+      gow3::renderer::GraphicsBoundaryBufferRecycler().Refill(boundary_stash);
+      if (!boundary_stash.block_vectors.empty()) {
+        event.blocks = std::move(boundary_stash.block_vectors.back());
+        boundary_stash.block_vectors.pop_back();
+      }
+      event.blocks.reserve(103);
       if (gow3::renderer::edram_inventory::Enabled()) {
         // Hooks run at function entry: r1 is the caller's frame. Each frame's
         // back chain is at 0(r1) and its saved LR at -8 from that back chain.
@@ -953,6 +966,14 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
 }
 
 } // namespace
+
+namespace gow3::renderer {
+BoundaryBufferRecycler& GraphicsBoundaryBufferRecycler() {
+  // Leaked: the planner may return buffers during static destruction.
+  static auto* recycler = new BoundaryBufferRecycler;
+  return *recycler;
+}
+}  // namespace gow3::renderer
 
 void Gow3StartGraphicsBridge(rex::memory::Memory* memory,rex::graphics::CommandProcessor* processor) {
   getdata_inline_selection.Reset();

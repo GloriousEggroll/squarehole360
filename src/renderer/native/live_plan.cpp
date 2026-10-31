@@ -165,6 +165,40 @@ struct OwnershipRanges {
         }
         return !footprint.empty();
     }
+    // A texture the GPU wrote at least half of (a resolve that left part of a
+    // reused allocation alone, such as a scene copy) would otherwise be
+    // rebuilt from CPU bytes with a GPU readback every time it is sampled.
+    // Returns its CPU-owned sampled ranges, which the caller imports into GPU
+    // memory and marks GPU-owned (so CPU writes to them are watched), making
+    // the texture GPU-only. Same shape rule as GPUOnlyTexture.
+    std::optional<Ranges> MostlyGpuTextureCpuParts(const std::array<uint32_t,6>& fetch) {
+        if(!import_mostly_gpu_textures||gpu_ranges.empty())return std::nullopt;
+        const bool shape=gpu_only_shapes.Get(fetch,[](const auto& f) {
+            const auto layout=DescribeTexture(f);
+            return !(layout.dimension!=1||layout.min_mip||layout.max_mip||
+                layout.block.block_width!=1||layout.block.block_height!=1||layout.levels.size()!=layout.layers);
+        });
+        if(!shape)return std::nullopt;
+        const auto& footprint=TextureFootprint(fetch);
+        Ranges cpu;uint64_t total=0,owned=0;
+        for(const auto& [first,last]:footprint) {
+            total+=last-first;
+            uint32_t at=first;
+            auto it=gpu_ranges.upper_bound(first);
+            if(it!=gpu_ranges.begin()&&std::prev(it)->second>first)--it;
+            for(;it!=gpu_ranges.end()&&it->first<last;++it) {
+                const uint32_t begin=std::max(first,it->first),end=std::min(last,it->second);
+                if(begin>=end)continue;
+                if(begin>at)cpu.emplace_back(at,begin);
+                owned+=end-begin;at=end;
+            }
+            if(at<last)cpu.emplace_back(at,last);
+        }
+        if(cpu.empty()||owned*2<total||cpu.size()>256)return std::nullopt;
+        for(const auto& [first,last]:cpu)if((first|last)&3)return std::nullopt;
+        return cpu;
+    }
+    bool import_mostly_gpu_textures=false;
     bool GPUBytes(uint32_t first,uint32_t count) const {
         const uint64_t last=uint64_t(first)+count;
         auto it=gpu_ranges.lower_bound(first);
@@ -452,6 +486,7 @@ struct GearsLivePlan::State {
         prefix_operation=end;
     }
 
+    uint64_t texture_imports=0,texture_import_ranges=0,texture_import_bytes=0;
     bool direct_cpu_copies=false;
     // The verified GPU memcpy kernel and its identity, decoded once.
     Bytes memcpy_kernel;std::string memcpy_kernel_digest;
@@ -879,6 +914,10 @@ std::optional<LiveQueryPrefix> GearsLivePlan::TakeDirectPrefix(size_t min_operat
     return prefix;
 }
 void GearsLivePlan::SetDirectCpuMemoryCopies(bool enabled) {state_->direct_cpu_copies=enabled;}
+void GearsLivePlan::SetImportMostlyGpuTextures(bool enabled) {state_->ownership.import_mostly_gpu_textures=enabled;}
+GearsLivePlan::TextureImportStatistics GearsLivePlan::TextureImportStats() const {
+    return {state_->texture_imports,state_->texture_import_ranges,state_->texture_import_bytes};
+}
 std::optional<GearsLivePlan::MemoryCopy> GearsLivePlan::TakeMemoryCopy() {
     return std::exchange(state_->ready_memory_copy,{});
 }
@@ -1131,6 +1170,28 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
         }
         unsigned texture_count=0;required.ForEachTexture([&](unsigned){++texture_count;});
         typed.textures.reserve(texture_count);
+        // CPU-owned parts of mostly GPU-written textures, imported into GPU
+        // memory as CPU writes ahead of this draw (MostlyGpuTextureCpuParts).
+        struct TextureImport {unsigned slot;Ranges parts;};
+        std::vector<TextureImport> imports;
+        const auto emit_imports=[&] {
+            for(const auto& import:imports) {
+                const unsigned kind=32+import.slot*2;
+                const auto bytes=data(kind);
+                if(!blocks[kind]||bytes.empty())throw std::runtime_error("Missing snapshot for an imported texture");
+                const uint32_t base=blocks[kind]->address;
+                for(const auto& [first,last]:import.parts) {
+                    if(first<base||uint64_t(last)-base>bytes.size())
+                        throw std::runtime_error("Imported texture range is outside its snapshot");
+                    Json op=Json::object();op["event"]=event.sequence;op["frame"]=event.frame;op["type"]="cpu_memory_write";
+                    op["address"]=first;op["bytes"]=last-first;op["payload"]=nullptr;op["coherence_epoch"]=0;
+                    s.AssignDependency(op["payload"],s.Intern(bytes.subspan(first-base,last-first)));
+                    s.Emit(std::move(op));
+                    ++s.texture_import_ranges;s.texture_import_bytes+=last-first;
+                }
+                ++s.texture_imports;
+            }
+        };
         if(event.materialize_textures) {
             std::array<GraphicsBoundaryBlock*,64> cpu_blocks{};size_t count=0;
             // Classify once using the original GPU-only predicate, AFTER the
@@ -1144,8 +1205,20 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
                 TypedTexture binding;binding.slot=slot;binding.fetch=fetch;
                 if(((fetch[5]>>9)&3)==1)binding.identity=TypedIdentity(fetch);
                 if(binding.identity&&s.GPUOnlyTexture(fetch))binding.source=TextureSource::GpuPreviousOrAlias;
-                else for(unsigned kind:{32+slot*2,33+slot*2})
-                    if(blocks[kind]&&blocks[kind]->deferred_physical_bytes)cpu_blocks[count++]=blocks[kind];
+                else {
+                    // Same decision, at the same point, as GearsLiveOwnership::Observe.
+                    // Only with a base snapshot to import from; Observe sees the
+                    // same deferred base block.
+                    const auto* base=blocks[32+slot*2];
+                    if(binding.identity&&base&&(base->deferred_physical_bytes||!base->data().empty()))
+                    if(auto parts=s.ownership.MostlyGpuTextureCpuParts(fetch)) {
+                        s.ownership.Mark(*parts);
+                        imports.push_back({slot,std::move(*parts)});
+                        binding.source=TextureSource::GpuPreviousOrAlias;
+                    }
+                    for(unsigned kind:{32+slot*2,33+slot*2})
+                        if(blocks[kind]&&blocks[kind]->deferred_physical_bytes)cpu_blocks[count++]=blocks[kind];
+                }
                 typed.textures.push_back(std::move(binding));
             });
             if(count) {
@@ -1153,6 +1226,7 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
                 for(size_t i=0;i<count;++i)if(cpu_blocks[i]->deferred_physical_bytes)
                     throw std::runtime_error("Deferred texture batch was not completed");
             }
+            emit_imports();
             // The final canonical resources retain the exact original extents
             // and owners. No internal descriptor or cache entry pointer escapes.
             for(auto& binding:typed.textures)if(binding.source!=TextureSource::GpuPreviousOrAlias) {
@@ -1169,7 +1243,16 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
             }
             TypedTexture binding;binding.slot=slot;binding.fetch=fetch;
             if (((fetch[5]>>9)&3)==1) binding.identity=TypedIdentity(fetch);
-            if(binding.identity&&s.GPUOnlyTexture(fetch)) {
+            std::optional<Ranges> parts;
+            const auto* base=blocks[32+slot*2];
+            if(binding.identity&&base&&base->deferred_physical_bytes&&!s.GPUOnlyTexture(fetch))
+                parts=s.ownership.MostlyGpuTextureCpuParts(fetch);
+            if(parts) {
+                s.ownership.Mark(*parts);
+                materialize_texture(32+slot*2);
+                imports.push_back({slot,std::move(*parts)});
+                binding.source=TextureSource::GpuPreviousOrAlias;
+            } else if(binding.identity&&s.GPUOnlyTexture(fetch)) {
                 binding.source=TextureSource::GpuPreviousOrAlias;
             } else {
                 // CPU invalidations have already revoked stale GPU ownership.
@@ -1182,6 +1265,7 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
             }
             typed.textures.push_back(std::move(binding));
         });
+        emit_imports();
         }
         s.Emit(std::move(typed));
         // One relaxed publication per successful typed operation. This counts
@@ -1236,6 +1320,7 @@ struct GearsLiveOwnership::State {
     uint64_t query_generation=0;
 };
 void GearsLiveOwnership::SetDirectCpuMemoryCopies(bool enabled) {state_->direct_cpu_copies=enabled;}
+void GearsLiveOwnership::SetImportMostlyGpuTextures(bool enabled) {state_->ownership.import_mostly_gpu_textures=enabled;}
 GearsLiveOwnership::GearsLiveOwnership(std::function<void(uint32_t,uint32_t)> watch_memory):state_(std::make_unique<State>()) {
     state_->ownership.watch_memory=std::move(watch_memory);
 }
@@ -1283,11 +1368,22 @@ GearsLiveOwnership::Decision GearsLiveOwnership::Observe(GraphicsBoundaryEvent& 
         decision.memory_copy=GearsLivePlan::MemoryCopy{copy.source,copy.destination,copy.bytes,gpu_ranges.empty()};
         return decision;
     }
+    // GearsLivePlan::Push decides per required slot, in slot order; deferred
+    // blocks exist only for required slots, so the decisions match.
+    unsigned imported_slot=UINT32_MAX;
     for(unsigned kind=32;kind<=95;++kind) {
         auto* block=blocks[kind];
         if(!block||!block->deferred_physical_bytes)continue;
-        const auto fetch=Fetch(state,0x480+(kind-32)/2*24);
-        if(((fetch[5]>>9)&3)==1&&s.ownership.GPUOnlyTexture(fetch))continue;
+        const unsigned slot=(kind-32)/2;
+        const auto fetch=Fetch(state,0x480+slot*24);
+        const bool identity=((fetch[5]>>9)&3)==1;
+        if(slot!=imported_slot) {
+            if(identity&&s.ownership.GPUOnlyTexture(fetch))continue;
+            if(identity&&kind%2==0)if(auto parts=s.ownership.MostlyGpuTextureCpuParts(fetch)) {
+                // The planner imports this snapshot's CPU-owned bytes.
+                s.ownership.Mark(*parts);imported_slot=slot;
+            }
+        }
         if(decision.texture_count==decision.textures.size())throw std::runtime_error("Too many live texture snapshots");
         decision.textures[decision.texture_count++]=block;
     }

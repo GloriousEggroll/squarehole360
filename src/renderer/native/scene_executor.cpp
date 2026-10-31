@@ -887,7 +887,6 @@ struct SceneExecutor::State {
     std::unique_ptr<NativeTemporalInputs> temporal_;
     bool temporal_frame_open_=false;
     uint32_t temporal_width_=0,temporal_height_=0;
-    std::vector<uint8_t> temporal_constants_;
     // EDRAM base of this frame's velocity-pass target until it is resolved.
     int64_t temporal_velocity_base_=-1;
     // HUD detection: a scene-view draw happened, and the target of the first
@@ -3975,7 +3974,7 @@ struct SceneExecutor::State {
     }
     RenderBuffer* UploadConstants(DrawUpload& upload,std::span<const uint8_t> guest,
                                   std::span<const uint8_t> shared,ConstantDeltaPacker::Writes* delta_writes=nullptr,
-                                  bool pinned_null=false) {
+                                  bool pinned_null=false,const uint8_t* first_block=nullptr) {
         const auto bytes=PackedDrawConstantSize(guest,shared);
         // The mirror belongs to this actual allocation and owns only CPU bits.
         // At most128 draw slots each retain one8192-byte mirror.
@@ -4000,13 +3999,15 @@ struct SceneExecutor::State {
                 // This writer bypasses the delta mirror; never trust it afterwards.
                 if(upload.constant_delta)upload.constant_delta->Invalidate();
                 PackPinnedNullDrawConstants(guest,shared,{mapped,bytes});
+                if(first_block)detail::CopyConstantBlock(first_block,mapped);
                 validation::Flush(*upload.buffer);
             } else if(config_.delta_constant_uploads) {
                 const auto writes=upload.constant_delta->Pack(guest,shared,{mapped,bytes},
-                    [&]{validation::Flush(*upload.buffer);});
+                    [&]{validation::Flush(*upload.buffer);},first_block);
                 if(delta_writes)*delta_writes=writes;
             } else {
                 PackDrawConstants(guest,shared,{mapped,bytes});
+                if(first_block)detail::CopyConstantBlock(first_block,mapped);
                 validation::Flush(*upload.buffer);
             }
         }
@@ -7309,7 +7310,11 @@ public:
         if(config_.pinned_null_constant_uploads)(void)PackedDrawConstantSize(raw,shared_constant_data);
         // Scene-view draws (reverse-Z viewport) take the jittered camera. The
         // captured payload is shared and content-hashed: patch a copy.
+        // Only vertex constants c0-c3 change, so the upload takes them from a
+        // patched 64-byte block instead of a copy of the whole state.
         std::span<const uint8_t> constant_source=raw;
+        std::array<uint8_t,64> jittered_c0_c3;
+        const uint8_t* constant_first_block=nullptr;
         if(temporal_&&temporal_->active()&&raw.size()>=0x2780&&
            std::bit_cast<float>(BE(raw,0x2918))==-1.f&&std::bit_cast<float>(BE(raw,0x291c))==1.f&&
            temporal_->ObserveSceneDraw(raw)) {
@@ -7317,15 +7322,15 @@ public:
                 temporal_->ObserveVelocityDraw(raw);
                 temporal_velocity_base_=storage(0).base;
             }
-            temporal_constants_.assign(raw.begin(),raw.end());
-            NativeTemporalApplyJitter(temporal_constants_,temporal_->jitter());
-            constant_source=temporal_constants_;
+            std::memcpy(jittered_c0_c3.data(),raw.data()+kGuestFloatConstantOffset,jittered_c0_c3.size());
+            NativeTemporalApplyJitterToFirstVertexConstants(jittered_c0_c3,temporal_->jitter());
+            constant_first_block=jittered_c0_c3.data();
         }
         RenderBuffer* constants=nullptr;ShaderPushConstants addresses{};
         bool pinned_null_constants_selected=false;
         const auto upload_constants=[&](bool pinned_null) {
             constants=UploadConstants(draw_slot.constants,constant_source,shared_constant_data,
-                config_.delta_constant_uploads?&constant_delta_writes:nullptr,pinned_null);
+                config_.delta_constant_uploads?&constant_delta_writes:nullptr,pinned_null,constant_first_block);
             addresses={constants->getDeviceAddress(),constants->getDeviceAddress()+4096,constants->getDeviceAddress()+8192};
         };
         if(!config_.pinned_null_constant_uploads)upload_constants(false);

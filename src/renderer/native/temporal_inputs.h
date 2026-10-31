@@ -40,6 +40,9 @@ struct NativeTemporalCamera {
 std::optional<NativeTemporalCamera> NativeTemporalReadCamera(std::span<const uint8_t> state);
 // Adds jitter to c0..c3 of a mutable copy of a captured device state.
 void NativeTemporalApplyJitter(std::span<uint8_t> state,const NativeTemporalJitter& jitter);
+// The same jitter on just vertex constants c0-c3 (the 64 bytes at the start of
+// the vertex float constants), in guest byte order.
+void NativeTemporalApplyJitterToFirstVertexConstants(std::span<uint8_t,64> c0_c3,const NativeTemporalJitter& jitter);
 // True for a UE3 Canvas (HUD) draw: VS c6..c9 hold the pixel orthographic
 // matrix for a width x height target.
 bool NativeTemporalIsHudDraw(std::span<const uint8_t> state,uint32_t width,uint32_t height);

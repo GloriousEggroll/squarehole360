@@ -88,6 +88,11 @@ public:
     // its destination is CPU memory afterwards: plan it as "cpu_direct" (no
     // payload) and stop treating the destination as GPU-owned.
     void SetDirectCpuMemoryCopies(bool enabled);
+    // Import the CPU-owned bytes of mostly GPU-written textures into GPU memory
+    // instead of reading the GPU bytes back for every CPU texture upload.
+    void SetImportMostlyGpuTextures(bool enabled);
+    struct TextureImportStatistics {uint64_t textures=0,ranges=0,bytes=0;};
+    TextureImportStatistics TextureImportStats() const;
     // Thread-safe diagnostic state; no bank materialization or hashing.
     const char* LazyStateMode()const noexcept;
     struct ResourceHandoffStatistics {bool enabled=false;uint64_t handoffs=0;};
@@ -131,6 +136,7 @@ public:
     explicit GearsLiveOwnership(std::function<void(uint32_t,uint32_t)> watch_memory);
     ~GearsLiveOwnership();
     void SetDirectCpuMemoryCopies(bool enabled);  // As GearsLivePlan's; both must agree.
+    void SetImportMostlyGpuTextures(bool enabled);  // As GearsLivePlan's; both must agree.
     void InvalidateMemory(uint32_t address,uint32_t bytes);
     // No byte of the range is GPU-owned: a GPU memcpy from it copies CPU data.
     bool CpuOwned(uint32_t address,uint32_t bytes) const;

@@ -6,6 +6,7 @@
 #include "runtime_bridge.h"
 #include "gow3_renderer_mode.h"
 #include "renderer/gears_bridge.h"
+#include "renderer/boundary_buffer_recycler.h"
 #include "renderer/native/live_device.h"
 #include "renderer/native/live_plan.h"
 #include "renderer/native/completed_frame_disposer.h"
@@ -263,6 +264,10 @@ REXCVAR_DEFINE_BOOL(gow3_native_shader_precompile, true, "Graphics",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(gow3_native_async_shader_budget_ms, 5000, "Graphics",
                      "Async shaders: after this long waiting for one shader, block on it like the synchronous path")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_import_mostly_gpu_textures, true, "Graphics",
+                   "Copy the CPU-written parts of a mostly GPU-written texture (such as a scene copy in a reused "
+                   "allocation) into GPU memory once, instead of reading the GPU part back each time it is sampled")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(gow3_native_hold_incomplete_frames_ms, 4000, "Graphics",
                      "When at least 1 in 4 of a frame's draws waits for a shader or pipeline compile, keep the "
@@ -795,7 +800,8 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   std::unique_ptr<GearsLiveOwnership> ownership_replica;
   std::mutex planner_mutex;
   std::condition_variable planner_ready,planner_space;
-  std::deque<PlannerItem> planner_queue;
+  // A vector: MSVC's deque allocates every item this large separately.
+  std::vector<PlannerItem> planner_queue;
   // Destination invalidation of direct memcpy chunks, not yet queued so the
   // next adjacent chunk can extend it.
   std::optional<PlannerItem> pending_direct_invalidation;
@@ -1029,6 +1035,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
                 REXCVAR_GET(gow3_native_fast_snapshot_fingerprints)),
         compiler(cache / "native-shaders") {
     planner.SetDirectCpuMemoryCopies(direct);
+    planner.SetImportMostlyGpuTextures(REXCVAR_GET(gow3_native_import_mostly_gpu_textures));
     native_shader_cache=cache/"native-shaders"/NativeShaderCompiler::CacheVersion();
     async_shaders=REXCVAR_GET(gow3_native_async_shaders);
     async_shader_budget=std::chrono::milliseconds(std::max(0,REXCVAR_GET(gow3_native_async_shader_budget_ms)));
@@ -1664,6 +1671,9 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       REXLOG_INFO("Native lazy device states: calls={} current_hits={} previous_hits={} created={} collisions={}",
           device_states.calls,device_states.current_hits,device_states.previous_hits,device_states.created,
           device_states.collisions);
+      const auto imports=planner.TextureImportStats();
+      REXLOG_INFO("Native mostly GPU-written textures imported: {} times, {} ranges, {} MB",
+          imports.textures,imports.ranges,imports.bytes>>20);
       const auto payloads=planner.PayloadInternStats();
       static constexpr const char* kClasses[]={"vertex_index","up","texture","other"};
       for(size_t c=0;c<4;++c)
@@ -1938,7 +1948,8 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   }
   void PlannerLoop() {
     rex::thread::set_current_thread_name("Native Planner");
-    std::deque<PlannerItem> batch;
+    std::vector<PlannerItem> batch;
+    auto& recycler=GraphicsBoundaryBufferRecycler();
     while(true) {
       {
         std::unique_lock lock(planner_mutex);
@@ -1953,6 +1964,8 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         if(stopping||failed)return;
         PlanItem(item);
       }
+      // The planner has copied (or adopted) what it keeps of each event.
+      for(auto& item:batch)if(!item.event.blocks.empty())recycler.Return(item.event.blocks);
       batch.clear();
     }
   }
@@ -2123,6 +2136,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     if(!ownership_replica) {
       ownership_replica=std::make_unique<GearsLiveOwnership>([this](uint32_t address,uint32_t bytes){memory_coherence.Watch(address,bytes);});
       ownership_replica->SetDirectCpuMemoryCopies(direct);
+      ownership_replica->SetImportMostlyGpuTextures(REXCVAR_GET(gow3_native_import_mostly_gpu_textures));
     }
     if(!planner_thread.joinable()) {
       planner_thread=std::thread([this]{PlannerLoop();});

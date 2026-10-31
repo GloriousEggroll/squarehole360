@@ -790,10 +790,27 @@ uint64_t ResolveMemory::OverlayCpuTexture(const TextureLayout& t,std::span<uint8
     }
     readback->unmap();
     ++overlay_readbacks_;overlay_owned_bytes_+=owned_bytes;
+    {
+        auto* slot=&overlay_textures_.back();
+        for(auto& e:overlay_textures_)
+            if(e.count&&e.base_address==t.base_address&&e.format==t.format){slot=&e;break;}
+            else if(!e.count){slot=&e;break;}
+        if(slot->base_address!=t.base_address||slot->format!=t.format||!slot->count)
+            *slot={t.base_address,t.format,t.width,t.height,0,0};
+        ++slot->count;slot->owned+=owned_bytes;
+    }
     if(overlay_owned_bytes_>=overlay_next_report_) {
         overlay_next_report_=overlay_owned_bytes_+(64ull<<20);
-        GOW3_RESOLVE_MEMORY_LOG("Texture overlay readbacks: {} reads, {} MB owned by the GPU copy, {} MB of it equal to the CPU snapshot",
-            overlay_readbacks_,overlay_owned_bytes_>>20,overlay_identical_bytes_>>20);
+        std::string textures;
+        for(auto& e:overlay_textures_)if(e.count) {
+            char line[128];
+            std::snprintf(line,sizeof(line)," [%#x format %u %ux%u: %u reads, %llu KB]",e.base_address,e.format,
+                e.width,e.height,e.count,static_cast<unsigned long long>(e.owned>>10));
+            textures+=line;
+            e={};
+        }
+        GOW3_RESOLVE_MEMORY_LOG("Texture overlay readbacks: {} reads, {} MB owned by the GPU copy, {} MB of it equal to the CPU snapshot;{}",
+            overlay_readbacks_,overlay_owned_bytes_>>20,overlay_identical_bytes_>>20,textures);
     }
     if(stats) {stats->copy_regions=regions.size();stats->readback_bytes=size;stats->owned_bytes=owned_bytes;}
     return owned_bytes;

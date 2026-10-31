@@ -152,6 +152,16 @@ void NativeTemporalApplyJitter(std::span<uint8_t> state,const NativeTemporalJitt
     }
 }
 
+void NativeTemporalApplyJitterToFirstVertexConstants(std::span<uint8_t,64> c0_c3,const NativeTemporalJitter& jitter) {
+    const std::span<uint8_t> rows(c0_c3);
+    for(unsigned r=0;r<4;++r) {
+        const size_t row=r*16;
+        const float w=LoadFloat(rows,row+12);
+        StoreFloat(rows,row,LoadFloat(rows,row)+jitter.clip_x*w);
+        StoreFloat(rows,row+4,LoadFloat(rows,row+4)+jitter.clip_y*w);
+    }
+}
+
 bool NativeTemporalIsHudDraw(std::span<const uint8_t> state,uint32_t width,uint32_t height) {
     if(state.size()<kVertexConstants+10*16||!width||!height)return false;
     auto close=[](float value,float expected) {

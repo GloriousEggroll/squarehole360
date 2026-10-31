@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include "texture_data.h"
 #include "cpu_upload_receipts.h"
 #include "gpu_alias_state.h"
@@ -480,6 +481,10 @@ private:
     // Diagnostic: CPU texture overlay readbacks, and how many of their bytes
     // already matched the CPU snapshot they replace.
     uint64_t overlay_readbacks_=0,overlay_owned_bytes_=0,overlay_identical_bytes_=0,overlay_next_report_=64ull<<20;
+    // Textures read back since the last report, for the log: which textures
+    // keep forcing GPU readbacks.
+    struct OverlayTextureCount {uint32_t base_address=0,format=0,width=0,height=0,count=0;uint64_t owned=0;};
+    std::array<OverlayTextureCount,8> overlay_textures_{};
 public:
     // GPU memory copies by how their result reached the runtime.
     struct CopyPublicationStatistics {
