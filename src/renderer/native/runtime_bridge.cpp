@@ -264,7 +264,7 @@ REXCVAR_DEFINE_BOOL(gow3_native_shader_precompile, true, "Graphics",
 REXCVAR_DEFINE_INT32(gow3_native_async_shader_budget_ms, 5000, "Graphics",
                      "Async shaders: after this long waiting for one shader, block on it like the synchronous path")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(gow3_native_hold_incomplete_frames_ms, 3000, "Graphics",
+REXCVAR_DEFINE_INT32(gow3_native_hold_incomplete_frames_ms, 4000, "Graphics",
                      "When at least 1 in 4 of a frame's draws waits for a shader or pipeline compile, keep the "
                      "last complete frame on screen until none waits, for up to this long (0: never hold)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
