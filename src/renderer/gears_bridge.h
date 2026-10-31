@@ -18,6 +18,7 @@ void Gow3StartGraphicsBridge(rex::memory::Memory* memory,rex::graphics::CommandP
 void Gow3StopGraphicsBridge();
 
 namespace gow3::renderer {
+struct MemoryExportCopy;
 // Diagnostic observation only: available/live are last-observed title metadata,
 // never a pin, allocator-generation certificate, or permission to defer stores.
 struct ObservedMarkerCounterAllocation {
@@ -66,6 +67,9 @@ struct GraphicsBoundaryEvent {
   std::function<void(std::span<GraphicsBoundaryBlock* const>)> materialize_textures;
 };
 using GraphicsBoundarySink = std::function<void(GraphicsBoundaryEvent&&)>;
+// Offered each verified GPU memcpy chunk before its event is captured. It
+// returns true when it performed the copy itself; no event is then produced.
+using DirectMemoryCopySink = std::function<bool(const MemoryExportCopy&)>;
 // Shader discovery is speculative and does not create renderer events. Sources
 // are immutable exact virtual+physical containers copied on the guest caller.
 // speculative: a block neighbour the game has not asked for yet.
@@ -76,7 +80,8 @@ using ShaderDiscoverySink = std::function<void(std::shared_ptr<const std::vector
 // events rather than render while holding the bridge lock. Installing it does
 // not require or create a diagnostic capture file. Install before guest boot
 // to retain all native previous-frame history.
-void Gow3SetGraphicsBoundarySink(gow3::renderer::GraphicsBoundarySink sink);
+void Gow3SetGraphicsBoundarySink(gow3::renderer::GraphicsBoundarySink sink,
+                                 gow3::renderer::DirectMemoryCopySink copy_sink = {});
 // Enable before installing a sink. Regular draws are then captured at each
 // finalized chunk; diagnostic file records retain their existing API format.
 void Gow3EnableGraphicsCommandSpans(bool enabled);

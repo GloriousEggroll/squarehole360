@@ -84,6 +84,10 @@ class GearsLivePlan {
 public:
     explicit GearsLivePlan(std::function<void(uint32_t,uint32_t)> watch_memory={},bool query_prefixes=false,bool lazy_device_states=false,bool direct_resource_refs=false,bool fast_fingerprints=false);
     ~GearsLivePlan();
+    // Direct execution performs a CPU-sourced GPU memcpy at its API point, so
+    // its destination is CPU memory afterwards: plan it as "cpu_direct" (no
+    // payload) and stop treating the destination as GPU-owned.
+    void SetDirectCpuMemoryCopies(bool enabled);
     // Thread-safe diagnostic state; no bank materialization or hashing.
     const char* LazyStateMode()const noexcept;
     struct ResourceHandoffStatistics {bool enabled=false;uint64_t handoffs=0;};
@@ -126,7 +130,10 @@ class GearsLiveOwnership {
 public:
     explicit GearsLiveOwnership(std::function<void(uint32_t,uint32_t)> watch_memory);
     ~GearsLiveOwnership();
+    void SetDirectCpuMemoryCopies(bool enabled);  // As GearsLivePlan's; both must agree.
     void InvalidateMemory(uint32_t address,uint32_t bytes);
+    // No byte of the range is GPU-owned: a GPU memcpy from it copies CPU data.
+    bool CpuOwned(uint32_t address,uint32_t bytes) const;
     struct Decision {
         std::optional<GearsLivePlan::MemoryCopy> memory_copy;
         bool query_begin=false,query_end=false;

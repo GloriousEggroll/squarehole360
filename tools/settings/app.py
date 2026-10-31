@@ -7,10 +7,10 @@ import subprocess
 import sys
 
 from PySide6.QtCore import Qt, QProcess, QTimer, Signal
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QLineEdit,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QLineEdit,
     QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
-from model import CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, widget_value
+from model import CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, listed, widget_value, MAPPING_SOURCES, MAPPING_TARGETS, MAPPING_DEFAULTS, parse_mapping, format_mapping
 
 
 def _qt_key_names():
@@ -93,6 +93,93 @@ class KeyCaptureDialog(QDialog):
             self.finish('WheelUp' if event.angleDelta().y() > 0 else 'WheelDown')
 
 
+class ButtonMappingDialog(QDialog):
+    """One dropdown per physical controller input: the game button it presses."""
+
+    def __init__(self, parent, title, text):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        mapping = parse_mapping(text)
+        form = QFormLayout()
+        self.boxes = {}
+        for source, label in MAPPING_SOURCES:
+            box = QComboBox()
+            for target, target_label in MAPPING_TARGETS:
+                box.addItem(target_label + (' (default)' if target == MAPPING_DEFAULTS[source] else ''), target)
+            box.setCurrentIndex(box.findData(mapping[source]))
+            form.addRow(label, box)
+            self.boxes[source] = box
+        note = QLabel('Face buttons are by position: A is the bottom button (Cross on PlayStation). '
+                      '“Hold for gyro” works with Gyro on set to “While a gyro button is held”.')
+        note.setWordWrap(True)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel |
+                                   QDialogButtonBox.StandardButton.RestoreDefaults)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        buttons.button(QDialogButtonBox.StandardButton.RestoreDefaults).clicked.connect(self.restore_defaults)
+        inner = QWidget()
+        inner.setLayout(form)
+        scroll = QScrollArea()
+        scroll.setWidget(inner)
+        scroll.setWidgetResizable(True)
+        layout = QVBoxLayout(self)
+        layout.addWidget(note)
+        layout.addWidget(scroll, 1)
+        layout.addWidget(buttons)
+        self.resize(520, 640)
+
+    def restore_defaults(self):
+        for source, box in self.boxes.items():
+            box.setCurrentIndex(box.findData(MAPPING_DEFAULTS[source]))
+
+    def text(self):
+        return format_mapping({source: box.currentData() for source, box in self.boxes.items()})
+
+
+class ButtonMappingEdit(QWidget):
+    """A player's button mapping: a summary of the changes and an editor."""
+    textChanged = Signal(str)
+
+    def __init__(self, label):
+        super().__init__()
+        self.label = label
+        self.value = ''
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        layout.addWidget(self.summary, 1)
+        edit = QPushButton('Edit…')
+        edit.clicked.connect(self.edit)
+        layout.addWidget(edit)
+        reset = QPushButton('Reset')
+        reset.clicked.connect(lambda: self.setText(''))
+        layout.addWidget(reset)
+        self.setText('')
+
+    def edit(self):
+        dialog = ButtonMappingDialog(self, self.label, self.value)
+        if dialog.exec():
+            self.setText(dialog.text())
+
+    def text(self):
+        return self.value
+
+    def setText(self, value):
+        try:
+            value = format_mapping(parse_mapping(value))
+        except ValueError:
+            pass  # Shown as written; saving reports the invalid entry.
+        sources, targets = dict(MAPPING_SOURCES), dict(MAPPING_TARGETS)
+        changes = [f'{sources.get(s, s)} → {targets.get(t, t)}' for s, _, t in
+                   (entry.partition('=') for entry in value.split(',') if entry)]
+        self.summary.setText('; '.join(changes) if changes else 'Default buttons')
+        if value != self.value:
+            self.value = value
+            if not self.signalsBlocked():
+                self.textChanged.emit(value)
+
+
 class KeyBindEdit(QWidget):
     """A binding's keys as text, with buttons that capture a key to set or add."""
     textChanged = Signal(str)
@@ -149,10 +236,6 @@ class SettingsWindow(QMainWindow):
         self.hdr_process = None
         self.hdr_status = QLabel('Checking HDR support…')
         self.hdr_status.setWordWrap(True)
-        self.vrr_result = None
-        self.vrr_process = None
-        self.vrr_status = QLabel('Checking display VRR support…')
-        self.vrr_status.setWordWrap(True)
         self.setWindowTitle('Gears of War 3 — Settings')
         self.resize(820, 880)
         root = QWidget()
@@ -184,6 +267,9 @@ class SettingsWindow(QMainWindow):
                 elif setting.key.startswith('keybind_'):
                     widget = KeyBindEdit(setting.label)
                     widget.textChanged.connect(self.changed)
+                elif setting.key.endswith('_buttons') and setting.key.startswith('controller'):
+                    widget = ButtonMappingEdit(f'{setting.section}: button mapping')
+                    widget.textChanged.connect(self.changed)
                 elif isinstance(setting.default, str):
                     widget = QLineEdit()
                     widget.textChanged.connect(self.changed)
@@ -202,7 +288,6 @@ class SettingsWindow(QMainWindow):
                 form.addRow(label, widget)
                 self.rows[setting.key] = (form, label, widget)
             if section == 'Display':
-                form.addRow(self.vrr_status)
                 note = QLabel('60 FPS is the default maximum. Unlimited removes the host limit; the game\n'
                               'may still have its own limits. VSync can also constrain presentation.\n'
                               'Fullscreen uses your desktop resolution. Monitor 0 uses the default.')
@@ -249,96 +334,9 @@ class SettingsWindow(QMainWindow):
         self.awaiting_apply = False
         self.hdr_timer = QTimer(self)
         self.hdr_timer.timeout.connect(self.check_hdr)
-        self.vrr_timer = QTimer(self)
-        self.vrr_timer.timeout.connect(self.check_vrr)
         if hdr_probe:
             QTimer.singleShot(0, self.check_hdr)
             self.hdr_timer.start(10000)
-            QTimer.singleShot(0, self.check_vrr)
-            self.vrr_timer.start(10000)
-
-    def check_vrr(self):
-        if self.vrr_process is not None:
-            return
-        probe = binary('gow3-vrr-probe', ROOT)
-        if not probe.is_file():
-            self.update_vrr_status({'available': False, 'reason': 'VRR detection tool is unavailable.'})
-            return
-        process = QProcess(self)
-        self.vrr_process = process
-        timer = QTimer(process)
-        timer.setSingleShot(True)
-        timer.timeout.connect(process.kill)
-        timer.start(4000)
-        def finished(*_):
-            if self.vrr_process is not process:
-                return
-            timer.stop()
-            try:
-                result = json.loads(bytes(process.readAllStandardOutput()).decode())
-                if process.exitCode() != 0:
-                    raise ValueError()
-            except (ValueError, UnicodeDecodeError):
-                result = {'available': False, 'reason': 'VRR detection failed.'}
-            self.vrr_process = None
-            process.deleteLater()
-            self.update_vrr_status(result)
-        process.finished.connect(finished)
-        process.errorOccurred.connect(lambda error: finished() if error == QProcess.ProcessError.FailedToStart else None)
-        process.start(str(probe))
-
-    def update_vrr_status(self, result):
-        if (not isinstance(result, dict) or type(result.get('available')) is not bool or
-                not isinstance(result.get('reason', ''), str) or
-                not isinstance(result.get('displays', []), list) or
-                any(not isinstance(d, dict) or not isinstance(d.get('name'), str) or not d['name'] or
-                    not isinstance(d.get('description', ''), str) or not isinstance(d.get('reason', ''), str) or
-                    type(d.get('enabled')) is not bool or type(d.get('available')) is not bool
-                    for d in result.get('displays', []))):
-            result = {'available': False, 'reason': 'VRR detection returned invalid display data.'}
-        self.vrr_result = result
-        self.refresh_vrr_status()
-
-    def refresh_vrr_status(self, states=None):
-        # Report compositor state only; this status never changes settings or
-        # desktop policy and never participates in Apply acknowledgment.
-        monitor = self.widgets['monitor'].value()
-        preview = False
-        reason = ''
-        name = ''
-        if monitor == 0:
-            states = running_states(self.path) if states is None else states
-            outputs = {s['vrr_output'] for s in states if isinstance(s.get('vrr_output'), str) and s['vrr_output']}
-            if len(outputs) == 1:
-                name = next(iter(outputs))
-            elif outputs:
-                reason = 'Running games are using different outputs.'
-            else:
-                screen = QApplication.primaryScreen()
-                name = screen.name() if screen else ''
-                preview = True
-        else:
-            screens = QApplication.screens()
-            if monitor <= len(screens):
-                name = screens[monitor - 1].name()
-            else:
-                reason = 'The selected monitor is not connected.'
-        result = self.vrr_result or {}
-        displays = [d for d in result.get('displays', []) if d['name'] == name]
-        display = displays[0] if len(displays) == 1 else None
-        available = result.get('available') is True and display is not None and display['available']
-        if available:
-            label = display.get('description') or name
-            text = 'Display VRR: ' + ('Enabled' if display['enabled'] else 'Disabled') + ' on ' + label + '.'
-        elif self.vrr_result is None:
-            text = 'Checking display VRR support…'
-        else:
-            reason = reason or (display.get('reason') if display else '') or result.get('reason') or 'VRR status is unavailable for the selected output.'
-            text = 'Display VRR: Unavailable. ' + reason
-        if preview:
-            text += ' Default-display preview; the game checks its actual output at launch.'
-        text += ' The compositor controls VRR automatically; the game leaves desktop policy unchanged. Reported Enabled does not confirm variable scanout on every frame.'
-        self.vrr_status.setText(text)
 
     def check_hdr(self):
         if self.hdr_process is not None:
@@ -427,7 +425,7 @@ class SettingsWindow(QMainWindow):
         hidden_focus = False
         focus = QApplication.focusWidget()
         for setting in SETTINGS:
-            visible = applies(setting, mode)
+            visible = applies(setting, mode) and listed(setting)
             form, label, widget = self.rows[setting.key]
             hidden_focus |= not visible and (focus is widget or widget.isAncestorOf(focus) if focus else False)
             form.setRowVisible(widget, visible)
@@ -436,12 +434,11 @@ class SettingsWindow(QMainWindow):
         for section, pane in self.section_pages.items():
             self.tabs.setTabVisible(self.tabs.indexOf(pane), section in active_sections)
         if not self.tabs.isTabVisible(self.tabs.currentIndex()):
-            self.tabs.setCurrentWidget(self.section_pages['Renderer'])
+            self.tabs.setCurrentIndex(next(i for i in range(self.tabs.count()) if self.tabs.isTabVisible(i)))
         if hidden_focus:
-            self.widgets['gow3_renderer'].setFocus()
+            self.tabs.currentWidget().setFocus()
         self.widgets['framerate_limit'].setEnabled(
             self.widgets['gow3_frame_limit_mode'].currentData() == 'custom')
-        self.refresh_vrr_status()
         effect = self.widgets['present_effect'].currentData()
         temporal = effect in ('fsr3', 'dlss', 'xess')
         self.widgets['present_fsr_sharpness_reduction'].setEnabled(effect == 'fsr' or temporal)
@@ -528,7 +525,6 @@ class SettingsWindow(QMainWindow):
 
     def refresh_runtime_status(self):
         states = running_states(self.path)
-        self.refresh_vrr_status(states)
         restart = {key for state in states for key in state.get('restart', [])}
         dirty_restart = {key for key, value in self.read_values().items()
                          if key in BY_KEY and applies(BY_KEY[key], self.widgets['gow3_renderer'].currentData())
@@ -574,14 +570,17 @@ class SettingsWindow(QMainWindow):
             (ROOT / 'logs').mkdir(exist_ok=True)
             with (ROOT / 'logs/settings-launch.log').open('a') as output:
                 if WINDOWS:
-                    subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                                      '-File', str(ROOT / 'tools/run-windows.ps1'),
-                                      '--gow3_config=' + str(self.path.resolve())],
+                    # Packages have the launcher exe; a checkout has the batch file.
+                    launcher = ROOT / 'squarehole360.exe'
+                    command = [str(launcher)] if launcher.exists() else \
+                        ['cmd', '/c', str(ROOT / 'tools/run-windows.bat')]
+                    subprocess.Popen(command + ['--gow3_config=' + str(self.path.resolve())],
                                      cwd=ROOT, stdout=output, stderr=output,
                                      creationflags=subprocess.DETACHED_PROCESS |
                                      subprocess.CREATE_NEW_PROCESS_GROUP)
                 else:
-                    subprocess.Popen([str(ROOT / 'tools/run-linux.sh'),
+                    launcher = 'tools/run-macos.sh' if sys.platform == 'darwin' else 'tools/run-linux.sh'
+                    subprocess.Popen([str(ROOT / launcher),
                                       '--gow3_config=' + str(self.path.resolve())],
                                      cwd=ROOT, stdout=output, stderr=output, start_new_session=True)
             self.status.setText('Game launched • You can close settings')
@@ -592,14 +591,9 @@ class SettingsWindow(QMainWindow):
         if self.confirm_discard():
             self.live_timer.stop()
             self.hdr_timer.stop()
-            self.vrr_timer.stop()
             if self.hdr_process is not None:
                 self.hdr_process.kill()
                 self.hdr_process.waitForFinished(1000)
-            if self.vrr_process is not None:
-                process = self.vrr_process
-                process.kill()
-                process.waitForFinished(1000)
             event.accept()
         else:
             event.ignore()

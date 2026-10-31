@@ -3,7 +3,6 @@
 // assumes that a successful file save means the renderer applied it.
 #include "gow3_settings.h"
 #include "gow3_settings_policy.h"
-#include "gow3_vrr.h"
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/runtime.h>
@@ -29,7 +28,11 @@ const std::set<std::string> live_keys = {
   "present_fsr_max_upsampling_passes", "present_cas_additional_sharpness",
   "present_dither", "swap_post_effect", "present_frame_generation",
   "gow3_low_latency", "present_anti_lag", "mnk_mode", "mnk_mouse_mode", "mnk_sensitivity",
-  "gyro_mode", "gyro_activation", "gyro_turn_axis", "gyro_sensitivity", "gyro_invert_y",
+  // Per-player controller settings; the SDL input driver applies them on change.
+  "controller1_buttons", "controller1_gyro_activation", "controller1_gyro_invert_y", "controller1_gyro_mode", "controller1_gyro_sensitivity", "controller1_gyro_stick_deadzone", "controller1_gyro_turn_axis", "controller1_invert_look_y", "controller1_left_deadzone", "controller1_right_deadzone", "controller1_swap_sticks",
+  "controller2_buttons", "controller2_gyro_activation", "controller2_gyro_invert_y", "controller2_gyro_mode", "controller2_gyro_sensitivity", "controller2_gyro_stick_deadzone", "controller2_gyro_turn_axis", "controller2_invert_look_y", "controller2_left_deadzone", "controller2_right_deadzone", "controller2_swap_sticks",
+  "controller3_buttons", "controller3_gyro_activation", "controller3_gyro_invert_y", "controller3_gyro_mode", "controller3_gyro_sensitivity", "controller3_gyro_stick_deadzone", "controller3_gyro_turn_axis", "controller3_invert_look_y", "controller3_left_deadzone", "controller3_right_deadzone", "controller3_swap_sticks",
+  "controller4_buttons", "controller4_gyro_activation", "controller4_gyro_invert_y", "controller4_gyro_mode", "controller4_gyro_sensitivity", "controller4_gyro_stick_deadzone", "controller4_gyro_turn_axis", "controller4_invert_look_y", "controller4_left_deadzone", "controller4_right_deadzone", "controller4_swap_sticks",
   // The keyboard/mouse driver keeps its own copy of these, refreshed on change.
   "keybind_a", "keybind_b", "keybind_x", "keybind_y", "keybind_left_trigger",
   "keybind_right_trigger", "keybind_left_shoulder", "keybind_right_shoulder",
@@ -97,17 +100,12 @@ Values Parse(const std::string& text) {
   return values;
 }
 void Publish(Watch& w) {
-  const auto vrr = Gow3GetVrrStatus();
   toml::table state;
   state.insert("pid", Gow3ProcessId());
   state.insert("start_time", w.start_time);
   state.insert("digest", w.digest);
   state.insert("error", w.error);
   state.insert("pending", w.pending.valid());
-  state.insert("vrr_output", vrr.output);
-  state.insert("vrr_available", vrr.available);
-  state.insert("vrr_enabled", vrr.enabled);
-  state.insert("vrr_pending", vrr.pending);
   state.insert("config", w.config.string());
   toml::array restart, ignored, live;
   for (auto& [key, value] : w.requested) {
@@ -202,7 +200,6 @@ void Apply(Watch& w, const Values& desired) {
 void Tick() {
   auto& w = *watch;
   try {
-    if (Gow3PollVrr()) Publish(w);
     if (w.pending.valid()) {
       if (w.pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
       w.pending.get(); Publish(w);
@@ -243,13 +240,11 @@ void Gow3StartSettingsWatch(rex::ui::Window* window, rex::Runtime* runtime) {
     w->start_time = Gow3ProcessStartTime();
   } catch (const std::exception& e) { REXLOG_WARN("Live settings unavailable: {}", e.what()); return; }
   watch = std::move(w);
-  Gow3StartVrr(window);
   Publish(*watch);
   watch->timer.Start(window->app_context(), std::chrono::milliseconds(500), Tick);
   REXLOG_INFO("Watching settings for live changes: {}", watch->config.string());
 }
 void Gow3StopSettingsWatch() {
-  Gow3StopVrr();
   if (!watch) return;
   watch->timer.Stop();
   std::error_code ec; std::filesystem::remove(watch->status, ec);

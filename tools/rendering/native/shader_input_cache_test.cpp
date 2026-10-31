@@ -82,6 +82,17 @@ void Synthetic() {
         "Bridge lifecycle clear retained bytes or counters");
     Require(retained&&retained->HasVertex(96)&&retained->HasTexture(17),"Cache clear invalidated returned masks");
 
+    // A shader the analysis rejects (here an unlinked vertex shader, like the
+    // game's memcpy kernel) is analyzed once; identical later draws get the
+    // same full-capture answer without re-running and re-throwing.
+    TestCache failures;auto unlinked_kernel=Draw();Word(unlinked_kernel[0].bytes,0,0x102a1101);
+    for(unsigned i=0;i<20;++i)Compare(failures,unlinked_kernel);
+    Require(failures.statistics().decodes==1&&failures.statistics().unsupported==1&&
+            failures.statistics().unsupported_hits==19,"Unsupported shader was analyzed again");
+    Compare(failures,Draw());
+    Require(failures.statistics().decodes==3&&failures.statistics().unsupported==1,
+            "A linked shader reused an unsupported entry");
+
     TestCache entries(3,1024);
     for(unsigned slot=0;slot<8;++slot) {
         Compare(entries,Shader(false,slot));

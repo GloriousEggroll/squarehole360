@@ -6,12 +6,13 @@ import math
 import re
 import os
 import shutil
+import sys
 import tempfile
 import tomllib
-import tomli_w
 
 ROOT = Path(__file__).resolve().parents[2]
 WINDOWS = os.name == 'nt'
+MACOS = sys.platform == 'darwin'
 BIN_DIR = 'build-windows/bin' if WINDOWS else 'build/bin'
 
 
@@ -22,6 +23,8 @@ def binary(name, root=None):
 def process_identity(pid):
     """Return (executable, start_time) for a live pid; start_time matches the
     game's Gow3ProcessStartTime(). Raises OSError when the pid is not running."""
+    if MACOS:
+        return _macos_process_identity(pid)
     if not WINDOWS:
         proc = Path('/proc') / str(pid)
         stat = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
@@ -48,6 +51,42 @@ def process_identity(pid):
         return Path(name.value).resolve(), str(created)
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _libproc():
+    import ctypes
+    return ctypes.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+
+
+def _macos_process_identity(pid):
+    import ctypes
+
+    class BsdInfo(ctypes.Structure):  # struct proc_bsdinfo
+        _fields_ = [('flags', ctypes.c_uint32), ('status', ctypes.c_uint32), ('xstatus', ctypes.c_uint32),
+                    ('pid', ctypes.c_uint32), ('ppid', ctypes.c_uint32), ('ids', ctypes.c_uint32 * 6),
+                    ('rfu', ctypes.c_uint32), ('comm', ctypes.c_char * 16), ('name', ctypes.c_char * 32),
+                    ('nfiles', ctypes.c_uint32), ('pgid', ctypes.c_uint32), ('pjobc', ctypes.c_uint32),
+                    ('tdev', ctypes.c_uint32), ('tpgid', ctypes.c_uint32), ('nice', ctypes.c_int32),
+                    ('start_sec', ctypes.c_uint64), ('start_usec', ctypes.c_uint64)]
+    libproc = _libproc()
+    path = ctypes.create_string_buffer(4096)
+    if libproc.proc_pidpath(pid, path, len(path)) <= 0:
+        raise OSError(ctypes.get_errno(), 'process not running')
+    info = BsdInfo()
+    if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+        raise OSError(ctypes.get_errno(), 'cannot query process')  # 3 = PROC_PIDTBSDINFO
+    # Matches the game's Gow3ProcessStartTime(): microseconds since the epoch.
+    return Path(path.value.decode()).resolve(), str(info.start_sec * 1000000 + info.start_usec)
+
+
+def _macos_pids():
+    import ctypes
+    libproc = _libproc()
+    pids = (ctypes.c_int * 8192)()
+    count = libproc.proc_listallpids(pids, ctypes.sizeof(pids))
+    return [pid for pid in pids[:max(count, 0)] if pid > 0]
+
+
 CONFIG = ROOT / 'config/gow3.toml'
 
 @dataclass(frozen=True)
@@ -61,6 +100,8 @@ class Setting:
     minimum: float = 0
     maximum: float = 1000
     renderer: str = 'shared'
+    # Shown in the in-game menu; the settings app shows every listed setting.
+    menu: bool = True
 
 S = Setting
 SETTINGS = [
@@ -74,7 +115,7 @@ SETTINGS = [
  S('gow3_frame_limit_mode', 'Frame-rate limit', 'custom', 'Display', 'A maximum only. Slow frames are never forced to catch up.', (('custom','Custom maximum'),('display','Monitor refresh rate'),('unlimited','Unlimited'))),
  S('framerate_limit', 'Maximum FPS', 60.0, 'Display', 'Default: 60. Applies when Custom maximum is selected; enter at least 1 FPS.', minimum=0, maximum=1000),
  S('gow3_low_latency', 'Low latency', False, 'Display', 'Keeps the game at most one frame ahead of the renderer and applies the frame-rate limit before input is read. Lowers input lag; may cost a little throughput.'),
- S('present_anti_lag', 'AMD Anti-Lag', False, 'Display', 'Uses the driver\u2019s anti-lag (VK_AMD_anti_lag) when available: AMD on Windows, or Mesa on Linux (turning it on there takes effect after a restart). No effect elsewhere.'),
+ S('present_anti_lag', 'AMD Anti-Lag', False, 'Display', 'Uses the driver\u2019s anti-lag (VK_AMD_anti_lag) when available: AMD on Windows, or Mesa on Linux (turning it on there takes effect after a restart). No effect elsewhere.', renderer='native'),
  S('present_effect', 'Upscaling', 'fsr', 'Image', 'FSR 1 scales the final image to the window. FSR 3.1, DLSS and XeSS (native renderer) also use depth and motion from earlier frames for a sharper, steadier image; menus use FSR 1. DLSS or XeSS fall back to FSR 3.1 where unavailable.', (('fsr','AMD FSR 1 (spatial)'),('fsr3','AMD FSR 3.1 (temporal)'),('dlss','NVIDIA DLSS (temporal, NVIDIA RTX)'),('xess','Intel XeSS (temporal, Windows)'),('cas','AMD CAS sharpening'),('bilinear','Bilinear')), renderer='shared'),
  S('present_frame_generation', 'Frame generation', False, 'Image', 'FSR 3.1 shows a generated frame between game frames: smoother motion at the cost of some input latency. Needs FSR 3.1 upscaling; best above 60 FPS.', renderer='shared'),
  S('present_fsr_sharpness_reduction', 'FSR softness', 0.2, 'Image', '0 is the sharpest; larger values reduce sharpening.', minimum=0, maximum=2, renderer='shared'),
@@ -123,11 +164,6 @@ SETTINGS = [
  S('mnk_mode', 'Mouse and keyboard controls', True, 'Input', 'Play with the mouse and keyboard; a controller keeps working alongside them. Keys act as controller buttons.'),
  S('mnk_mouse_mode', 'Mouse aiming', 'look', 'Input', 'Mouse look turns the camera directly with the mouse. Right stick moves the stick instead, with the game’s stick aiming feel, for example for a gyro mapped to the mouse.', (('look','Mouse look'),('stick','As right stick'))),
  S('mnk_sensitivity', 'Mouse sensitivity', 1.0, 'Input', 'Multiplies the game’s mouse sensitivity, or the stick speed when the mouse acts as the right stick.', minimum=0.01, maximum=10),
- S('gyro_mode', 'Gyro aiming', 'off', 'Input', 'For controllers with a gyro, such as DualSense, DualShock 4, Switch Pro and Steam controllers. As a mouse turns the camera directly, like Steam Input’s gyro to mouse. As right stick moves the stick instead, with the game’s stick aiming feel.', (('off','Off'),('mouse','As a mouse'),('joystick','As right stick'))),
- S('gyro_activation', 'Gyro on', 'always', 'Input', 'Always, or only while aiming with the left trigger.', (('always','Always'),('aiming','While aiming'))),
- S('gyro_turn_axis', 'Gyro turning', 'yaw', 'Input', 'Yaw turns when you turn the controller left and right. Roll turns when you tilt it. Player space follows either, relative to how you hold the controller.', (('yaw','Yaw'),('roll','Roll'),('player','Player space'))),
- S('gyro_sensitivity', 'Gyro sensitivity', 1.0, 'Input', 'How far the camera turns per degree the controller turns: 1 matches the real world.', minimum=0.1, maximum=10),
- S('gyro_invert_y', 'Invert gyro up and down', False, 'Input'),
  S('keybind_lstick_up', 'Move forward', 'W', 'Controls', 'Left stick up.'),
  S('keybind_lstick_down', 'Move back', 'S', 'Controls', 'Left stick down.'),
  S('keybind_lstick_left', 'Move left', 'A', 'Controls', 'Left stick left.'),
@@ -154,6 +190,68 @@ SETTINGS = [
  S('keybind_rstick_right', 'Look right (keys)', '', 'Controls', 'Right stick right.'),
  S('keybind_guide', 'Guide button', '', 'Controls', 'Xbox Guide button.'),
 ]
+
+# Button mapping sources (physical inputs) and targets (what the game sees),
+# matching vendor/rexglue-sdk/src/input/sdl/sdl_input_driver.cpp. Face buttons
+# are positional: a is the bottom button (Cross on PlayStation controllers).
+MAPPING_SOURCES = (
+    ('a', 'A / Cross'), ('b', 'B / Circle'), ('x', 'X / Square'), ('y', 'Y / Triangle'),
+    ('lb', 'Left bumper / L1'), ('rb', 'Right bumper / R1'), ('lt', 'Left trigger / L2'),
+    ('rt', 'Right trigger / R2'), ('ls', 'Left stick click / L3'), ('rs', 'Right stick click / R3'),
+    ('up', 'D-pad up'), ('down', 'D-pad down'), ('left', 'D-pad left'), ('right', 'D-pad right'),
+    ('back', 'Back / View / Share / Create'), ('start', 'Start / Menu / Options'), ('guide', 'Guide / PS'),
+    ('touchpad', 'Touchpad click'), ('misc1', 'Misc (Share / Capture / Mute)'),
+    ('rpaddle1', 'Right paddle 1 / Edge right back'), ('lpaddle1', 'Left paddle 1 / Edge left back'),
+    ('rpaddle2', 'Right paddle 2'), ('lpaddle2', 'Left paddle 2'),
+    ('misc2', 'Misc 2'), ('misc3', 'Misc 3'), ('misc4', 'Misc 4'), ('misc5', 'Misc 5'), ('misc6', 'Misc 6'))
+MAPPING_TARGETS = (
+    ('a', 'A'), ('b', 'B'), ('x', 'X'), ('y', 'Y'), ('lb', 'Left bumper'), ('rb', 'Right bumper'),
+    ('lt', 'Left trigger'), ('rt', 'Right trigger'), ('ls', 'Left stick click'), ('rs', 'Right stick click'),
+    ('up', 'D-pad up'), ('down', 'D-pad down'), ('left', 'D-pad left'), ('right', 'D-pad right'),
+    ('back', 'Back'), ('start', 'Start'), ('guide', 'Guide'), ('gyro', 'Hold for gyro'), ('none', 'Nothing'))
+# What each source does without a mapping.
+MAPPING_DEFAULTS = {source: source for source, _ in MAPPING_SOURCES if source not in (
+    'touchpad', 'misc1', 'rpaddle1', 'lpaddle1', 'rpaddle2', 'lpaddle2', 'misc2', 'misc3', 'misc4', 'misc5', 'misc6')}
+MAPPING_DEFAULTS.update({'touchpad': 'guide', 'misc1': 'guide', 'rpaddle1': 'y', 'lpaddle1': 'b',
+                         'rpaddle2': 'x', 'lpaddle2': 'a', 'misc2': 'none', 'misc3': 'none',
+                         'misc4': 'none', 'misc5': 'none', 'misc6': 'none'})
+CONTROLLER_PLAYERS = (1, 2, 3, 4)
+
+
+def parse_mapping(text):
+    """source -> target for every source, from 'source=target,...' overrides."""
+    mapping = dict(MAPPING_DEFAULTS)
+    sources, targets = {s for s, _ in MAPPING_SOURCES}, {t for t, _ in MAPPING_TARGETS}
+    for entry in filter(None, (part.strip() for part in text.split(','))):
+        source, _, target = (part.strip() for part in entry.partition('='))
+        if source not in sources or target not in targets:
+            raise ValueError(f'unknown mapping {entry!r}')
+        mapping[source] = target
+    return mapping
+
+
+def format_mapping(mapping):
+    """Only the entries that differ from the defaults, in source order."""
+    return ','.join(f'{source}={mapping[source]}' for source, _ in MAPPING_SOURCES
+                    if mapping.get(source, MAPPING_DEFAULTS[source]) != MAPPING_DEFAULTS[source])
+
+
+for _n in CONTROLLER_PLAYERS:
+    _section = f'Controller {_n}'
+    SETTINGS += [
+        S(f'controller{_n}_gyro_mode', 'Gyro aiming', 'off', _section, 'For controllers with a gyro, such as DualSense, DualShock 4, Switch Pro and Steam controllers. As a mouse turns the camera directly, like Steam Input’s gyro to mouse. As right stick moves the stick instead, with the game’s stick aiming feel.', (('off','Off'),('mouse','As a mouse'),('joystick','As right stick'))),
+        S(f'controller{_n}_gyro_activation', 'Gyro on', 'always', _section, 'Always; only while aiming with the left trigger; or only while a button mapped to “Hold for gyro” is held.', (('always','Always'),('aiming','While aiming'),('button','While a gyro button is held'))),
+        S(f'controller{_n}_gyro_turn_axis', 'Gyro turning', 'yaw', _section, 'Yaw turns when you turn the controller left and right. Roll turns when you tilt it. Player space follows either, relative to how you hold the controller.', (('yaw','Yaw'),('roll','Roll'),('player','Player space'))),
+        S(f'controller{_n}_gyro_sensitivity', 'Gyro sensitivity', 1.0, _section, 'How far the camera turns per degree the controller turns: 1 matches the real world.', minimum=0.1, maximum=10),
+        S(f'controller{_n}_gyro_invert_y', 'Invert gyro up and down', False, _section),
+        S(f'controller{_n}_gyro_stick_deadzone', 'Gyro stick start', 0.3, _section, 'With gyro as right stick: the stick deflection slow motion starts at, where the game’s own dead zone ends.', minimum=0, maximum=0.9),
+        S(f'controller{_n}_swap_sticks', 'Swap sticks', False, _section, 'Move with the right stick and look with the left.'),
+        S(f'controller{_n}_invert_look_y', 'Invert look up and down', False, _section, 'Inverts the right stick’s vertical axis.'),
+        S(f'controller{_n}_left_deadzone', 'Left stick dead zone', 0.0, _section, 'Extra dead zone for a drifting stick, on top of the game’s own. 0 adds none.', minimum=0, maximum=0.9),
+        S(f'controller{_n}_right_deadzone', 'Right stick dead zone', 0.0, _section, 'Extra dead zone for a drifting stick, on top of the game’s own. 0 adds none.', minimum=0, maximum=0.9),
+        S(f'controller{_n}_buttons', 'Button mapping', '', _section, 'Which game button each controller input presses, including back paddles and the touchpad, or “Hold for gyro”.', menu=False),
+    ]
+
 BY_KEY = {s.key:s for s in SETTINGS}
 # The C++ watcher applies only these reviewed settings, on their owning threads.
 LIVE_SETTINGS = {
@@ -162,7 +260,7 @@ LIVE_SETTINGS = {
     'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
     'present_dither', 'swap_post_effect', 'present_frame_generation',
     'gow3_low_latency', 'present_anti_lag',
-} | {s.key for s in SETTINGS if s.section in ('Input', 'Controls')}
+} | {s.key for s in SETTINGS if s.section in ('Input', 'Controls') or s.section.startswith('Controller ')}
 
 def game_running():
     executable = binary('gow3').resolve()
@@ -174,6 +272,8 @@ def game_running():
         if not ctypes.WinDLL('psapi').EnumProcesses(pids, ctypes.sizeof(pids), ctypes.byref(used)):
             return False
         candidates = pids[:used.value // ctypes.sizeof(wintypes.DWORD)]
+    elif MACOS:
+        candidates = _macos_pids()
     else:
         candidates = [int(p.name) for p in Path('/proc').iterdir() if p.name.isdigit()]
     for pid in candidates:
@@ -231,9 +331,15 @@ def applies(setting, mode):
     return setting.renderer == 'shared' or setting.renderer == renderer_mode(mode)
 
 
+def listed(setting):
+    """The settings app and in-game menu offer only the native renderer: the
+    renderer selection and Xenia-only settings are for dev/test configs."""
+    return setting.key != 'gow3_renderer' and setting.renderer != 'xenia'
+
+
 def visible_settings(values):
     mode = renderer_mode(values.get('gow3_renderer', 'native'))
-    return [s for s in SETTINGS if applies(s, mode)]
+    return [s for s in SETTINGS if applies(s, mode) and listed(s)]
 
 
 # Key names the keyboard/mouse driver accepts (vendor/rexglue-sdk/src/ui/keybinds.cpp),
@@ -307,14 +413,34 @@ def validate(values):
         if s is None or not applies(s, mode):
             continue
         validate_setting(s, mode if key == 'gow3_renderer' else value)
+    for player in CONTROLLER_PLAYERS:
+        try:
+            parse_mapping(values.get(f'controller{player}_buttons', ''))
+        except ValueError as error:
+            raise ValueError(f'Controller {player} button mapping: {error}') from None
     if mode == 'xenia' and values['texture_cache_memory_limit_soft'] > values['texture_cache_memory_limit_hard']:
         raise ValueError('Texture cache target must not exceed its maximum.')
     if values['gow3_frame_limit_mode'] == 'custom' and values['framerate_limit'] < 1:
         raise ValueError('Custom maximum must be at least 1 FPS. Select Unlimited to remove the cap.')
 
+# Gyro settings from before per-controller settings belong to player 1.
+LEGACY_CONTROLLER_KEYS = ('gyro_mode', 'gyro_activation', 'gyro_turn_axis', 'gyro_sensitivity',
+                          'gyro_invert_y', 'gyro_stick_deadzone')
+
+
+def migrate_controller_settings(values):
+    for key in LEGACY_CONTROLLER_KEYS:
+        if key in values:
+            values.setdefault(f'controller1_{key}', values[key])
+            del values[key]
+
+
 def load(path=CONFIG):
     values = {s.key:s.default for s in SETTINGS}
-    if path.exists(): values.update(tomllib.loads(path.read_text()))
+    if path.exists():
+        loaded = tomllib.loads(path.read_text())
+        migrate_controller_settings(loaded)
+        values.update(loaded)
     # Filtering is owned by the game. Legacy overrides are not editable and
     # must not survive a settings round-trip as an expert/unknown option.
     values['anisotropic_override'] = -1
@@ -333,6 +459,7 @@ def save(values, path=CONFIG, expected=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     body = '# Gears of War 3 settings. Edit here or run ./tools/settings.sh.\n'
     body += '# Apply supported changes live; other changes need a game restart. CLI options override this file.\n\n'
+    import tomli_w  # Only saving needs it; the menu schema generator does not.
     body += tomli_w.dumps(values)
     if path.exists(): shutil.copy2(path, path.with_suffix('.toml.bak'))
     fd, name = tempfile.mkstemp(prefix=path.name+'.', dir=path.parent)

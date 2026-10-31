@@ -16,17 +16,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#if defined(_WIN32)
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#elif defined(__linux__)
-#include <sys/resource.h>
-#endif
+#include "background_thread_priority.h"
 
 namespace gow3::renderer {
 
@@ -47,13 +37,16 @@ class NativeShaderPrewarmQueue {
     // Speculative neighbours (block discovery) run only on the single
     // lowest-priority worker, never on the workers serving real requests.
     bool speculative = false;
+    // A draw is waiting for this shader (async shaders): it runs before any
+    // queued prewarm job instead of behind them.
+    bool urgent = false;
   };
   struct Statistics {
     uint64_t attempted=0, admitted=0, duplicate=0, full=0, stopped=0;
     uint64_t started=0, completed=0, failures=0, cancelled=0;
     size_t outstanding=0, retained_bytes=0, peak_jobs=0, peak_bytes=0;
-    unsigned workers=0;
-    uint64_t speculative_admitted=0, speculative_started=0, promoted=0;
+    unsigned workers=0, urgent_helpers=0;
+    uint64_t speculative_admitted=0, speculative_started=0, promoted=0, expedited=0;
     bool speculative_worker=false;
   };
   enum class JobStatus { Unknown, Queued, Running, Completed, Failed };
@@ -81,14 +74,18 @@ class NativeShaderPrewarmQueue {
   explicit NativeShaderPrewarmQueue(Compile compile, unsigned workers=0,
       size_t max_jobs=kMaxJobs, size_t max_bytes=kMaxBytes, bool speculative_worker=false)
       : compile_(std::move(compile)), max_jobs_(max_jobs), max_bytes_(max_bytes) {
+    // Default sizing also adds helpers for jobs a draw is waiting on.
+    const unsigned urgent_helpers=workers ? 0u : std::min(UrgentCompileHelperThreads(),kMaxWorkers);
     if (!compile_ || !max_jobs || max_jobs>kMaxJobs || !max_bytes || max_bytes>kMaxBytes)
       throw std::invalid_argument("Invalid native shader prewarm queue bounds");
-    workers=std::clamp(workers ? workers : std::thread::hardware_concurrency(),1u,kMaxWorkers);
+    workers=std::clamp(workers ? workers : BackgroundCompileThreads(),1u,kMaxWorkers);
     workers=unsigned(std::min<size_t>(workers,max_jobs));
     threads_.reserve(workers);
     try {
       for(unsigned i=0;i<workers;++i) threads_.emplace_back([this]{Worker();});
       statistics_.workers=workers;
+      for(unsigned i=0;i<urgent_helpers;++i) threads_.emplace_back([this]{UrgentHelper();});
+      statistics_.urgent_helpers=urgent_helpers;
       if(speculative_worker) {
         threads_.emplace_back([this]{SpeculativeWorker();});
         statistics_.speculative_worker=true;
@@ -118,6 +115,15 @@ class NativeShaderPrewarmQueue {
           jobs_.back().speculative=false;++statistics_.promoted;changed_.notify_all();
         }
       }
+      // A waiting draw moves its still-queued job to the front.
+      if(job.urgent) {
+        const auto found=std::find_if(jobs_.begin(),jobs_.end(),
+            [&](const Job& queued){return queued.key==job.key;});
+        if(found!=jobs_.begin()&&found!=jobs_.end()) {
+          Job moved=std::move(*found);jobs_.erase(found);moved.urgent=true;
+          jobs_.push_front(std::move(moved));++statistics_.expedited;changed_.notify_all();
+        }
+      }
       ++statistics_.duplicate;return false;
     }
     const size_t bytes=job.source->size();
@@ -127,15 +133,17 @@ class NativeShaderPrewarmQueue {
     }
     auto [entry,inserted]=pending_.insert(job.key);
     const bool speculative=job.speculative&&statistics_.speculative_worker;
+    const bool urgent=job.urgent&&!speculative;
     auto& queue=speculative?speculative_:jobs_;
-    try { queue.push_back(std::move(job)); }
+    try { if(urgent) queue.push_front(std::move(job)); else queue.push_back(std::move(job)); }
     catch (...) {pending_.erase(entry);throw;}
+    statistics_.expedited+=urgent;
     statistics_.speculative_admitted+=speculative;
     ++statistics_.admitted;++statistics_.outstanding;
     statistics_.retained_bytes+=bytes;
     statistics_.peak_jobs=std::max(statistics_.peak_jobs,statistics_.outstanding);
     statistics_.peak_bytes=std::max(statistics_.peak_bytes,statistics_.retained_bytes);
-    DiagnoseAdmission(queue.back().key);
+    DiagnoseAdmission(urgent?queue.front().key:queue.back().key);
     // Both worker kinds wait on one condition; wake all so the right one runs.
     changed_.notify_all();
     return true;
@@ -246,14 +254,6 @@ class NativeShaderPrewarmQueue {
     }catch(...) {++failure_records_dropped_;}
   }
 
-  static void LowerCurrentThreadPriority() noexcept {
-#if defined(_WIN32)
-    SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_LOWEST);
-#elif defined(__linux__)
-    // On Linux a PRIO_PROCESS target of 0 changes only the calling thread.
-    setpriority(PRIO_PROCESS,0,19);
-#endif
-  }
   void SpeculativeWorker() noexcept {
     LowerCurrentThreadPriority();
     for(;;) {
@@ -271,7 +271,27 @@ class NativeShaderPrewarmQueue {
       Run(std::move(job));
     }
   }
+  // Takes only jobs a draw waits on; those sit at the front of jobs_.
+  void UrgentHelper() noexcept {
+    LowerCurrentThreadPriority();
+    for(;;) {
+      Job job;
+      {
+        std::unique_lock lock(mutex_);
+        changed_.wait(lock,[&]{return stopping_||(!jobs_.empty()&&jobs_.front().urgent);});
+        if(stopping_) return;
+        job=std::move(jobs_.front());jobs_.pop_front();++statistics_.started;
+        if(auto found=diagnostic_jobs_.find(job.key);found!=diagnostic_jobs_.end()) {
+          found->second.status=JobStatus::Running;found->second.started_ns=NowNs();
+        }
+      }
+      Run(std::move(job));
+    }
+  }
   void Worker() noexcept {
+    // A new area can queue hundreds of compiles at once; the game's own
+    // threads must keep running while they drain.
+    LowerCurrentThreadPriority();
     for(;;) {
       Job job;
       {
@@ -298,7 +318,7 @@ class NativeShaderPrewarmQueue {
         }
         reason_truncated=reason_bytes==kMaxFailureReasonBytes&&reason[reason_bytes];
       };
-      try {compile_(job);success=true;}
+      try {CompileSlot slot(!job.urgent);compile_(job);success=true;}
       catch(const std::exception& error) {remember_reason(error.what());}
       catch (...) {
         // Existing exact Get remains the only rendering authority. Speculative

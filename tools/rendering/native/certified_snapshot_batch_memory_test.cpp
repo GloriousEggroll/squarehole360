@@ -202,7 +202,13 @@ void Run(bool early, bool permission_batch) {
       Check(memory.ValidatePhysicalSnapshot(requests[1].address, requests[1].length, requests[1].previous) == requests[1].previous,
             "SDK allocation failure invalidated valid neighbor");
     }
+#if REX_PLATFORM_WIN32
+    // This program's operator new does not replace allocations inside the
+    // rexruntime DLL, so no failure can be injected there; success must hold.
+    Check(allocation_complete, "SDK allocation sweep did not complete fresh batch preparation");
+#else
     Check(allocation_complete && local_failures >= 5, "SDK allocation sweep did not reach fresh batch preparation");
+#endif
 
     surviving = requests[1].previous;
     immutable = *surviving->bytes();
@@ -241,7 +247,7 @@ void Run(bool early, bool permission_batch) {
 }
 }
 int main() try {
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   for (bool query_batch : {false, true}) for (bool early : {false, true}) Run(early, query_batch);
   std::cout << "PASS: actual SDK Memory batch checks=" << checks << " independent byte oracle=" << oracle_bytes
             << " actual alias writes=" << actual_alias_writes << " reached OOM=" << reached_oom

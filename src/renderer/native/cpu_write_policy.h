@@ -8,6 +8,12 @@ constexpr bool NativeCpuWriteQueueEligible(bool enabled,bool unified,
     return enabled&&unified&&count&&count<=4096&&
         uint64_t(address)+count<=0x20000000ull;
 }
+// An invalidation without bytes stages no upload, only ordered ownership
+// bookkeeping, so its size does not affect the batch.
+constexpr bool NativeCpuInvalidationQueueEligible(bool enabled,bool unified,
+                                                  uint32_t address,uint32_t count) {
+    return enabled&&unified&&count&&uint64_t(address)+count<=0x20000000ull;
+}
 // SDK publication writes the end record, and the adjacent begin record belongs
 // to the same query capability. Preserve eager publication for the whole pair.
 // Generic CPU writes do not supersede NativeQueryTickets, unlike query BEGIN.

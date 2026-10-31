@@ -155,6 +155,7 @@ struct SceneExecutorConfig {
     // Only exact-description vertex buffers evicted after the full frame fence.
     // Idle allocations are bounded separately to 128 buffers/16 MiB actual bytes.
     bool recycle_vertex_buffers=false;
+    bool vertex_arena=false;
     // Omit unreachable decoded channels while retaining float32 precision.
     bool compact_resolve_channels=false;
     // Enabled-device proof for borrowed devices (rg32f storage shader only).
@@ -209,6 +210,16 @@ struct SceneExecutorConfig {
     // Optional full physical store plus exact post-pack sampled-image output.
     // The immutable receipt is usable only while its physical version matches.
     bool canonical_resolve_stores=false;
+    // Sample a resolve's own image when memory still holds exactly its bytes.
+    bool direct_resolve_textures=false,verify_direct_resolve_textures=false;
+    // Store resolves to memory only when something reads those bytes as memory.
+    bool deferred_resolve_stores=false;
+    // Hardware render targets: a clear covering a whole color surface needs
+    // none of its previous contents, so skip restoring them first.
+    bool hardware_skip_full_clear_restore=false;
+    // Hardware render targets: commit surfaces to EDRAM only when something
+    // reads EDRAM, and resolve fixed16 surfaces without an EDRAM round trip.
+    bool hardware_lazy_commits=false,hardware_direct_fixed_resolves=false;
     // Diagnostic exact UNORM10 primary color resolves; stale packed sources
     // bypass only the identity RGBA32F host copy, with no host token promotion.
     bool direct_packed_color_resolves=false;
@@ -360,6 +371,8 @@ struct SceneExecutorConfig {
     // Experimental immutable page updates share the FIFO. Query-report
     // overlaps, larger updates, memory_copy and CPU readbacks remain eager.
     bool queue_cpu_memory_writes=false;
+    // Guest GPU copies of CPU data join the transfer batch (direct execution).
+    bool queue_cpu_memory_copies=false;
     bool diagnose_marker_query_cohorts=false; // Pure metadata census under gpu_command_summary.
     // One checked, fully fenced 4 KiB CPU upload owner; scheduling is unchanged.
     bool reuse_cpu_write_upload=false;
@@ -420,6 +433,8 @@ public:
     // shader compilation on misses; missing source/program uses ordinary Native.
     bool PrewarmStencilMaterialPipeline(const NativeFsiPipelineRecipe&,std::span<const uint32_t> vertex,
         std::span<const uint32_t> pixel);
+    void PrewarmHardwarePipeline(const NativeFsiPipelineRecipe&,std::span<const uint32_t> vertex,
+                                 std::span<const uint32_t> pixel);
     void PrewarmFsiPipeline(const NativeFsiPipelineRecipe&,std::span<const uint32_t> vertex,
         std::span<const uint32_t> pixel);
     // Startup-only canonical PSO with local missing shader modules. Persistent
@@ -521,6 +536,10 @@ public:
         bool available=false;
     };
     AcceptedWorkSnapshot ObserveAcceptedWork() const noexcept;
+    // Draws seen, and draws skipped because their shader or pipeline was
+    // still compiling, both since the executor started.
+    struct CompileSkipCounts {uint64_t draws=0,skipped=0;};
+    CompileSkipCounts ObserveCompileSkips() const noexcept;
     // Pure CP diagnostic: no collection, polling, result readback or publication.
     struct MarkerQueryReadiness {uint32_t closed=0,ready=0,unknown=0;bool active=false,available=false;};
     MarkerQueryReadiness ObserveMarkerQueryReadiness() const noexcept;
@@ -554,6 +573,14 @@ public:
     // not replay that operation through a fallback renderer.
     uint64_t mutation_serial() const;
     std::vector<uint8_t> ReadPhysical(uint32_t address,uint32_t bytes);
+    // ReadPhysical of a GPU memory copy's destination right after that copy,
+    // from the readback recorded with it; empty when there is none.
+    std::optional<std::vector<uint8_t>> TakeCopyPublication(uint32_t address,uint32_t bytes);
+    // One transfer scope across consecutive memory copies and CPU writes (see
+    // RuntimeState::ExecuteOperations). Abort after a failed operation.
+    void BeginTransferRun(uint64_t event);
+    void EndTransferRun();
+    void AbortTransferRun() noexcept;
     // Explicit offscreen diagnostic only; requires fully defined10MiB history.
     std::vector<uint8_t> ReadFullEdram();
     std::optional<NativeQueryTracker::Result> ActiveQuery() const;

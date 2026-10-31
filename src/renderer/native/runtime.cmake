@@ -33,6 +33,16 @@ target_link_libraries(gow3-native-shader-compiler PUBLIC gow3-native-early-depth
 include("${CMAKE_CURRENT_LIST_DIR}/content_hash.cmake")
 
 find_program(GOW3_NATIVE_GLSLANG glslangValidator REQUIRED)
+if(APPLE)
+    # MoltenVK turns SPIR-V debug names into Metal identifiers, and names such
+    # as "address" collide with Metal's own. Without debug names the translator
+    # generates identifiers; the code is unchanged.
+    file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/glslang-without-names.sh"
+        CONTENT "#!/bin/sh\nexec \"@GOW3_NATIVE_GLSLANG@\" -g0 \"$@\"\n" @ONLY)
+    file(CHMOD "${CMAKE_CURRENT_BINARY_DIR}/glslang-without-names.sh"
+        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    set(GOW3_NATIVE_GLSLANG "${CMAKE_CURRENT_BINARY_DIR}/glslang-without-names.sh")
+endif()
 set(GOW3_NATIVE_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/native-renderer")
 set(GOW3_NATIVE_SHADER_SOURCE_DIR "${GOW3_NATIVE_ROOT}/tools/rendering/native")
 foreach(mode restore store)
@@ -170,6 +180,8 @@ add_library(gow3-native-renderer STATIC
     "${CMAKE_CURRENT_LIST_DIR}/query_tracker.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/query_comparison.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/scene_executor.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/edram_inventory.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/hitch_trace.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/native_monotonic_depth_module.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/readonly_depth_conversion.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/temporal_inputs.cpp"
@@ -188,6 +200,7 @@ add_library(gow3-native-renderer STATIC
     "${CMAKE_CURRENT_LIST_DIR}/builtin_atomic_depth.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/builtin_readonly_query.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/pipeline_prewarm.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/shader_precompile.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/fsi_state_recipe_cache.cpp"
     "${GOW3_NATIVE_SHADER_DIR}/fullscreen_spv.h"
     "${GOW3_NATIVE_SHADER_DIR}/resolve_spv.h"
@@ -215,6 +228,8 @@ target_include_directories(gow3-native-renderer PRIVATE "${REXSDK_DIR}/thirdpart
 # Counter census remains a replay-only target; production links only the
 # authenticated source/compiler helper and its uninstrumented module.
 target_link_libraries(gow3-native-renderer PUBLIC plume gow3-native-shader-compiler PRIVATE rex::runtime xxHash::xxhash gow3-native-content-hash gow3-native-stencil-material-cutoff)
+# Shader precompile at start reads the game's LZX-compressed packages.
+target_link_libraries(gow3-native-renderer PRIVATE mspack)
 if(UNIX AND NOT APPLE)
     # Both header consumers must see the complete platform declaration set on
     # their first inclusion of vulkan.h, regardless of include order.

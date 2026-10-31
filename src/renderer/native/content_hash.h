@@ -10,6 +10,7 @@
 #include <openssl/sha.h>
 #else
 #include <picosha2.h>
+#include "renderer/native/content_hash_shani.h"
 #endif
 
 namespace gow3::renderer {
@@ -24,7 +25,8 @@ inline std::string ContentHash(std::span<const uint8_t> bytes) {
     if (!SHA256(bytes.empty() ? &empty : bytes.data(), bytes.size(), digest.data()))
         throw std::runtime_error("Native content SHA-256 failed");
 #else
-    picosha2::hash256(bytes.begin(), bytes.end(), digest.begin(), digest.end());
+    if (shani::Supported()) digest = shani::Digest(bytes);
+    else picosha2::hash256(bytes.begin(), bytes.end(), digest.begin(), digest.end());
 #endif
     constexpr char hex[] = "0123456789abcdef";
     std::string result(digest.size() * 2, '0');

@@ -12,6 +12,10 @@ struct MemoryExportCopy {
 // Different shaders, export formats, stream bounds or raster states throw.
 MemoryExportCopy DecodeMemoryExportCopy(std::span<const uint8_t> container,
     std::span<const uint8_t> device_state,const std::array<uint32_t,8>& args);
+// The same decode for a container the caller already passed through
+// DecodeMemoryExportCopy (byte-identical), without hashing it again.
+MemoryExportCopy DecodeVerifiedMemoryExportCopy(std::span<const uint8_t> device_state,
+    const std::array<uint32_t,8>& args);
 // CP-time validation against actual active shader/registers, after all PM4
 // state writes and before skipping its reference draw. Words are host-endian.
 MemoryExportCopy DecodeMemoryExportPacket(std::span<const uint32_t> shader_words,

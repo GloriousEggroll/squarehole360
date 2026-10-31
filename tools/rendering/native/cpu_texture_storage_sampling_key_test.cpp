@@ -53,6 +53,29 @@ int main() try {
         Compare(c.fetch,CpuTextureStorageSamplingKey(c.fetch,true),base,mips);
     }
     Check(raw_keys.size()==64&&bias_keys.size()==11&&keys.size()==9,"saved corpus grouping changed");
+    // Content keys drop only the guest addresses: every captured layout must
+    // decode the same bytes into the same levels, and keep its sampling state.
+    for(const auto& c:captured) {
+        const auto content=CpuTextureContentKey(c.fetch);
+        const auto base=Payload(c.base_bytes,0x2741),mips=Payload(c.mip_bytes,0x9913);
+        const auto x=DescribeTexture(c.fetch),y=DescribeTexture(content);
+        Check(x.min_mip==y.min_mip&&x.max_mip==y.max_mip&&bool(x.base_address)==bool(y.base_address)&&
+              bool(x.mip_address)==bool(y.mip_address),"content key changed resident levels");
+        const auto dx=DecodeTexture(c.fetch,base,mips),dy=DecodeTexture(content,base,mips);
+        Check(dx.levels.size()==dy.levels.size(),"content key changed level count");
+        for(size_t i=0;i<dx.levels.size();++i)
+            Check(Level(dx.levels[i].layout)==Level(dy.levels[i].layout)&&dx.levels[i].bytes==dy.levels[i].bytes,
+                  "content key changed decoded bytes");
+        for(unsigned word=0;word<6;++word)for(unsigned bit=0;bit<32;++bit) {
+            const uint32_t b=uint32_t{1}<<bit;
+            if((word==1||word==5)&&(b&0x1FFFF000u))continue;
+            auto changed=c.fetch;changed[word]^=b;
+            Check(CpuTextureContentKey(changed)!=content,"content key lost a non-address bit");
+        }
+        auto moved=c.fetch;
+        for(const unsigned word:{1u,5u})if(moved[word]&0x1FFFF000u)moved[word]=(moved[word]&~0x1FFFF000u)|0x0ABCD000u;
+        Check(CpuTextureContentKey(moved)==content,"moved texture changed its content key");
+    }
     for(const auto& c:captured) {
         const auto canonical=CpuTextureStorageSamplingKey(c.fetch,true);
         for(unsigned word=0;word<6;++word)for(unsigned bit=0;bit<32;++bit) {

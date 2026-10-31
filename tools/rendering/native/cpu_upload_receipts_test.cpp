@@ -201,10 +201,29 @@ void CheckRandomized(bool blocks) {
         m.Forward(descriptors,expected);
     }
 }
+// Completed GPU copy results: only whole pages of an unaligned range become
+// receipts, and a later write anywhere on a page retires it.
+void CheckRememberPages(bool blocks) {
+    Model m(blocks);
+    m.Mutate(2*P+100,4*P,40);  // Pages 2 and 6 partial, 3..5 whole.
+    m.receipts.RememberPages(2*P+100,std::span<const uint8_t>(m.native.data()+2*P+100,4*P),
+        [&](uint32_t page){return m.Version(page);});
+    m.Forward({{3*P,6*P,0}},true);
+    m.Forward({{3*P+5,4*P+9,11}},true);
+    m.Forward({{2*P+100,3*P,0}},false);  // Partial first page was not remembered.
+    m.Forward({{6*P,6*P+100,0}},false);  // Nor the partial last page.
+    m.Mutate(4*P+7,1,9);m.Forward({{3*P,6*P,0}},false);
+    m.Forward({{3*P,4*P,0},{5*P,6*P,P}},true);
+    // A range shorter than a page, or one inside a single page, remembers nothing.
+    m.Mutate(8*P+1,P,50);
+    m.receipts.RememberPages(8*P+1,std::span<const uint8_t>(m.native.data()+8*P+1,P),
+        [&](uint32_t page){return m.Version(page);});
+    m.Forward({{8*P+1,9*P,0}},false);m.Forward({{9*P,9*P+1,0}},false);
+}
 int main() {
     try {
         CheckDisabledAndAllocation();CheckBoundsAndExceptions();
-        for(bool blocks:{false,true}){CheckCoverage(blocks);CheckRandomized(blocks);}
+        for(bool blocks:{false,true}){CheckCoverage(blocks);CheckRandomized(blocks);CheckRememberPages(blocks);}
         std::cout<<"PASS cpu_upload_receipts cases="<<cases<<" checks="<<checks<<" oracle_bytes="<<oracle_bytes
             <<" block_versions=off,on checked_queue=required allocation_failure=injected gpu_execution=false\n";
         return 0;

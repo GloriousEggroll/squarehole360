@@ -28,6 +28,8 @@ target_compile_features(gow3-native-raw-float-texture-test PRIVATE cxx_std_23)
 
 add_executable(gow3-native-retired-buffer-pool-test retired_buffer_pool_test.cpp)
 target_include_directories(gow3-native-retired-buffer-pool-test PRIVATE "${GOW3_ROOT}/src")
+add_executable(gow3-native-staging-buffer-pool-test staging_buffer_pool_test.cpp)
+target_include_directories(gow3-native-staging-buffer-pool-test PRIVATE "${GOW3_ROOT}/src")
 add_executable(gow3-native-cpu-write-policy-test cpu_write_policy_test.cpp)
 target_include_directories(gow3-native-cpu-write-policy-test PRIVATE
     "${GOW3_ROOT}/src" "${GOW3_ROOT}/vendor/rexglue-sdk/include")

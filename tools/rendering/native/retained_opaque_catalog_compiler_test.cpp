@@ -50,8 +50,8 @@ int main(int argc,char** argv) try {
         Check(ContentHash(pixel)==ps&&ContentHash(vertex)==vs,"Pinned source digest mismatch");
         const auto canonical=compiler.Get(pixel,NativeShaderMode::FragmentInterlock);
         const auto canonical_vertex=compiler.Get(vertex,NativeShaderMode::Raster);
-        const auto pixel_cache=output/"canonical"/compiler.CacheVersion()/(ps+".fsi.g3spv");
-        const auto vertex_cache=output/"canonical"/compiler.CacheVersion()/(vs+".g3spv");
+        const auto pixel_cache=NativeShaderCompiler::CachePath(output/"canonical"/compiler.CacheVersion(),ps+".fsi");
+        const auto vertex_cache=NativeShaderCompiler::CachePath(output/"canonical"/compiler.CacheVersion(),vs);
         const auto saved_pixel=Read(pixel_cache), saved_vertex=Read(vertex_cache);
         const auto program=TryPrepareNativeRetainedOpaqueCatalog(compiler,pixel);
         Check(program&&program->source_sha256==ps&&program->vertex_sha256==vs&&

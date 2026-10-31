@@ -174,7 +174,8 @@ RenderSamplerDesc TextureSampler(const TextureLayout& t,int32_t anisotropy_overr
 }
 
 NativeTexture UploadTexture(RenderDevice& device, RenderCommandList& commands, const TextureData& data,
-                            int32_t anisotropy_override,uint32_t max_anisotropy) {
+                            int32_t anisotropy_override,uint32_t max_anisotropy,
+                            const std::function<std::unique_ptr<RenderBuffer>(uint64_t)>& acquire_staging) {
   const auto& t = data.layout;
   const auto format = NativeTextureFormat(t);
   NativeTexture result;
@@ -205,7 +206,8 @@ NativeTexture UploadTexture(RenderDevice& device, RenderCommandList& commands, c
   // only cached source bytes, then issue sequential bulk writes to staging.
   // The scratch bound is independent of the image and mip-chain dimensions.
   std::vector<uint8_t> converted(scratch_bytes);
-  result.staging = device.createBuffer(RenderBufferDesc::UploadBuffer(bytes));
+  if (acquire_staging) result.staging = acquire_staging(bytes);
+  if (!result.staging) result.staging = device.createBuffer(RenderBufferDesc::UploadBuffer(bytes));
   if (!result.staging) throw std::runtime_error("Failed to allocate texture staging buffer");
   auto* mapped = static_cast<uint8_t*>(result.staging->map());
   if (!mapped) throw std::runtime_error("Failed to map texture staging buffer");

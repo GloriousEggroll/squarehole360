@@ -5,6 +5,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gow3::renderer {
@@ -35,6 +36,11 @@ class NativeShaderCompiler {
       std::span<const uint8_t> container, NativeShaderMode mode = NativeShaderMode::Raster);
   std::shared_ptr<const CompiledNativeShader> GetDepthOnlyFragmentInterlock();
   static std::string CacheVersion();
+  // A cached shader: <version folder>/<first two hex digits>/<key>.g3spv, key
+  // being the source hash (plus ".fsi" for fragment interlock). Wine scans a
+  // whole folder to look up a missing file, which a flat folder of 100k+
+  // shaders made ~50 ms a lookup; subfolders keep each one small.
+  static std::filesystem::path CachePath(const std::filesystem::path& version_directory, std::string_view key);
 
  private:
   struct Impl;

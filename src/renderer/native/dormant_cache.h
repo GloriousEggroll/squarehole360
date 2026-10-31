@@ -177,6 +177,27 @@ class DormantCache {
     ++statistics_.binding_evictions;
     return true;
   }
+  // Repeated EvictUnusedForBindings until done() holds, with one scan: erasing
+  // an entry changes no other entry's eligibility, so the victims and their
+  // order (oldest first, earlier iteration first on ties) are the same.
+  template <class Cache, class BeforeErase, class Eligible, class Done, class Observer=DormantCacheNoEvictionObserver>
+  size_t EvictUnusedForBindingsUntil(Cache& cache, BeforeErase before_erase, Eligible eligible, Done done,
+                                     Observer observer={}) {
+    if (done()) return 0;
+    std::vector<typename Cache::iterator> victims;
+    for (auto it = cache.begin(); it != cache.end(); ++it)
+      if (!Used(it->second.residency) && eligible(it->second)) victims.push_back(it);
+    std::stable_sort(victims.begin(), victims.end(), [](auto a, auto b) {
+      return a->second.residency.last_used_epoch < b->second.residency.last_used_epoch;
+    });
+    size_t erased = 0;
+    for (const auto victim : victims) {
+      if (done()) break;
+      EraseObserved(cache, victim, before_erase,observer,DormantCacheEvictionKind::Bindings);
+      ++statistics_.binding_evictions; ++erased;
+    }
+    return erased;
+  }
 
  private:
   // The original erase remains the sole owner release and statistics update.

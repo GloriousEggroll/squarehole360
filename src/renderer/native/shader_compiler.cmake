@@ -17,10 +17,24 @@ foreach(source shader_recompiler.cpp shader_recompiler.h shader_code.h shader_co
     file(SHA256 "${path}" source_hash)
     string(APPEND GOW3_SHADER_VERSION_INPUT "${source_hash};")
 endforeach()
+# Revisions that changed only where cache files live, not compiled output,
+# hash as the revision they replaced. That keeps the version, so users' caches
+# and every compiler pinned to it stay valid; any other edit changes it.
+set(GOW3_SHADER_LAYOUT_ONLY_REVISIONS
+    # Cache entries moved into two-digit subfolders (shader_compiler.cpp, .h).
+    "2681b8b1952d37e68728501a43084d6a238ac89c0ca72c4d99060cfac547efc7=bcbfe52562dd637d88ee1d070f08fc5b9ef0817c68eb64e72a10214476ef1d5e"
+    "8ef33a1921fb18065ac87148827e71e132ee988a7883a7694b410d86d9e64ad9=baf614dbd862cf7064dbac527eeb06e8a4fa0c7a989bc4132c0b8437abc2728c"
+    # Source hashing through ContentHash, the same SHA-256 (shader_compiler.cpp).
+    "4ab679de207a3698f1d85f5ebe9218b77325d8e43883aca55aad396255c1e295=bcbfe52562dd637d88ee1d070f08fc5b9ef0817c68eb64e72a10214476ef1d5e")
 foreach(source shader_compiler.cpp shader_compiler.h shader_abi.h shader_recompiler_pch.h fsi_precision.hlsl fsi_state.h)
     set(path "${CMAKE_CURRENT_LIST_DIR}/${source}")
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
     file(SHA256 "${path}" source_hash)
+    foreach(revision IN LISTS GOW3_SHADER_LAYOUT_ONLY_REVISIONS)
+        if(revision MATCHES "^${source_hash}=(.+)$")
+            set(source_hash "${CMAKE_MATCH_1}")
+        endif()
+    endforeach()
     string(APPEND GOW3_SHADER_VERSION_INPUT "${source_hash};")
 endforeach()
 get_target_property(GOW3_DXC_BINARY Microsoft::DirectXShaderCompiler IMPORTED_LOCATION)
@@ -210,7 +224,8 @@ target_include_directories(gow3-native-shader-compiler PRIVATE
     "${GOW3_XENOS_ROOT}/thirdparty/xxHash"
     "${GOW3_XENOS_ROOT}/thirdparty/zstd/lib"
     "${GOW3_SHADER_ROOT}/vendor/rexglue-sdk/thirdparty/picosha2")
-target_link_libraries(gow3-native-shader-compiler PRIVATE Microsoft::DirectXShaderCompiler fmt::fmt)
+include("${CMAKE_CURRENT_LIST_DIR}/content_hash.cmake")
+target_link_libraries(gow3-native-shader-compiler PRIVATE Microsoft::DirectXShaderCompiler fmt::fmt gow3-native-content-hash)
 target_precompile_headers(gow3-native-shader-compiler PRIVATE "${CMAKE_CURRENT_LIST_DIR}/shader_recompiler_pch.h")
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     target_compile_options(gow3-native-shader-compiler PRIVATE -Wno-switch -Wno-unused-variable -Wno-null-arithmetic -fms-extensions)

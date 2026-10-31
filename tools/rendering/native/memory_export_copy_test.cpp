@@ -155,6 +155,19 @@ int main(int argc,char** argv) {
             !std::all_of(output.begin(),output.begin()+4,[](uint8_t b){return b==0xa5;})||
             !std::all_of(output.end()-4,output.end(),[](uint8_t b){return b==0xa5;}))
             throw std::runtime_error("GPU memcpy differed or overwrote adjacent bytes");
+        // The copy's own readback equals a separate one, also when the reused
+        // readback buffer last held a different result.
+        memory.Initialize(copy.source,cpu_update);
+        const auto published=memory.CopyAndRead(copy.source,copy.destination,copy.bytes);
+        if(published!=cpu_update||memory.ReadBytes(copy.destination,copy.bytes)!=cpu_update)
+            throw std::runtime_error("GPU memcpy readback differed from the copied bytes");
+        memory.Initialize(copy.source,payload);
+        if(memory.CopyAndRead(copy.source,copy.destination,copy.bytes)!=expected)
+            throw std::runtime_error("Reused GPU memcpy readback returned stale bytes");
+        const auto guarded=memory.ReadBytes(copy.destination-4,copy.bytes+8);
+        if(!std::all_of(guarded.begin(),guarded.begin()+4,[](uint8_t b){return b==0xa5;})||
+            !std::all_of(guarded.end()-4,guarded.end(),[](uint8_t b){return b==0xa5;}))
+            throw std::runtime_error("GPU memcpy readback overwrote adjacent bytes");
         bool gpu_overlap=false;try{memory.Copy(copy.source,copy.source+4,64);}catch(const std::runtime_error&){gpu_overlap=true;}
         if(!gpu_overlap)throw std::runtime_error("GPU overlapping copy accepted");
         // Compare the mixed operation to an independent byte-by-byte oracle.

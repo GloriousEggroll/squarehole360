@@ -1,6 +1,7 @@
 #pragma once
 #include "plume_render_interface_types.h"
 #include "fsi_state_specialization_descriptor.h"
+#include "draw_state.h"
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -23,6 +24,10 @@ struct NativeFsiPipelineRecipe {
     std::optional<std::string> pixel;
     std::array<uint32_t, 6> raster{};
     int32_t color_format = -1, depth_format = -1;
+    // Hardware render target mode only: the full pipeline state key, as
+    // EncodeNativeHardwareRaster writes it. Empty for FSI recipes, whose
+    // state is the six raster words above.
+    std::vector<uint32_t> hardware;
     auto operator<=>(const NativeFsiPipelineRecipe &) const = default;
 };
 using PipelineShaderSource = std::shared_ptr<const std::vector<uint8_t>>;
@@ -31,6 +36,14 @@ struct ObservedNativePipeline {
     PipelineShaderSource vertex, pixel;
 };
 bool ValidNativeFsiPipelineRecipe(const NativeFsiPipelineRecipe &) noexcept;
+bool ValidNativeHardwarePipelineRecipe(const NativeFsiPipelineRecipe &) noexcept;
+
+// Every pipeline field a hardware render target draw bakes into a VkPipeline.
+// Viewport, scissor and depth-bias values are dynamic state; alpha reference,
+// half-pixel and index offsets are not pipeline state.
+using NativeHardwareRaster = std::array<uint32_t, kDrawStateWords>;
+NativeHardwareRaster EncodeNativeHardwareRaster(const plume::RenderGraphicsPipelineDesc &,
+                                                uint32_t specialization, bool rectangle);
 
 // Own all pointer targets until synchronous createGraphicsPipeline returns.
 // Neither this object nor its descriptor may cross a deferred callback.
@@ -49,13 +62,30 @@ struct NativeFsiPipelineDescriptor {
     NativeFsiPipelineDescriptor &operator=(const NativeFsiPipelineDescriptor &) = delete;
 };
 
+// Rebuilds the draw descriptor from a recorded hardware key. Throws when the
+// words are not exactly what EncodeNativeHardwareRaster produces.
+struct NativeHardwarePipelineDescriptor {
+    plume::RenderInputSlot slot{0, 16};
+    plume::RenderInputElement element{"POSITION", 0, 0, plume::RenderFormat::R32G32B32A32_FLOAT,
+                                      0,          0};
+    plume::RenderSpecConstant specialization;
+    plume::RenderGraphicsPipelineDesc descriptor;
+    NativeHardwarePipelineDescriptor(const NativeHardwareRaster &raster, int32_t color, int32_t depth,
+                                     const plume::RenderPipelineLayout *, const plume::RenderShader *,
+                                     const plume::RenderShader *);
+    NativeHardwarePipelineDescriptor(const NativeHardwarePipelineDescriptor &) = delete;
+    NativeHardwarePipelineDescriptor &operator=(const NativeHardwarePipelineDescriptor &) = delete;
+};
+
 class NativePipelineRecipeCache {
   public:
-    static constexpr size_t kMaxRecipes = 2048, kMaxSources = 1024,
-                            kMaxSourceBytes = 64u * 1024 * 1024;
+    // Hardware render target recordings may use the full bounds; the default
+    // Limits keep the FSI recording size.
+    static constexpr size_t kMaxRecipes = 8192, kMaxSources = 4096,
+                            kMaxSourceBytes = 256u * 1024 * 1024;
     static constexpr size_t kMaxPending = 128, kMaxPendingBytes = 16u * 1024 * 1024;
     struct Limits {
-        size_t recipes = kMaxRecipes, sources = kMaxSources, source_bytes = kMaxSourceBytes;
+        size_t recipes = 2048, sources = 1024, source_bytes = 64u * 1024 * 1024;
         size_t pending = kMaxPending, pending_bytes = kMaxPendingBytes;
     };
     struct Statistics {

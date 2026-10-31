@@ -157,6 +157,60 @@ void CheckMemoryCopyPrefixes(const std::filesystem::path& folder) {
     if(!first||*first->batch->ResourceAt(digest,false)!=shader)
         throw std::runtime_error("Memory-copy diagnostic payload lost immutable ownership");
 }
+// The live bridge snapshots only a memcpy draw's chunk (block 14 at its
+// source); a full capture holds the whole bound buffer. Both plan one copy.
+void CheckChunkMemoryCopyBlock(const std::filesystem::path& folder) {
+    std::ifstream source(folder/"event.json");Json manifest;source>>manifest;
+    GraphicsBoundaryEvent full;full.function=manifest.at("function");full.phase=manifest.at("phase");
+    full.sequence=200;full.args=manifest.at("args").get<std::array<uint32_t,8>>();
+    full.args[2]=1;full.args[3]=1;  // The second 64-byte unit only.
+    for(const auto& block:manifest.at("blocks")) {
+        const unsigned kind=block.at("kind");
+        if(kind!=1&&kind!=2&&kind!=3&&kind!=14)continue;
+        const auto path=(folder/block.at("path").get<std::string>()).string();
+        full.blocks.push_back({kind,block.at("address"),Read(path.c_str())});
+    }
+    const auto plan=[](GraphicsBoundaryEvent event)->std::pair<Json,std::vector<uint8_t>> {
+        TestLivePlan planner({},false,test_lazy_states);planner.Push(std::move(event));
+        GraphicsBoundaryEvent commit;commit.span_only=true;
+        commit.command_span=GraphicsCommandSpan{1,200,0x2000,{0xc0,0,0x36,0,0,3,0,0x84}};
+        planner.Push(GraphicsBoundaryEvent(commit));
+        const auto prefix=planner.TakePacketPrefix();
+        if(!prefix||prefix->batch->operations.size()!=1)throw std::runtime_error("Chunk memcpy produced no single operation");
+        auto op=prefix->batch->operations[0].ToJson();
+        const auto bytes=prefix->batch->ResourceAt(op.at("payload").get<std::string>(),false);
+        if(!bytes)throw std::runtime_error("Chunk memcpy lost its payload");
+        return {op,*bytes};
+    };
+    auto& stream=full.blocks.back();
+    if(stream.kind!=14||stream.bytes.size()<128)throw std::runtime_error("Fixture lacks its memcpy source stream");
+    GraphicsBoundaryEvent chunk=full;
+    auto& narrow=chunk.blocks.back();narrow.address+=64;
+    narrow.bytes.assign(stream.bytes.begin()+64,stream.bytes.begin()+128);
+    const auto [full_op,full_bytes]=plan(full);
+    const auto [chunk_op,chunk_bytes]=plan(chunk);
+    if(full_bytes!=std::vector<uint8_t>(stream.bytes.begin()+64,stream.bytes.begin()+128)||chunk_bytes!=full_bytes||
+       chunk_op.at("source")!=full_op.at("source")||chunk_op.at("destination")!=full_op.at("destination")||
+       chunk_op.at("bytes")!=full_op.at("bytes"))
+        throw std::runtime_error("Chunk-only memcpy source block planned a different copy");
+    // A block that misses the copied bytes is refused, never read past.
+    auto missing=chunk;missing.blocks.back().address+=64;
+    bool refused=false;try{plan(missing);}catch(const std::exception&){refused=true;}
+    if(!refused)throw std::runtime_error("Memcpy accepted a source block that misses its chunk");
+    // Direct execution performed a CPU-sourced copy at its API point: the op
+    // only orders the destination's invalidation and carries no payload.
+    TestLivePlan direct({},false,test_lazy_states);direct.SetDirectCpuMemoryCopies(true);
+    direct.Push(GraphicsBoundaryEvent(chunk));
+    GraphicsBoundaryEvent commit;commit.span_only=true;
+    commit.command_span=GraphicsCommandSpan{1,200,0x2000,{0xc0,0,0x36,0,0,3,0,0x84}};
+    direct.Push(std::move(commit));
+    const auto prefix=direct.TakePacketPrefix();
+    if(!prefix||prefix->batch->operations.size()!=1)throw std::runtime_error("Direct chunk memcpy produced no single operation");
+    const auto direct_op=prefix->batch->operations[0].ToJson();
+    if(direct_op.at("source_kind")!="cpu_direct"||!direct_op.at("payload").is_null()||
+       direct_op.at("destination")!=chunk_op.at("destination")||direct_op.at("bytes")!=chunk_op.at("bytes"))
+        throw std::runtime_error("Direct CPU memcpy kept a payload or changed its copy");
+}
 // Live frames intentionally carry no offline producer diagnostics. Both GPU
 // source labels use the same native storage path. Payload bytes for GPU-backed
 // bindings are deliberately discarded by the live planner.
@@ -1272,6 +1326,7 @@ int main(int argc,char** argv) {
         CheckTextureLifetime();
         if(argc==3&&std::string(argv[1])=="--memory-copy-prefix") {
             CheckMemoryCopyPrefixes(argv[2]);
+            CheckChunkMemoryCopyBlock(argv[2]);
             std::cout<<"Memory-copy CPU/GPU and late diagnostic-hash prefix dependencies passed\n";
 #ifdef GOW3_NATIVE_VERIFY_PREFIX_DEPENDENCIES
             std::cout<<"Legacy prefix dependency oracle: "<<test::live_prefix_dependency_checks<<" exact comparisons passed\n";

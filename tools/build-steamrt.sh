@@ -14,8 +14,8 @@ test -d vendor-sdks/sniper-sysroot/usr/lib/gcc-14 || tools/steamrt-sysroot.sh
 cmake -S . -B build-sniper -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/steamrt-sniper.cmake \
-  -DREXGLUE_BUILD_TESTS=OFF 2>&1 | tee logs/configure-sniper.log
-cmake --build build-sniper --target gow3 gow3-hdr-probe gow3-vrr-probe --parallel "$jobs" 2>&1 |
+  -DREXGLUE_BUILD_TESTS=OFF -DGOW3_XENIA_RENDERER=OFF 2>&1 | tee logs/configure-sniper.log
+cmake --build build-sniper --target gow3 gow3-shader-precompile gow3-hdr-probe --parallel "$jobs" 2>&1 |
   tee logs/build-sniper.log
 # Libraries the runtime and newer distributions lack, next to the binaries.
 for soname in libjemalloc.so.2 libcrypto.so.1.1; do

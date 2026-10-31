@@ -21,6 +21,14 @@ struct DrawState {
     int32_t index_offset = 0;
     bool discard = false;
 };
+// A draw's viewport registers (0x2908..0x291c), non-finite values included.
+struct DrawViewport {
+    float x_scale = 0, x_offset = 0, y_scale = 0, y_offset = 0, z_scale = 0, z_offset = 0;
+    // A finite D3D viewport, top-left origin, depth range within [0, 1]:
+    // the only orientation the native pipeline represents.
+    bool Representable() const noexcept;
+};
+DrawViewport DecodeDrawViewport(std::span<const uint32_t, kDrawStateWords> words) noexcept;
 // Rejects states not yet represented by this native pipeline. Callers must
 // report these explicitly, rather than silently producing a wrong scene.
 DrawState DecodeDrawState(std::span<const uint32_t, kDrawStateWords> words,

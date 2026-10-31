@@ -1,4 +1,5 @@
 #pragma once
+#include "bytes_equal.h"
 #include <algorithm>
 #include <condition_variable>
 #include <cstddef>
@@ -152,7 +153,7 @@ private:
         bool assigned=false,equal=false;
     };
     bool Compare(ByteSpan a,ByteSpan b)const {
-        return hooks_.compare?hooks_.compare(a,b):!std::memcmp(a.data(),b.data(),a.size());
+        return hooks_.compare?hooks_.compare(a,b):BytesEqual(a.data(),b.data(),a.size());
     }
     void Worker(WorkerState& worker) {
         for(;;) {

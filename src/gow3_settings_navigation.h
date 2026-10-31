@@ -6,7 +6,7 @@
 #include <vector>
 
 // Rebuilding a renderer-specific menu keeps focus by setting identity, never by
-// the old row number. Removed categories return to the renderer selector.
+// the old row number. Removed categories return to the first category.
 struct Gow3SettingsNavigation {
   std::vector<std::string> sections;
   std::vector<std::vector<const MenuSetting*>> options;
@@ -23,13 +23,13 @@ struct Gow3SettingsNavigation {
 
   template <typename Enabled>
   void Rebuild(Gow3RendererMode mode, MenuNavigation& navigation, Enabled enabled) {
-    const std::string section_name = sections.empty() ? "Renderer" : sections[navigation.Section()];
+    const std::string section_name = sections.empty() ? "" : sections[navigation.Section()];
     const bool in_options = navigation.InOptions();
     const std::string key = in_options && !options.empty()
         ? options[navigation.Section()][navigation.Option()]->key : "";
     sections.clear(); options.clear();
     for (const auto& setting : kMenuSettings) {
-      if (!Gow3MenuSettingApplies(setting, mode)) continue;
+      if (!Gow3MenuSettingApplies(setting, mode) || !Gow3MenuSettingListed(setting)) continue;
       auto section = std::find(sections.begin(), sections.end(), setting.section);
       if (section == sections.end()) {
         sections.emplace_back(setting.section); options.emplace_back();

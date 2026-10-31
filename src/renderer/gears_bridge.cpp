@@ -19,6 +19,8 @@
 #include "native/live_metadata_capture.h"
 #include "native/deferred_texture_snapshots.h"
 #include "native/capture_texture_extents.h"
+#include "native/edram_inventory.h"
+#include "native/hitch_trace.h"
 #include "generated/default/gow3_init.h"
 #include <rex/cvar.h>
 #include <rex/memory.h>
@@ -30,6 +32,7 @@
 #if GOW3_HAS_NATIVE_RENDERER
 #include "native/runtime_bridge.h"
 #endif
+#include "native/memory_export_copy.h"
 #include <array>
 #include <algorithm>
 #include <chrono>
@@ -41,6 +44,8 @@
 #include <mutex>
 #include <string_view>
 #include <unordered_map>
+#include <optional>
+#include <span>
 #include <vector>
 
 REXCVAR_DECLARE(bool, gpu_command_summary);
@@ -126,6 +131,12 @@ REXCVAR_DEFINE_UINT32(gow3_renderer_capture_frames, 2, "Renderer diagnostics",
 REXCVAR_DEFINE_STRING(gow3_renderer_capture_trigger, "", "Renderer diagnostics",
                      "Wait for this file before recording, so gameplay can be reached first")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(gow3_hitch_trace_ms, 0, "Renderer diagnostics",
+                    "Windows: when no frame completes for this many ms, sample every thread and log where they were (0 = off)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_STRING(gow3_native_edram_inventory, "", "Renderer diagnostics",
+                     "Write an inventory of native EDRAM commits, restores, resolves and alias loads with guest call stacks to this JSON file")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace {
 // Executable-specific addresses and device offsets: renderer/profiles/.
@@ -144,6 +155,7 @@ std::atomic<bool> enabled{false};
 std::atomic<bool> live_enabled{false};
 std::atomic<bool> command_spans_enabled{false};
 gow3::renderer::GraphicsBoundarySink live_sink;
+gow3::renderer::DirectMemoryCopySink live_copy_sink;
 gow3::renderer::ShaderDiscoverySink shader_discovery_sink;
 std::atomic<bool> shader_discovery_enabled{false};
 std::atomic<bool> shader_block_discovery_enabled{false};
@@ -386,6 +398,24 @@ bool Readable(uint32_t address, uint32_t size) {
   return (int(heap->QueryRangeAccess(address, end)) & int(rex::memory::PageAccess::kReadOnly)) != 0;
 }
 
+// Chunks the direct path copied during a probed GPU memmove (see
+// sub_82968948 below). Guest thread only.
+struct MoveProbe {
+  bool active = false;
+  uint32_t source_first = UINT32_MAX, source_end = 0, destination_first = UINT32_MAX, destination_end = 0;
+  uint64_t bytes = 0;
+};
+thread_local MoveProbe move_probe;
+void RecordMoveProbeChunk(const gow3::renderer::MemoryExportCopy& chunk) {
+  auto& probe = move_probe;
+  if (!probe.active) return;
+  probe.source_first = std::min(probe.source_first, chunk.source);
+  probe.source_end = std::max(probe.source_end, chunk.source + chunk.bytes);
+  probe.destination_first = std::min(probe.destination_first, chunk.destination);
+  probe.destination_end = std::max(probe.destination_end, chunk.destination + chunk.bytes);
+  probe.bytes += chunk.bytes;
+}
+
 // Blocks retain guest byte order. Record headers are little endian. Missing
 // memory is explicit (size zero), never substituted with invented zero data.
 void DataBlock(uint32_t kind, uint32_t address, const uint8_t* data, uint32_t size,bool physical=false) {
@@ -444,6 +474,22 @@ void PhysicalBlock(uint32_t kind, uint32_t address, uint32_t size) {
     return;
   }
   DataBlock(kind, address, size ? guest_memory->TranslatePhysical(address) : nullptr, size,true);
+}
+
+// A GPU memcpy chunk's source, read by that one operation only: a plain
+// immutable copy. Certifying it would write-protect the pages (a protection
+// change under the global lock), and the next chunk's memmove often writes
+// them right back; thousands of chunks per texture streaming burst.
+void MemoryCopySourceBlock(uint32_t address, uint32_t size) {
+  if (!size || size > 8 * 1024 * 1024 || uint64_t(address) + size > 0x20000000ull ||
+      !(int(guest_memory->GetPhysicalHeap()->QueryRangeAccess(address, address + size - 1)) &
+        int(rex::memory::PageAccess::kReadOnly))) size = 0;
+  auto& block = live_event->blocks.emplace_back();
+  block.kind = 14; block.address = address;
+  if (size) {
+    const auto* data = guest_memory->TranslatePhysical(address);
+    block.shared_bytes = std::make_shared<const std::vector<uint8_t>>(data, data + size);
+  }
 }
 
 std::shared_ptr<const std::vector<uint8_t>> CaptureDeferredTexture(uint32_t address,uint32_t size) {
@@ -543,9 +589,43 @@ void Finish(uint32_t reason) {
   blobs.clear();
 }
 
+#if GOW3_HAS_NATIVE_RENDERER
+// Gears' GPU memcpy binds the whole source buffer to stream 95 and selects each
+// 64-byte-unit chunk with the draw's first vertex and count; the planner reads
+// only that chunk. A texture memmove split into many chunks would otherwise
+// copy, compare and hash the whole buffer once per chunk. Live capture only.
+std::optional<gow3::renderer::MemoryExportCopy> LiveMemoryCopyChunk(const uint8_t* device,
+                                                                   const std::array<uint32_t, 8>& args) {
+  if (!live_event || writing_capture_event) return std::nullopt;
+  std::span<const uint8_t> header, code;
+  for (const auto& block : live_event->blocks) {
+    if (block.kind == 2) header = block.data();
+    if (block.kind == 3) code = block.data();
+  }
+  // The planner's memory-export test: low byte of the first header word.
+  if (header.size() < 4 || !(header[3] & 0x10)) return std::nullopt;
+  static std::vector<uint8_t> verified_kernel;
+  const std::span<const uint8_t> state(device, kDeviceBytes);
+  try {
+    if (verified_kernel.size() == header.size() + code.size() &&
+        !std::memcmp(verified_kernel.data(), header.data(), header.size()) &&
+        !std::memcmp(verified_kernel.data() + header.size(), code.data(), code.size()))
+      return gow3::renderer::DecodeVerifiedMemoryExportCopy(state, args);
+    std::vector<uint8_t> container(header.begin(), header.end());
+    container.insert(container.end(), code.begin(), code.end());
+    const auto copy = gow3::renderer::DecodeMemoryExportCopy(container, state, args);
+    verified_kernel = std::move(container);
+    return copy;
+  } catch (const std::exception&) {
+    return std::nullopt;  // Not the verified kernel or state: the planner decides as before.
+  }
+}
+#endif
+
 void GeometryBlocks(uint8_t* base, const uint8_t* device, uint32_t function,
                     const std::array<uint32_t, 8>& args, uint32_t phase,
-                    const gow3::renderer::ShaderRequirementMasks* required = nullptr) {
+                    const gow3::renderer::ShaderRequirementMasks* required = nullptr,
+                    const std::optional<gow3::renderer::MemoryExportCopy>& memcpy_chunk = std::nullopt) {
   const bool draw = (phase == 1||phase==3) && (function == profile::d3d::kDrawVertices || function == profile::d3d::kDrawIndexedVertices);
   for (uint32_t stream = 0; stream < 16; ++stream) {
     // Gears binds its sixteen streams to fetch constants 95 down to 80.
@@ -554,6 +634,10 @@ void GeometryBlocks(uint8_t* base, const uint8_t* device, uint32_t function,
     const uint32_t first = BigWord(device + offset), second = BigWord(device + offset + 4);
     const uint32_t size = draw && (!required || required->HasVertex(95-stream)) &&
         (first & 3) == 3 ? ((second >> 2) & 0xFFFFFF) * 4 : 0;
+    if (stream == 0 && size && memcpy_chunk) {
+      MemoryCopySourceBlock(memcpy_chunk->source, memcpy_chunk->bytes);  // Live capture only.
+      continue;
+    }
     PhysicalBlock(14 + stream, first & ~3u, size);
   }
   const uint32_t index = BigWord(device + profile::device::kIndexBuffer);
@@ -730,6 +814,20 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
       if(span) {span->generation=++command_generation;span->api_sequence=event.sequence;event.command_span=std::move(span);}
       event.frame = frame; event.lr = original ? original_lr : ctx.lr;
       event.args = args; event.result = ctx.r3.u32; event.blocks.reserve(103);
+      if (gow3::renderer::edram_inventory::Enabled()) {
+        // Hooks run at function entry: r1 is the caller's frame. Each frame's
+        // back chain is at 0(r1) and its saved LR at -8 from that back chain.
+        gow3::renderer::edram_inventory::GuestStack stack{};
+        stack[0] = event.lr;
+        uint32_t sp = ctx.r1.u32;
+        for (unsigned i = 1; i < stack.size() && Readable(sp, 4); ++i) {
+          const uint32_t chain = BigWord(base + sp);
+          if (chain <= sp || chain - sp > 0x100000 || !Readable(chain - 8, 4)) break;
+          stack[i] = BigWord(base + chain - 8);
+          sp = chain;
+        }
+        gow3::renderer::edram_inventory::RecordStack(event.sequence, stack);
+      }
       // Full API diagnostics remain eager and byte-complete. Live-only texture
       // reads are decided after the planner drains current CPU invalidations.
       if(!writing_capture_event) {
@@ -741,6 +839,7 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
       live_event = &event;
     }
     const auto start = capture_bytes.size();
+    bool direct_copied = false;
     try {
       if (writing_capture_event) {
         Word(0); Word(function); Word(phase); Word(frame); Word(original ? original_lr : ctx.lr);
@@ -767,29 +866,56 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
         MetadataBlock(base,11,BigWord(device+profile::device::kVertexShader),0x600,metadata_policy);
         MetadataBlock(base,12,BigWord(device+profile::device::kPixelShader),0x100,metadata_policy);
         MetadataBlock(base,13,BigWord(device+profile::device::kShaderMetadata),0x200,metadata_policy);
-        GeometryBlocks(base, device, function, args, phase, required ? &*required : nullptr);
-        TextureBlocks(device, function, phase, required ? &*required : nullptr);
-        const bool up = phase == 2 && (function == profile::d3d::kBeginVertices || function == profile::d3d::kBeginIndexedVertices);
-        const uint32_t vertices = up ? BigWord(device + profile::device::kUpVertexWords) : 0;
-        const uint32_t indices = up && function == profile::d3d::kBeginIndexedVertices ? BigWord(device + profile::device::kUpIndexWords) : 0;
-        Block(base, 96, BigWord(device + profile::device::kUpVertexPointer), vertices <= 2 * 1024 * 1024 ? vertices * 4 : 0);
-        Block(base, 97, BigWord(device + profile::device::kUpIndexPointer), indices <= 2 * 1024 * 1024 ? indices * 4 : 0);
-        const bool clear = function == profile::d3d::kClearRect && phase == 0;
-        const bool resolve = function == profile::d3d::kResolve && phase == 0;
-        Block(base, 98, args[2], clear || resolve ? 16 : 0); // Source/clear rectangle.
-        Block(base, 99, clear ? args[3] : args[6], clear || resolve ? 16 : 0); // Float clear color.
-        Block(base, 100, args[3], resolve ? 64 : 0); // Destination texture resource header.
-        Block(base, 101, args[4], resolve ? 8 : 0); // Destination XY.
-        std::array<uint8_t, 12> extras{};
-        if (clear || resolve) {
-          const uint64_t f1 = ctx.f1.u64;
-          for (uint32_t i = 0; i < 8; ++i) extras[i] = uint8_t(f1 >> ((7 - i) * 8));
-          // Resolve's final stack parameter is used by its optional clear.
-          if (resolve && Readable(ctx.r1.u32 + 0x54, 4))
-            std::memcpy(extras.data() + 8, base + ctx.r1.u32 + 0x54, 4);
+#if GOW3_HAS_NATIVE_RENDERER
+        // The verified memcpy kernel fetches stream 95 only and samples no
+        // texture; its generic analysis is unsupported (unlinked shader), which
+        // would otherwise capture every bound stream and texture per chunk.
+        const auto memcpy_chunk = draw && function == profile::d3d::kDrawVertices
+            ? LiveMemoryCopyChunk(device, args) : std::nullopt;
+        const auto capture_required = memcpy_chunk
+            ? std::optional(gow3::renderer::ShaderRequirementMasks({{95u}, {}})) : required;
+#else
+        const std::optional<gow3::renderer::MemoryExportCopy> memcpy_chunk;
+        const auto& capture_required = required;
+#endif
+        // A chunk copying CPU data is performed by the sink at its API point;
+        // capturing and planning thousands of them per streaming burst would
+        // stall the frame.
+        if (memcpy_chunk && live_copy_sink && live_event && !writing_capture_event && !live_event->command_span) {
+          try {
+            direct_copied = live_copy_sink(*memcpy_chunk);
+            if (direct_copied) RecordMoveProbeChunk(*memcpy_chunk);
+          }
+          catch (const std::exception& error) {
+            REXLOG_ERROR("Native direct memcpy sink failed: {}", error.what());
+            getdata_inline_selection.Reset(); live_sink = {}; live_copy_sink = {}; live_enabled.store(false); DisableQueryPollYield();
+          }
         }
-        DataBlock(102, 0, extras.data(), clear || resolve ? uint32_t(extras.size()) : 0);
-        Block(base,103,args[1],function==kPresent&&phase==0?64:0);
+        if (!direct_copied) {
+          GeometryBlocks(base, device, function, args, phase, capture_required ? &*capture_required : nullptr, memcpy_chunk);
+          TextureBlocks(device, function, phase, capture_required ? &*capture_required : nullptr);
+          const bool up = phase == 2 && (function == profile::d3d::kBeginVertices || function == profile::d3d::kBeginIndexedVertices);
+          const uint32_t vertices = up ? BigWord(device + profile::device::kUpVertexWords) : 0;
+          const uint32_t indices = up && function == profile::d3d::kBeginIndexedVertices ? BigWord(device + profile::device::kUpIndexWords) : 0;
+          Block(base, 96, BigWord(device + profile::device::kUpVertexPointer), vertices <= 2 * 1024 * 1024 ? vertices * 4 : 0);
+          Block(base, 97, BigWord(device + profile::device::kUpIndexPointer), indices <= 2 * 1024 * 1024 ? indices * 4 : 0);
+          const bool clear = function == profile::d3d::kClearRect && phase == 0;
+          const bool resolve = function == profile::d3d::kResolve && phase == 0;
+          Block(base, 98, args[2], clear || resolve ? 16 : 0); // Source/clear rectangle.
+          Block(base, 99, clear ? args[3] : args[6], clear || resolve ? 16 : 0); // Float clear color.
+          Block(base, 100, args[3], resolve ? 64 : 0); // Destination texture resource header.
+          Block(base, 101, args[4], resolve ? 8 : 0); // Destination XY.
+          std::array<uint8_t, 12> extras{};
+          if (clear || resolve) {
+            const uint64_t f1 = ctx.f1.u64;
+            for (uint32_t i = 0; i < 8; ++i) extras[i] = uint8_t(f1 >> ((7 - i) * 8));
+            // Resolve's final stack parameter is used by its optional clear.
+            if (resolve && Readable(ctx.r1.u32 + 0x54, 4))
+              std::memcpy(extras.data() + 8, base + ctx.r1.u32 + 0x54, 4);
+          }
+          DataBlock(102, 0, extras.data(), clear || resolve ? uint32_t(extras.size()) : 0);
+          Block(base,103,args[1],function==kPresent&&phase==0?64:0);
+        }
       } else {
         for (uint32_t kind = 2; kind <= 103; ++kind) DataBlock(kind, 0, nullptr, 0);
       }
@@ -805,16 +931,16 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
       // A diagnostic size limit must not feed a truncated live event.
       if (observe_live) {
         REXLOG_ERROR("Native renderer event interrupted by diagnostic capture limit");
-        getdata_inline_selection.Reset(); live_sink = {}; live_enabled.store(false); DisableQueryPollYield();
+        getdata_inline_selection.Reset(); live_sink = {}; live_copy_sink = {}; live_enabled.store(false); DisableQueryPollYield();
       }
     }
     live_event = nullptr;
     writing_capture_event = false;
-    if (observe_live && live_sink) {
+    if (observe_live && live_sink && !direct_copied) {
       try { live_sink(std::move(event)); }
       catch (const std::exception& error) {
         REXLOG_ERROR("Native graphics boundary sink failed: {}", error.what());
-        getdata_inline_selection.Reset(); live_sink = {}; live_enabled.store(false); DisableQueryPollYield();
+        getdata_inline_selection.Reset(); live_sink = {}; live_copy_sink = {}; live_enabled.store(false); DisableQueryPollYield();
       }
     }
   }
@@ -857,6 +983,9 @@ void Gow3StartGraphicsBridge(rex::memory::Memory* memory,rex::graphics::CommandP
   thin_live_metadata_enabled=REXCVAR_GET(gow3_native_thin_live_metadata);
   thin_live_metadata_stats={};thin_live_metadata_reported=false;
   capture_processor = processor;
+  gow3::renderer::edram_inventory::Configure(REXCVAR_GET(gow3_native_edram_inventory));
+  if (REXCVAR_GET(gow3_hitch_trace_ms) > 0)
+    gow3::renderer::hitch_trace::Start(uint32_t(REXCVAR_GET(gow3_hitch_trace_ms)));
   frame = events = 0;
   live_sequence = 0;
   command_generation = 0;
@@ -920,6 +1049,9 @@ void Gow3StopGraphicsBridge() {
   if(residency.peak_entries)REXLOG_INFO("Native snapshot cache: metadata_lru={} entries={} peak_entries={} retained_bytes={} budget_evictions={} metadata_clears={} metadata_clear_entries={} metadata_lru_evictions={}",
       residency.metadata_lru,residency.entries,residency.peak_entries,residency.retained_bytes,
       residency.budget_evictions,residency.metadata_clears,residency.metadata_clear_entries,residency.metadata_lru_evictions);
+  const auto& inputs=live_shader_inputs.statistics();
+  if(inputs.hits||inputs.decodes)REXLOG_INFO("Native shader input cache: hits={} decodes={} unsupported={} unsupported_hits={} evictions={} uncached={}",
+      inputs.hits,inputs.decodes,inputs.unsupported,inputs.unsupported_hits,inputs.evictions,inputs.uncached);
   const auto stable=live_snapshots.stable_certificate_stats();
   if(stable.enabled||stable.exact_hits||stable.exact_changes||stable.exact_fallbacks||stable.validation_attempts)REXLOG_INFO("Native stable certified snapshots: exact_hits={} exact_changes={} exact_fallbacks={} exact_fallback_bytes={} validation_attempts={} safe_hits={} safe_hit_bytes={} invalidations={} owner_refusals={} arm_attempts={} arms={} arm_refusals={} provider_errors={} cooldown_bypasses={} initial_hits={} maximum_hits={}",
       stable.exact_hits,stable.exact_changes,stable.exact_fallbacks,stable.exact_fallback_bytes,
@@ -973,7 +1105,7 @@ void Gow3StopGraphicsBridge() {
   live_shader_inputs.Clear();
   Finish(2);
   live_enabled.store(false);
-  live_sink = {};
+  live_sink = {}; live_copy_sink = {};
   shader_discovery_enabled.store(false);
   shader_block_discovery_enabled.store(false);
   shader_discovery_sink = {};
@@ -1064,7 +1196,8 @@ void Gow3ObserveMarkerCounterRingReset(rex::ppc::Register& device) {InvalidateMa
 void Gow3ObserveMarkerCounterRecovery(rex::ppc::Register& device) {InvalidateMarkerObservation(device.u32,false);}
 void Gow3ObserveMarkerCounterCpuDirect(rex::ppc::Register& device) {InvalidateMarkerObservation(device.u32,false);}
 
-void Gow3SetGraphicsBoundarySink(gow3::renderer::GraphicsBoundarySink sink) {
+void Gow3SetGraphicsBoundarySink(gow3::renderer::GraphicsBoundarySink sink,
+                                 gow3::renderer::DirectMemoryCopySink copy_sink) {
   getdata_inline_selection.Reset();
   std::lock_guard lock(capture_mutex);
   getdata_inline_selection.Reset();
@@ -1148,6 +1281,7 @@ void Gow3SetGraphicsBoundarySink(gow3::renderer::GraphicsBoundarySink sink) {
   }
   live_snapshots.ConfigureActiveBelowMinimum(bool(sink)&&REXCVAR_GET(gow3_native_validate_active_small_snapshots));
   live_sink = std::move(sink);
+  live_copy_sink = live_sink ? std::move(copy_sink) : gow3::renderer::DirectMemoryCopySink{};
   // The capture lock excludes an accepted comparison while its pool changes.
   // Optional helpers never keep guest pointers after the caller returns.
   try {
@@ -1461,6 +1595,74 @@ struct QueryWaitScope {
   }
 };
 
+
+// The game's GPU memmove (0x82968948, r3 = destination, r4 = source, r5 =
+// bytes, r6 = units per draw): it binds the source as vertex stream 0 and
+// issues one memexport draw per chunk of 64-byte units, backward when the
+// ranges overlap that way, then unbinds the stream; no fence or other state
+// leaves it. Texture-pool defragmentation moves tens of MB this way in one
+// frame. Direct execution already copies each chunk whose source is CPU data
+// at its API point, so such a move is copied at once instead of ~3500 draws.
+// The first kMoveProbes moves run the draws and must cover exactly the ranges
+// computed here, or the routine stays on the draws for the session.
+REX_EXTERN(__imp__sub_82968948);
+namespace {
+constexpr uint32_t kMoveProbes = 8;
+std::atomic<uint32_t> verified_moves{0};
+std::atomic<bool> native_moves{true};
+// The GPU address the game's device derives from a CPU address.
+uint32_t XenosPhysical(uint32_t address) {
+  return (address & 0x1FFFFFFFu) + (((address >> 20) + 0x200) & 0x1000);
+}
+}  // namespace
+REX_EXTERN(sub_82968948) {
+  const int32_t size = ctx.r5.s32;
+  // The draws copy whole 64-byte units.
+  const uint32_t bytes = size > 0 ? uint32_t(size >> 6) << 6 : 0;
+  if (!bytes || !native_moves.load(std::memory_order_relaxed) || !live_enabled.load(std::memory_order_relaxed) ||
+      enabled.load(std::memory_order_relaxed)) {
+    __imp__sub_82968948(ctx, base);
+    return;
+  }
+  gow3::renderer::MemoryExportCopy copy;
+  copy.source = XenosPhysical(ctx.r4.u32);
+  copy.destination = XenosPhysical(ctx.r3.u32) & ~3u;
+  copy.bytes = bytes;
+  if (verified_moves.load(std::memory_order_relaxed) >= kMoveProbes) {
+    bool copied = false;
+    {
+      std::lock_guard lock(capture_mutex);
+      if (live_copy_sink) {
+        try { copied = live_copy_sink(copy); }
+        catch (const std::exception& error) {
+          REXLOG_ERROR("Native direct memmove failed: {}", error.what());
+          getdata_inline_selection.Reset(); live_sink = {}; live_copy_sink = {}; live_enabled.store(false); DisableQueryPollYield();
+        }
+      }
+    }
+    if (copied) return;
+    __imp__sub_82968948(ctx, base);
+    return;
+  }
+  move_probe = {};
+  move_probe.active = true;
+  __imp__sub_82968948(ctx, base);
+  const MoveProbe probe = move_probe;
+  move_probe = {};
+  // Only a move whose every chunk took the direct path is a complete check.
+  if (probe.bytes != bytes) return;
+  if (probe.source_first == copy.source && probe.source_end == copy.source + bytes &&
+      probe.destination_first == copy.destination && probe.destination_end == copy.destination + bytes) {
+    if (verified_moves.fetch_add(1) + 1 == kMoveProbes)
+      REXLOG_INFO("Native direct memmove: {} moves matched their chunk copies; copying moves at once", kMoveProbes);
+    return;
+  }
+  native_moves.store(false);
+  REXLOG_ERROR("Native direct memmove disabled: chunks covered source {:08X}-{:08X} destination {:08X}-{:08X}, "
+               "expected {:08X}-{:08X} and {:08X}-{:08X}", probe.source_first, probe.source_end,
+               probe.destination_first, probe.destination_end, copy.source, copy.source + bytes,
+               copy.destination, copy.destination + bytes);
+}
 
 REX_EXTERN(__imp__sub_82AFA708);
 

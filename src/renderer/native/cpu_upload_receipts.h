@@ -18,7 +18,6 @@ class NativeCpuUploadReceipts {
 public:
     static constexpr uint32_t kPageBytes=4096,kSlots=64;
     static constexpr uint64_t kPhysicalLimit=512ull*1024*1024;
-    static constexpr size_t kMaximumPayloadBytes=size_t(kSlots)*kPageBytes;
     struct Copy {uint32_t first,last;uint8_t* destination;};
     struct Statistics {
         bool requested=false,enabled=false,checked_queue=false;
@@ -29,15 +28,20 @@ public:
         uint64_t attempts=0,hits=0,refusals=0,pages_checked=0,pages=0,bytes=0,
             missing_pages=0,stale_pages=0,invalid_fragments=0;
     };
-    void Configure(bool requested,bool checked_queue) {
+    // slots: a power of two; pages map to slot page%slots, a newer page
+    // replacing an older one in its slot.
+    void Configure(bool requested,bool checked_queue,uint32_t slots=kSlots) {
         if(configured_)throw std::logic_error("CPU upload receipts must be configured once");
+        if(!slots||(slots&(slots-1)))throw std::logic_error("CPU upload receipt slots must be a power of two");
         configured_=true;stats_.requested=requested;stats_.checked_queue=checked_queue;
         if(!requested)return;
         if(!checked_queue){++stats_.unchecked_queue_refusals;return;}
-        try {storage_=std::make_unique<Storage>();}
+        try {storage_=std::make_unique<Entry[]>(slots);}
         catch(const std::bad_alloc&) {++stats_.allocation_refusals;return;}
-        stats_.enabled=true;stats_.storage_bytes=sizeof(Storage);
+        slots_=slots;stats_.enabled=true;stats_.storage_bytes=uint64_t(slots)*sizeof(Entry);
     }
+    uint32_t slots() const noexcept {return slots_;}
+    uint64_t maximum_payload_bytes() const noexcept {return uint64_t(slots_)*kPageBytes;}
     // Call only AFTER the original upload/Define succeeds. Version lookup
     // must be the actual one-page native version, not the global mutation
     // serial or a guest address epoch. Queued writes never publish a receipt.
@@ -51,15 +55,20 @@ public:
            uint64_t(address)+bytes.size()>kPhysicalLimit) {
             ++stats_.unsupported_refusals;return;
         }
-        const uint32_t page=address/kPageBytes;uint64_t version;
-        try {version=page_version(page);}
-        catch(...) {++stats_.version_errors;return;}
-        auto& entry=(*storage_)[page&(kSlots-1)];
-        if(entry.valid)++stats_.slot_replacements;else ++stats_.retained_pages;
-        entry.valid=false;
-        std::memcpy(entry.bytes.data(),bytes.data(),kPageBytes);
-        entry.page=page;entry.version=version;entry.valid=true;
-        ++stats_.admitted_pages;stats_.admitted_bytes+=kPageBytes;
+        Store(address/kPageBytes,bytes.data(),page_version);
+    }
+    // Every whole page of bytes now at address in the native buffer, after
+    // the operation that wrote them has completed on the GPU (its fence
+    // waited) and its Define succeeded. Partial pages at either end are left
+    // out: a receipt always holds a complete page.
+    template<class PageVersion>
+    void RememberPages(uint32_t address,std::span<const uint8_t> bytes,PageVersion&& page_version) noexcept {
+        if(!stats_.enabled||!bytes.data()||uint64_t(address)+bytes.size()>kPhysicalLimit)return;
+        const uint64_t end=uint64_t(address)+bytes.size();
+        for(uint64_t page=(uint64_t(address)+kPageBytes-1)/kPageBytes;(page+1)*kPageBytes<=end;++page) {
+            ++stats_.write_attempts;
+            Store(uint32_t(page),bytes.data()+(page*kPageBytes-address),page_version);
+        }
     }
     // The caller has already performed its original ownership/payload checks
     // and all original pre-readback flush callbacks. No destination changes
@@ -76,7 +85,7 @@ public:
             }
             for(uint32_t at=copy.first;at<copy.last;) {
                 const auto page=at/kPageBytes;
-                const auto& entry=(*storage_)[page&(kSlots-1)];
+                const auto& entry=storage_[page&(slots_-1)];
                 ++stats_.pages_checked;
                 if(!entry.valid||entry.page!=page) {
                     ++stats_.missing_pages;++stats_.refusals;return false;
@@ -95,7 +104,7 @@ public:
         // and these copies. Preserve the original fragment/destination order,
         // including base/mip aliases; never copy a CPU-owned hole or padding.
         for(const auto& copy:copies)for(uint32_t at=copy.first;at<copy.last;) {
-            const auto& entry=(*storage_)[(at/kPageBytes)&(kSlots-1)];
+            const auto& entry=storage_[(at/kPageBytes)&(slots_-1)];
             const uint32_t count=std::min(copy.last-at,kPageBytes-at%kPageBytes);
             std::memcpy(copy.destination+(at-copy.first),entry.bytes.data()+at%kPageBytes,count);
             at+=count;
@@ -106,7 +115,7 @@ public:
     // receipts before publishing any new epoch's version, including zero.
     void ClearOnSerialWrap() noexcept {
         if(!stats_.enabled)return;
-        for(auto& entry:*storage_)entry.valid=false;
+        for(uint32_t slot=0;slot<slots_;++slot)storage_[slot].valid=false;
         stats_.retained_pages=0;++stats_.serial_wrap_clears;
     }
     const Statistics& statistics()const noexcept{return stats_;}
@@ -117,11 +126,22 @@ private:
         bool valid=false;
         std::array<uint8_t,kPageBytes> bytes{};
     };
-    using Storage=std::array<Entry,kSlots>;
+    template<class PageVersion>
+    void Store(uint32_t page,const uint8_t* bytes,PageVersion& page_version) noexcept {
+        uint64_t version;
+        try {version=page_version(page);}
+        catch(...) {++stats_.version_errors;return;}
+        auto& entry=storage_[page&(slots_-1)];
+        if(entry.valid)++stats_.slot_replacements;else ++stats_.retained_pages;
+        entry.valid=false;
+        std::memcpy(entry.bytes.data(),bytes,kPageBytes);
+        entry.page=page;entry.version=version;entry.valid=true;
+        ++stats_.admitted_pages;stats_.admitted_bytes+=kPageBytes;
+    }
     static_assert((kSlots&(kSlots-1))==0);
-    static_assert(sizeof(Storage)<=264u*1024);
     bool configured_=false;
-    std::unique_ptr<Storage> storage_;
+    uint32_t slots_=0;
+    std::unique_ptr<Entry[]> storage_;
     Statistics stats_;
 };
 } // namespace gow3::renderer

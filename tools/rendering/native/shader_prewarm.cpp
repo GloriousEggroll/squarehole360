@@ -164,11 +164,12 @@ int main(int argc, char** argv) {
     if (fs::exists(version_directory)) {
       // The compiler also creates a generated depth-only entry. Validate existing
       // entries without depending on its private generated-source cache key.
-      for (const auto& entry : fs::directory_iterator(version_directory)) CheckOutput(entry.path(), inputs);
+      for (const auto& entry : fs::recursive_directory_iterator(version_directory))
+        if (!entry.is_directory() || entry.is_symlink()) CheckOutput(entry.path(), inputs);
     }
     for (const auto& [hash, source] : unique) {
-      CheckOutput(version_directory / (hash + ".g3spv"), inputs);
-      CheckOutput(version_directory / (hash + ".fsi.g3spv"), inputs);
+      CheckOutput(NativeShaderCompiler::CachePath(version_directory, hash), inputs);
+      CheckOutput(NativeShaderCompiler::CachePath(version_directory, hash + ".fsi"), inputs);
       if (output) {
         CheckOutput(*output / (hash + ".spv"), inputs);
         CheckOutput(*output / (hash + ".fsi.spv"), inputs);
@@ -204,8 +205,8 @@ int main(int argc, char** argv) {
         result["source_sha256"] = compiled->source_sha256;
         result["disk_cache_hit"] = compiled->disk_cache_hit;
         result["spirv_bytes"] = compiled->spirv.size() * sizeof(uint32_t);
-        const auto cache_path = version_directory / (compiled->source_sha256 +
-            (mode == NativeShaderMode::Raster ? ".g3spv" : ".fsi.g3spv"));
+        const auto cache_path = NativeShaderCompiler::CachePath(version_directory, compiled->source_sha256 +
+            (mode == NativeShaderMode::Raster ? "" : ".fsi"));
         if (!fs::is_regular_file(cache_path)) throw std::runtime_error("Compiler did not persist cache entry: " + cache_path.string());
         const auto verified = source ? persisted.Get(source->bytes, mode) : persisted.GetDepthOnlyFragmentInterlock();
         if (!verified->disk_cache_hit || verified->spirv != compiled->spirv)

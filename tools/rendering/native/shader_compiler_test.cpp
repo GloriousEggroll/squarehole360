@@ -93,16 +93,25 @@ int main(int argc, char** argv) {
       catch (const std::exception&) { invalid_stage_rejected = true; }
       Require(invalid_stage_rejected, "Vertex shader accepted fragment interlock mode");
     }
+    // An entry in the older flat layout is moved into its subfolder, not rebuilt.
+    const auto version_directory = cache / NativeShaderCompiler::CacheVersion();
+    const auto sample_key = compiler.Get(sample)->source_sha256;
+    std::filesystem::rename(NativeShaderCompiler::CachePath(version_directory, sample_key),
+                            version_directory / (sample_key + ".g3spv"));
     // Reopen a new provider so this exercises serialized disk cache loading.
     NativeShaderCompiler reopened(cache);
+    Require(!std::filesystem::exists(version_directory / (sample_key + ".g3spv")) &&
+            std::filesystem::is_regular_file(NativeShaderCompiler::CachePath(version_directory, sample_key)),
+            "Flat cache entry was not moved into its subfolder");
     Require(reopened.Get(sample)->disk_cache_hit, "Persisted cache was not reused");
     Require(reopened.GetDepthOnlyFragmentInterlock()->disk_cache_hit,
             "Persisted depth-only interlock shader was not reused");
     if (!pixel_sample.empty()) {
       const auto fsi = reopened.Get(pixel_sample, NativeShaderMode::FragmentInterlock);
       Require(fsi->disk_cache_hit, "Persisted interlock shader was not reused");
-      const auto path = cache / NativeShaderCompiler::CacheVersion() / fsi->source_sha256;
-      std::filesystem::copy_file(path.string() + ".fsi.g3spv", path.string() + ".g3spv",
+      const auto version = cache / NativeShaderCompiler::CacheVersion();
+      std::filesystem::copy_file(NativeShaderCompiler::CachePath(version, fsi->source_sha256 + ".fsi"),
+                                NativeShaderCompiler::CachePath(version, fsi->source_sha256),
                                 std::filesystem::copy_options::overwrite_existing);
       NativeShaderCompiler wrong_mode(cache);
       const auto restored = wrong_mode.Get(pixel_sample);
@@ -142,7 +151,7 @@ int main(int argc, char** argv) {
     Require(unsupported_rejected, "Unsupported shader construct did not return a recoverable error");
     // A corrupted cache payload is discarded and rebuilt from the source.
     const auto shader = compiler.Get(sample);
-    const auto cache_file = cache / NativeShaderCompiler::CacheVersion() / (shader->source_sha256 + ".g3spv");
+    const auto cache_file = NativeShaderCompiler::CachePath(cache / NativeShaderCompiler::CacheVersion(), shader->source_sha256);
     {
       std::fstream file(cache_file, std::ios::binary | std::ios::in | std::ios::out);
       Require(bool(file), "Cannot open test cache");
@@ -153,7 +162,7 @@ int main(int argc, char** argv) {
     Require(!repaired.Get(sample)->disk_cache_hit && repaired.Get(sample)->spirv == shader->spirv,
             "Corrupt cache was not safely rebuilt");
     if (!same_stage_alternate.empty()) {
-      std::filesystem::copy_file(cache / NativeShaderCompiler::CacheVersion() / (same_stage_alternate + ".g3spv"),
+      std::filesystem::copy_file(NativeShaderCompiler::CachePath(cache / NativeShaderCompiler::CacheVersion(), same_stage_alternate),
           cache_file, std::filesystem::copy_options::overwrite_existing);
       NativeShaderCompiler misplaced(cache);
       Require(!misplaced.Get(sample)->disk_cache_hit && misplaced.Get(sample)->spirv == shader->spirv,

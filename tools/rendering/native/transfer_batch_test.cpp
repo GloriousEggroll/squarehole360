@@ -1080,11 +1080,73 @@ void CheckGpuAliasState(RenderDevice& device,RenderCommandQueue& queue,uint32_t 
 }
 }
 
+// GPU memory copies published from receipts: a chain of copies recorded in one
+// batch, without readbacks, must leave exactly the bytes each one reported.
+void CheckReceiptCopies(RenderDevice& device,uint32_t capacity) {
+    auto& native=static_cast<VulkanDevice&>(device);
+    constexpr uint32_t kPage=4096,kBytes=1024*1024;
+    CheckedCpuWriteQueue queue(&native);
+    NativeGpuWorkQueue fifo(device,queue,{},true,false,capacity);
+    NativeTransferBatch recorder(device,queue,&fifo);
+    ResolveMemory memory(device,queue,memory_store_spv,memory_load_spv,kBytes,0,&recorder);
+    memory.SetCpuUploadReceiptForwardingEnabled(true);
+    std::vector<uint8_t> original(4*kPage);
+    for(size_t i=0;i<original.size();++i)original[i]=uint8_t(i*31+(i>>7));
+    // A CPU-snapshot copy (a texture's first move) leaves receipts.
+    recorder.Run([&]{memory.CopyFromCpu(0x80000,0x10000,original,true);});
+    std::vector<uint8_t> chained[3],unaligned;bool forwarded[4]{};
+    recorder.Run([&] {
+        forwarded[0]=memory.CopyFromReceipts(0x10000,0x20000,4*kPage,chained[0]);
+        forwarded[1]=memory.CopyFromReceipts(0x20000,0x30000,4*kPage,chained[1]);
+        forwarded[2]=memory.CopyFromReceipts(0x30000,0x40000,4*kPage,chained[2]);
+        forwarded[3]=memory.CopyFromReceipts(0x10000+100,0x50000,4*kPage-100,unaligned);
+    });
+    Require(forwarded[0]&&forwarded[1]&&forwarded[2]&&forwarded[3],"Receipt copy refused a fully covered source");
+    for(const auto& bytes:chained)Require(bytes==original,"Receipt copy reported different bytes");
+    Require(std::equal(unaligned.begin(),unaligned.end(),original.begin()+100),"Unaligned receipt copy reported different bytes");
+    for(uint32_t address:{0x20000u,0x30000u,0x40000u})
+        Require(memory.ReadBytes(address,4*kPage)==original,"Chained receipt copies left different GPU bytes");
+    Require(memory.ReadBytes(0x50000,4*kPage-100)==unaligned,"Unaligned receipt copy left different GPU bytes");
+    std::vector<uint8_t> refused;
+    // Outside a batch, from bytes without receipts, or after any later write
+    // to a source page, the copy is refused and changes nothing.
+    Require(!memory.CopyFromReceipts(0x20000,0x60000,kPage,refused),"Receipt copy ran outside a transfer batch");
+    std::vector<uint8_t> plain(kPage,0x3c);memory.Initialize(0x70000,plain);
+    recorder.Run([&] {
+        Require(!memory.CopyFromReceipts(0x70000,0x60000,kPage,refused),"Receipt copy forwarded bytes without receipts");
+        Require(memory.CopyFromReceipts(0x30000,0x60000,kPage,refused)&&
+            std::equal(refused.begin(),refused.end(),original.begin()),"Receipt copy refused a current page");
+    });
+    memory.Initialize(0x20000+8,std::vector<uint8_t>(4,0x11));
+    recorder.Run([&]{Require(!memory.CopyFromReceipts(0x20000,0x60000,kPage,refused),"Receipt copy forwarded a stale page");});
+    // A manual scope (BeginScope/EndScope) records a run of copies into one
+    // queued command list; AbortScope submits the prefix and closes it.
+    const auto lists_before=recorder.statistics().queued_lists;
+    recorder.BeginScope(7);
+    for(uint32_t i=0;i<10;++i) {
+        std::vector<uint8_t> moved;
+        Require(memory.CopyFromReceipts(0x30000,0x80000+i*0x4000,kPage,moved),"Scoped receipt copy refused");
+    }
+    recorder.EndScope();
+    Require(recorder.statistics().queued_lists==lists_before+1,"A manual scope queued more than one command list");
+    for(uint32_t i=0;i<10;++i)
+        Require(memory.ReadBytes(0x80000+i*0x4000,kPage)==std::vector<uint8_t>(original.begin(),original.begin()+kPage),
+                "Scoped receipt copies left different GPU bytes");
+    recorder.BeginScope(8);
+    {std::vector<uint8_t> moved;Require(memory.CopyFromReceipts(0x30000,0xB0000,kPage,moved),"Aborted scope refused its copy");}
+    recorder.AbortScope();
+    Require(!recorder.in_scope()&&memory.ReadBytes(0xB0000,kPage)==std::vector<uint8_t>(original.begin(),original.begin()+kPage),
+            "An aborted scope dropped its accepted prefix");
+    const auto read=memory.CopyAndRead(0x20000,0x60000,kPage);
+    auto expected=std::vector<uint8_t>(original.begin(),original.begin()+kPage);std::fill(expected.begin()+8,expected.begin()+12,0x11);
+    Require(read==expected,"Readback copy after a stale receipt differed");
+}
 int main(int argc,char** argv) try {
     bool gpu_alias_state_fixture=false;
     bool submission_worker_fixture=false,physical_timestamp_fixture=false;
     int submission_worker_uncertain=0;
     bool cpu_write_upload_reuse_fixture=false;
+    bool receipt_copy_fixture=false;
     bool pass_transfer_render_pass_fixture=false;
     int pass_transfer_render_pass_uncertain=0;
     bool pass_transfer_descriptor_fixture=false;
@@ -1107,6 +1169,7 @@ int main(int argc,char** argv) try {
         else if(argument=="--pass-transfer-descriptor-uncertain-submit-fixture")pass_transfer_descriptor_uncertain=1;
         else if(argument=="--pass-transfer-descriptor-uncertain-wait-fixture")pass_transfer_descriptor_uncertain=2;
         else if(argument=="--cpu-write-upload-reuse-fixture")cpu_write_upload_reuse_fixture=true;
+        else if(argument=="--receipt-copy-fixture")receipt_copy_fixture=true;
         else if(argument=="--cpu-write-upload-reuse-uncertain-submit-fixture")cpu_write_upload_uncertain_fixture=1;
         else if(argument=="--cpu-write-upload-reuse-uncertain-wait-fixture")cpu_write_upload_uncertain_fixture=2;
         else throw std::invalid_argument("Unknown transfer fixture argument");
@@ -1133,6 +1196,7 @@ int main(int argc,char** argv) try {
     if(pass_transfer_descriptor_fixture) {CheckPassTransferDescriptorReuse(*device,capacity);return 0;}
     if(cpu_write_upload_uncertain_fixture) {CheckCpuWriteUploadReuseUncertain(*device,cpu_write_upload_uncertain_fixture==1);return 1;}
     if(cpu_write_upload_reuse_fixture) {CheckCpuWriteUploadReuse(*device,*queue,capacity);return 0;}
+    if(receipt_copy_fixture) {CheckReceiptCopies(*device,capacity);return 0;}
     CheckFourFenceTransfers(*device,*queue,capacity);
     NativeTransferBatch batch(*device,*queue);
     PassTransfer passes(*device,*queue,fullscreen_spv,resolve_spv,restore_depth_spv,&batch);

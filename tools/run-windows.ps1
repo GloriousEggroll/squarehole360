@@ -7,6 +7,9 @@ $exe = Join-Path $root 'build-windows\bin\gow3.exe'
 if (-not (Test-Path $exe)) { throw "Missing $exe; build it with tools/build-windows.sh." }
 
 function Find-Python {
+    # Packages carry their own Python with PySide6 and tomli-w.
+    $bundled = Join-Path $root 'python\python.exe'
+    if (Test-Path $bundled) { return ,@($bundled) }
     foreach ($candidate in @(@('python'), @('py', '-3'))) {
         if (Get-Command $candidate[0] -ErrorAction SilentlyContinue) { return ,$candidate }
     }

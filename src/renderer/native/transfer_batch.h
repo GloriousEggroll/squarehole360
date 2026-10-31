@@ -26,6 +26,12 @@ public:
     bool has_work_queue() const {return work_queue_!=nullptr;}
     const NativeGpuWorkQueue* work_queue_identity() const noexcept {return work_queue_;}
     void Run(const std::function<void()>& operation,uint64_t event=0,const NativeGpuWorkTag* tag=nullptr);
+    // The same scope held open across several operations: EndScope where Run
+    // would finish, AbortScope where Run would unwind (submits the accepted
+    // prefix and finishes; the caller then rethrows).
+    void BeginScope(uint64_t event=0);
+    void EndScope();
+    void AbortScope();
     bool has_recording() const {return pending_stages_!=0;}
     // Seal into a shared FIFO without completing it. No-op in standalone mode.
     void Seal();

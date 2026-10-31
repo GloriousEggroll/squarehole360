@@ -381,7 +381,10 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
         const auto w=Column(*camera_,3),pw=Column(*previous_camera_,3);
         const double facing=Dot(w,pw)/std::sqrt(std::max(Dot(w,w)*Dot(pw,pw),1e-24));
         const float screen=NativeTemporalScreenMotion(*camera_,*previous_camera_,projection);
-        reset=moved>500.0*500.0||facing<0.7||screen>0.6f;
+        // Sensitive on purpose: a missed cut ghosts the generated frame, while a
+        // false one only costs one frame of history. Cutscene cuts that moved
+        // 0.35-0.6 of the screen used to slip through.
+        reset=moved>500.0*500.0||facing<0.85||screen>0.35f;
         if(reset&&logged_cuts_<24) {
             ++logged_cuts_;
             REXLOG_INFO("Temporal inputs: camera cut at frame {} (moved {:.0f}, facing {:.3f}, screen {:.2f})",

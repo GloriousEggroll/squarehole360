@@ -49,6 +49,24 @@ public:
     struct DefinitionStatistics {bool enabled=false;uint64_t calls=0,ranges=0,covered=0;};
     const DefinitionStatistics& definition_statistics() const {return definition_stats_;}
     void Store(plume::RenderTexture&,const TextureLayout&,const plume::RenderRect&,uint32_t address=0);
+    // Deferred stores: the image already holds the bytes it would store and
+    // stays immutable while held here. Versions and definitions advance now;
+    // the store runs only before an overlapping read, copy or write. A later
+    // deferred store of the identical footprint supersedes it unexecuted.
+    void SetDeferredStoresEnabled(bool enabled) {deferred_stores_=enabled;}
+    bool DeferStore(std::shared_ptr<plume::RenderTexture>,const TextureLayout&,const plume::RenderRect&,uint32_t address);
+    static std::array<uint32_t,10> StoreFootprintKey(const TextureLayout&,const plume::RenderRect&,uint32_t address);
+    // Pending stores holding this image, which the caller is about to change.
+    size_t PendingStoreReferences(const plume::RenderTexture* image) const {
+        size_t count=0;for(const auto& p:pending_stores_)count+=p.image.get()==image;return count;
+    }
+    // Before overwriting an image: pending stores of it with the footprint the
+    // caller is about to store again are dropped; any other runs first.
+    void ReleaseDeferredImage(const plume::RenderTexture& image,const std::array<uint32_t,10>& next_footprint);
+    struct DeferredStoreStatistics {uint64_t deferred=0,superseded=0,materialized=0,pending=0,peak_pending=0;};
+    DeferredStoreStatistics deferred_store_statistics() const {
+        auto stats=deferred_store_stats_;stats.pending=pending_stores_.size();return stats;
+    }
     // Optional startup-only full format26/28/31 store plus canonical RGBA32F
     // sampled output. The physical store remains authoritative. A receipt is
     // usable only after the enclosing transfer scope succeeds and while
@@ -180,6 +198,8 @@ public:
     const NativeCpuUploadReceipts::Statistics& cpu_upload_receipt_statistics() const {
         return cpu_upload_receipts_.statistics();
     }
+    uint32_t cpu_upload_receipt_slots() const {return cpu_upload_receipts_.slots();}
+    uint64_t cpu_upload_receipt_payload_bytes() const {return cpu_upload_receipts_.maximum_payload_bytes();}
     struct CpuWriteUploadReuseStatistics {
         bool enabled=false,checked_queue=false,poisoned=false;
         uint64_t allocations=0,reuses=0,uploads=0,uploaded_bytes=0,
@@ -198,9 +218,16 @@ public:
     // Native buffer operations share the same physical storage and invalidate
     // every overlapping texture view. Reading undefined history is rejected.
     void Copy(uint32_t source,uint32_t destination,uint32_t count);
+    // Copy, then read the destination back in the same submission: one fence
+    // wait instead of two when the result is published to guest memory.
+    std::vector<uint8_t> CopyAndRead(uint32_t source,uint32_t destination,uint32_t count);
+    // The same copy when every source page has a current CPU-upload receipt:
+    // the result is known without the GPU, so the copy is only recorded into
+    // the active transfer batch. False, with nothing changed, otherwise.
+    bool CopyFromReceipts(uint32_t source,uint32_t destination,uint32_t count,std::vector<uint8_t>& result);
     // CPU snapshots are inputs, not native-owned source history. Upload only
     // the destination while retaining the guest memcpy range validation.
-    void CopyFromCpu(uint32_t source,uint32_t destination,std::span<const uint8_t> data);
+    void CopyFromCpu(uint32_t source,uint32_t destination,std::span<const uint8_t> data,bool queued=false);
     // Compose immutable CPU bytes with exact captured GPU-owned [first,end)
     // fragments. Undefined required GPU bytes are still fatal. Source history
     // and CPU-owned holes retain their original ownership.
@@ -210,7 +237,9 @@ public:
     // CPU-backed textures may have GPU-owned mip levels or partial blocks.
     // Overlay only defined sampled bytes; this never publishes CPU snapshots
     // to GPU physical storage or changes ownership of padding.
-    uint64_t CpuTextureVersion(const TextureLayout&) const;
+    // gpu_bytes, when given, reports whether any sampled byte is GPU-defined,
+    // i.e. whether OverlayCpuTexture can change the CPU payload at all.
+    uint64_t CpuTextureVersion(const TextureLayout&,bool* gpu_bytes=nullptr) const;
     const NativePageVersionTable& PageVersions() const {return page_versions_;}
     struct CpuFootprintStatistics {
         uint64_t hits=0,misses=0,admissions=0,evictions=0;
@@ -328,6 +357,9 @@ private:
     std::map<uint32_t,uint32_t> defined_;
     DefinitionStatistics definition_stats_;
     std::unique_ptr<plume::RenderBuffer> bytes_;
+    // Reused by CopyAndRead; every use completes its fence before returning.
+    std::unique_ptr<plume::RenderBuffer> copy_readback_;uint64_t copy_readback_bytes_=0;
+    void CopyBuffer(uint32_t source,uint32_t destination,uint32_t count,std::vector<uint8_t>* read);
     std::unique_ptr<plume::RenderTexture> empty_stencil_;
     std::unique_ptr<plume::RenderCommandList> commands_;
     std::unique_ptr<plume::RenderCommandFence> fence_;
@@ -353,7 +385,7 @@ private:
         uint64_t version_serial=0,version=0;
         uint64_t range_revision=0;
         std::array<NativePageChangeTracker<>::Range,2> guard_pages{};
-        bool version_valid=false;
+        bool version_valid=false,gpu_bytes=true;
     };
     // CPU-only exact layouts and version memoization. A reference is consumed
     // synchronously before another lookup; no guest or GPU pointer is retained.
@@ -378,6 +410,9 @@ private:
     std::unique_ptr<plume::RenderShader> restore_vertex_,restore_pixel_;
     std::unique_ptr<plume::RenderPipelineLayout> restore_layout_;
     std::map<plume::RenderFormat,std::unique_ptr<plume::RenderPipeline>> restore_pipelines_;
+    // The restore binding never changes (the whole EDRAM window of bytes_), so
+    // one set serves every restore; it is never updated after creation.
+    std::unique_ptr<plume::RenderDescriptorSet> restore_descriptors_;
     uint64_t direct_color_restores_=0;
     const std::array<Ranges,2>& CpuTextureFootprints(const TextureLayout&) const;
     CpuTextureFootprint& CachedCpuTextureFootprint(const TextureLayout&) const;
@@ -392,6 +427,22 @@ private:
     void Dispatch(plume::RenderTexture&,Parameters,bool store,plume::RenderTexture* stencil,
                   uint32_t first_byte,uint32_t byte_count,
                   const NativeSynchronousGpuTimingContext* presentation_timing=nullptr,bool rgba_stencil=false);
+    struct PendingStore {
+        std::shared_ptr<plume::RenderTexture> image;
+        Parameters push;
+        uint32_t first_byte=0,byte_count=0;
+        std::array<uint32_t,10> footprint{};  // Address, layout and rectangle of the deferred Store.
+    };
+    std::vector<PendingStore> pending_stores_;
+    bool deferred_stores_=false;
+    std::shared_ptr<plume::RenderTexture> deferring_image_;
+    std::array<uint32_t,10> deferring_footprint_{};
+    DeferredStoreStatistics deferred_store_stats_;
+    // Runs, in order, every pending store overlapping [first, last).
+    void MaterializeDeferredStores(uint32_t first,uint32_t last);
+    void MaterializeDeferredStores(const Ranges& ranges) {
+        if(!pending_stores_.empty()&&!ranges.empty())MaterializeDeferredStores(ranges.front().first,ranges.back().second);
+    }
     void TransferSurface(plume::RenderTexture&,const SurfaceLayout&,bool store);
     RawFloatCpuStatistics raw_float_cpu_stats_;
     std::unique_ptr<plume::RenderShader> raw_float_cpu_shader_;
@@ -426,6 +477,17 @@ private:
     uint64_t atlas_depth_host_synchronous_bypasses_=0;
     CpuWriteStatistics cpu_write_stats_;
     NativeCpuUploadReceipts cpu_upload_receipts_;
+    // Diagnostic: CPU texture overlay readbacks, and how many of their bytes
+    // already matched the CPU snapshot they replace.
+    uint64_t overlay_readbacks_=0,overlay_owned_bytes_=0,overlay_identical_bytes_=0,overlay_next_report_=64ull<<20;
+public:
+    // GPU memory copies by how their result reached the runtime.
+    struct CopyPublicationStatistics {
+        uint64_t receipts=0,readbacks=0,inactive_batch=0,ineligible=0,receipt_misses=0;
+    };
+    const CopyPublicationStatistics& copy_publication_statistics() const {return copy_publication_stats_;}
+private:
+    CopyPublicationStatistics copy_publication_stats_;
     bool cpu_upload_receipts_configured_=false;
     CpuWriteUploadReuseStatistics cpu_write_upload_reuse_stats_;
     bool cpu_write_upload_reuse_configured_=false,cpu_write_upload_reuse_uncertain_=false;

@@ -244,7 +244,25 @@ void SpeculativeTests() {
     Require(ran==1&&queue->statistics().cancelled==1,"Speculative shutdown ran or leaked queued work");
   }
 }
+// A shader a draw waits for runs before queued prewarm work, whether it is new
+// or already queued behind that work.
+void UrgentTests() {
+  Gate gate;std::mutex mutex;std::vector<std::string> order;
+  NativeShaderPrewarmQueue queue([&](const auto& job){
+    if(job.key=="block")gate.Enter();
+    std::lock_guard lock(mutex);order.push_back(job.key);
+  },1);
+  Release release{gate};
+  Require(queue.TryEnqueue({"block",Source(1),false}),"Urgent block admission failed");gate.Wait(1);
+  for(const char* key:{"p1","p2","p3"})Require(queue.TryEnqueue({key,Source(1),false}),"Prewarm admission failed");
+  Require(queue.TryEnqueue({"draw",Source(1),false,false,true}),"Urgent admission failed");
+  Require(!queue.TryEnqueue({"p3",Source(1),false,false,true}),"Urgent duplicate was admitted twice");
+  gate.Open();queue.Drain();
+  const std::vector<std::string> expected{"block","p3","draw","p1","p2"};
+  Require(order==expected,"Urgent jobs did not run ahead of queued prewarm work");
+  Require(queue.statistics().expedited==2,"Urgent jobs were not counted");
+}
 int main() {
-  try {QueueTests();DiagnosticTests();SnapshotTests();SpeculativeTests();std::cout<<"shader prewarm admission, lifetime, mode, bounds, failure, shutdown, snapshot and bounded diagnostics tests passed\n";}
+  try {QueueTests();DiagnosticTests();SnapshotTests();SpeculativeTests();UrgentTests();std::cout<<"shader prewarm admission, lifetime, mode, bounds, failure, shutdown, snapshot and bounded diagnostics tests passed\n";}
   catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}
 }

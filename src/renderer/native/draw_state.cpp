@@ -1,4 +1,5 @@
 #include "draw_state.h"
+#include <format>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -43,6 +44,16 @@ RenderStencilFaceDesc Stencil(uint32_t n) {
     out.depthFailOp = RenderStencilOp(((n >> 9) & 7) + 1);
     return out;
 }
+}
+DrawViewport DecodeDrawViewport(std::span<const uint32_t, kDrawStateWords> words) noexcept {
+    const auto number = [&](uint32_t offset) { return std::bit_cast<float>(words[(offset - kDrawStateOffset) / 4]); };
+    return {number(0x2908), number(0x290c), number(0x2910), number(0x2914), number(0x2918), number(0x291c)};
+}
+bool DrawViewport::Representable() const noexcept {
+    for (const float v : {x_scale, x_offset, y_scale, y_offset, z_scale, z_offset})
+        if (!std::isfinite(v)) return false;
+    return x_scale > 0 && y_scale < 0 && z_offset >= 0 && z_offset <= 1 && z_offset + z_scale >= 0 &&
+           z_offset + z_scale <= 1;
 }
 DrawState DecodeDrawState(std::span<const uint32_t, kDrawStateWords> words,
                           uint32_t width, uint32_t height, uint32_t primitive,
@@ -93,8 +104,9 @@ DrawState DecodeDrawState(std::span<const uint32_t, kDrawStateWords> words,
     p.depthClipEnabled = !(clip & (1u << 16));
     const float xs = number(0x2908), xo = number(0x290c), ys = number(0x2910), yo = number(0x2914);
     const float zs = number(0x2918), zo = number(0x291c);
-    if (xs <= 0 || ys >= 0 || zo < 0 || zo > 1 || zo + zs < 0 || zo + zs > 1)
-        throw std::runtime_error("Unsupported native viewport orientation/depth range");
+    if (!DecodeDrawViewport(words).Representable())
+        throw std::runtime_error(std::format("Unsupported native viewport orientation/depth range "
+            "(x scale {} offset {}, y scale {} offset {}, z scale {} offset {})", xs, xo, ys, yo, zs, zo));
     // DXC flips clip-space Y. Positive Vulkan height then restores D3D's
     // top-left origin. Vulkan permits minDepth > maxDepth (reversed Z).
     const uint32_t window = reg(0x28c0);

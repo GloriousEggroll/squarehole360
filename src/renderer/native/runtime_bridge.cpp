@@ -1,3 +1,5 @@
+#include "edram_inventory.h"
+#include "hitch_trace.h"
 #include "renderer/native/edram_extent.h"
 #include "renderer/game_profile.h"
 #include "published_query_results.h"
@@ -44,6 +46,7 @@
 #include "renderer/native/frame_journal.h"
 #include "renderer/native/builtin_readonly_query.h"
 #include "renderer/native/pipeline_startup_task.h"
+#include "renderer/native/shader_precompile.h"
 #include <rex/graphics/shader_storage_progress.h>
 #include <future>
 #include <map>
@@ -79,6 +82,17 @@ REXCVAR_DECLARE(bool, gow3_native_block_shader_prewarm);
 REXCVAR_DECLARE(bool, native_direct_execution);
 REXCVAR_DECLARE(bool, gpu_native_marker_operands);
 
+// Options that remove EDRAM round trips. They matter most on tile-based GPUs
+// (Apple silicon), where each extra pass and synchronous wait is expensive;
+// other platforms keep them opt-in until they have had wider testing.
+#if defined(__APPLE__)
+constexpr bool kTiledGpuDefault=true;
+#else
+constexpr bool kTiledGpuDefault=false;
+#endif
+// Scene cache bounds in hardware render target mode.
+constexpr uint32_t kHardwareShaderCacheEntries=4096,kHardwarePipelineCacheEntries=8192;
+constexpr uint64_t kHardwareShaderCacheBytes=256u*1024*1024;
 REXCVAR_DEFINE_BOOL(gow3_native_hardware_render_targets, true, "Graphics",
                    "Render into real GPU render targets with hardware depth, stencil and blending instead of emulating Xbox EDRAM in shaders")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -157,6 +171,24 @@ REXCVAR_DEFINE_BOOL(gow3_native_direct_atlas_depth_resolves, true, "Renderer dia
 REXCVAR_DEFINE_BOOL(gow3_native_fused_packed_atlas_resolves, false, "Renderer diagnostics",
                    "Fuse canonical packed UNORM24 atlas decode and resolve with a private stencil MRT")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_direct_resolve_textures, kTiledGpuDefault, "Renderer diagnostics",
+                   "Sample a resolve's own image while texture memory still holds exactly its bytes, instead of decoding that memory")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_verify_direct_resolve_textures, false, "Renderer diagnostics",
+                   "Compare direct resolve images with the decode of their stored memory (slow; diagnostics)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_skip_full_clear_restore, kTiledGpuDefault, "Renderer diagnostics",
+                   "Hardware render targets: skip restoring a color surface's old contents before a clear covers all of it")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_lazy_commits, kTiledGpuDefault, "Renderer diagnostics",
+                   "Hardware render targets: commit surfaces to EDRAM only when another interpretation reads those tiles")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_direct_fixed_resolves, kTiledGpuDefault, "Renderer diagnostics",
+                   "Hardware render targets: quantize fixed16 resolve sources in the resolve pass instead of an EDRAM round trip")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_deferred_resolve_stores, kTiledGpuDefault, "Renderer diagnostics",
+                   "Write directly sampled resolves to texture memory only when something reads those bytes as memory")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_canonical_resolve_stores, false, "Renderer diagnostics",
                    "Produce exact immutable sampled images alongside eligible physical resolve stores")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -226,8 +258,15 @@ REXCVAR_DEFINE_BOOL(gow3_native_async_shaders, false, "Graphics",
 REXCVAR_DEFINE_BOOL(gow3_native_async_pipelines, false, "Graphics",
                    "Skip a draw while its GPU pipeline is being built instead of stalling (objects may appear a few frames late)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(gow3_native_async_shader_budget_ms, 250, "Graphics",
+REXCVAR_DEFINE_BOOL(gow3_native_shader_precompile, true, "Graphics",
+                   "At start, compile every pixel shader in the game files that is not compiled yet (the first start and after new DLC take minutes)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(gow3_native_async_shader_budget_ms, 5000, "Graphics",
                      "Async shaders: after this long waiting for one shader, block on it like the synchronous path")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(gow3_native_hold_incomplete_frames_ms, 3000, "Graphics",
+                     "When at least 1 in 4 of a frame's draws waits for a shader or pipeline compile, keep the "
+                     "last complete frame on screen until none waits, for up to this long (0: never hold)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_multi_draw_command_buffers, false, "Renderer diagnostics",
                    "Record consecutive resident native draws in bounded shared command buffers")
@@ -421,7 +460,7 @@ REXCVAR_DEFINE_BOOL(gow3_native_reuse_resolve_identity_views, false, "Renderer d
 REXCVAR_DEFINE_BOOL(gow3_native_diagnose_texture_eviction_reloads, false, "Renderer diagnostics",
                    "Record bounded immutable texture eviction/reload causes and host timings")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_recycle_resolve_images, false, "Renderer diagnostics",
+REXCVAR_DEFINE_BOOL(gow3_native_recycle_resolve_images, kTiledGpuDefault, "Renderer diagnostics",
                    "Reuse fully retired native resolve images within fixed allocation budgets")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_fast_snapshot_fingerprints, true, "Renderer diagnostics",
@@ -434,7 +473,7 @@ REXCVAR_DEFINE_BOOL(gow3_native_lazy_state_identities, true, "Renderer diagnosti
                    "Compute canonical native draw state identities only when needed")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(gow3_native_shader_prewarm_threads, 0, "Renderer diagnostics",
-                    "Native shader preparation workers; zero uses available hardware threads, at most32")
+                    "Native shader preparation workers; zero shares half the hardware threads with the pipeline builders, at most 32")
     .range(0,32).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_INT32(gow3_native_draw_batch_size, 16, "Renderer diagnostics",
                     "Maximum accepted native draws per fenced batch; one enables per-draw diagnostics")
@@ -482,14 +521,18 @@ REXCVAR_DEFINE_BOOL(gow3_native_temporal_inputs, true, "Renderer diagnostics",
 REXCVAR_DEFINE_BOOL(gow3_native_four_inflight_batches, true, "Renderer diagnostics",
                    "Four native GPU fences with unchanged physical list, query and scratch bounds")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_queue_cpu_memory_writes, false, "Renderer diagnostics",
+REXCVAR_DEFINE_BOOL(gow3_native_queue_cpu_memory_writes, true, "Renderer diagnostics",
                    "Queue immutable page-sized CPU history updates; query report overlaps keep eager completion")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_queue_cpu_memory_copies, true, "Renderer diagnostics",
+                   "Queue guest GPU copies of CPU data (direct execution) in the GPU batch instead of draining "
+                   "the GPU first; query report overlaps keep eager completion")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_reuse_cpu_write_upload, false, "Renderer diagnostics",
                    "Reuse one fully fenced 4 KiB synchronous CPU upload buffer without changing submission order")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_forward_cpu_upload_receipts, false, "Renderer diagnostics",
-                   "Forward exact completed CPU-upload pages into fully covered overlays; retain native ownership and original flushes")
+REXCVAR_DEFINE_BOOL(gow3_native_forward_cpu_upload_receipts, true, "Renderer diagnostics",
+                   "Serve texture overlays from exact completed CPU-upload and GPU-copy pages instead of reading them back; retain native ownership and original flushes")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_diagnose_cpu_write_cohorts, false, "Renderer diagnostics",
                    "Count bounded immutable CPU-write cohorts before existing Native prefix execution")
@@ -542,15 +585,18 @@ REXCVAR_DEFINE_BOOL(gow3_native_diagnose_full_cpu_texture_overlays, false, "Rend
 REXCVAR_DEFINE_BOOL(gow3_native_retain_unused_textures, true, "Renderer diagnostics",
                    "Retain a bounded set of recently used immutable CPU textures")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_UINT32(gow3_native_dormant_texture_entries, 512, "Renderer diagnostics",
+REXCVAR_DEFINE_UINT32(gow3_native_dormant_texture_entries, 4096, "Renderer diagnostics",
                      "Extra dormant CPU texture entry budget")
     .range(0u,4096u).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_UINT32(gow3_native_dormant_texture_mib, 128, "Renderer diagnostics",
+REXCVAR_DEFINE_UINT32(gow3_native_dormant_texture_mib, 1024, "Renderer diagnostics",
                      "Extra dormant CPU texture byte budget in MiB")
     .range(0u,2048u).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_UINT32(gow3_native_dormant_texture_frames, 120, "Renderer diagnostics",
+REXCVAR_DEFINE_UINT32(gow3_native_dormant_texture_frames, 3600, "Renderer diagnostics",
                      "Frames an unused CPU texture stays resident before age eviction")
     .range(1u,7200u).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_vertex_arena, true, "Renderer diagnostics",
+                   "Sub-allocate cached vertex data from large mapped buffers instead of one buffer each")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_recycle_vertex_buffers, false, "Renderer diagnostics",
                    "Reuse exact-description fully retired vertex buffers within 128 idle allocations/16 MiB")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -683,6 +729,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   static_assert(NativeQueryTracker::kMaxDeferredQueries<=rex::graphics::NativeQueryTickets::kCapacity);
   const bool unified_gpu_queue;
   const bool queue_cpu_memory_writes;
+  const bool queue_cpu_memory_copies;
   const bool diagnose_cpu_write_cohorts;
   const bool diagnose_completion_causes;
   const bool time_cpu_stages;
@@ -749,6 +796,9 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   std::mutex planner_mutex;
   std::condition_variable planner_ready,planner_space;
   std::deque<PlannerItem> planner_queue;
+  // Destination invalidation of direct memcpy chunks, not yet queued so the
+  // next adjacent chunk can extend it.
+  std::optional<PlannerItem> pending_direct_invalidation;
   bool planner_idle=false,planner_failure_reported=false;
   std::thread planner_thread;
   std::atomic<uint64_t> planner_items{0},planner_producer_waits{0};
@@ -775,11 +825,19 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   // Async shaders. finished: keys whose background compile ended (prewarm
   // workers write it); the rest is used only on the command thread.
   bool async_shaders=false;
-  std::chrono::milliseconds async_shader_budget{250};
+  std::chrono::milliseconds async_shader_budget{5000};
   std::filesystem::path native_shader_cache;
   std::mutex async_finished_mutex;
   std::unordered_set<std::string> async_finished;
   std::unordered_set<std::string> async_ready;
+  // Keys with a cache file on disk (the startup listing plus the startup
+  // precompile). Shared with the discovery sink on guest threads.
+  struct OnDiskShaders {
+    std::mutex mutex;
+    std::unordered_set<std::string> keys;
+    bool Contains(const std::string& key) {std::lock_guard lock(mutex);return keys.contains(key);}
+  };
+  std::shared_ptr<OnDiskShaders> on_disk=std::make_shared<OnDiskShaders>();
   std::unordered_map<std::string,std::chrono::steady_clock::time_point> async_waiting;
   uint64_t async_not_ready=0,async_budget_blocks=0,async_enqueued=0;
   // Cold shader-provider calls only. Keep bounded records in memory and format
@@ -797,9 +855,14 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   size_t slow_shader_preparation_count=0;
   uint64_t shader_provider_requests=0,slow_shader_preparation_dropped=0;
   std::shared_ptr<NativePipelineRecipeCache> pipeline_recipes;
+  bool hardware_pipeline_recipes=false;
   std::unique_ptr<LiveVulkanDevice> device;
   std::unique_ptr<plume::RenderCommandQueue> queue;
   std::unique_ptr<SceneExecutor> renderer;
+  // Presentation hold while a new area's shaders compile (see HoldIncompleteFrame).
+  SceneExecutor::CompileSkipCounts presented_skips{};
+  std::optional<std::chrono::steady_clock::time_point> hold_started;
+  uint64_t held_frames=0,clean_frames=0;
   std::shared_ptr<LiveRenderFrame> active_frame;
   CompletedFrameDisposer completed_frame_disposer;
   std::shared_ptr<plume::RenderTexture> output;
@@ -933,6 +996,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         query_capacity(uint32_t(std::clamp(REXCVAR_GET(gow3_native_query_capacity),1,128))),
         unified_gpu_queue(native_raster&&REXCVAR_GET(gow3_native_batch_transfers)&&REXCVAR_GET(gow3_native_unified_gpu_queue)),
         queue_cpu_memory_writes(unified_gpu_queue&&REXCVAR_GET(gow3_native_queue_cpu_memory_writes)),
+        queue_cpu_memory_copies(unified_gpu_queue&&REXCVAR_GET(gow3_native_queue_cpu_memory_copies)),
         diagnose_cpu_write_cohorts(native_raster&&REXCVAR_GET(gow3_native_diagnose_cpu_write_cohorts)),
         diagnose_completion_causes(native_raster&&REXCVAR_GET(gow3_native_diagnose_completion_causes)),
         time_cpu_stages(REXCVAR_GET(gow3_native_time_cpu_stages)||REXCVAR_GET(gow3_native_time_draw_recording)||
@@ -964,9 +1028,21 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
                 REXCVAR_GET(gow3_native_lazy_state_identities),REXCVAR_GET(gow3_native_direct_resource_refs),
                 REXCVAR_GET(gow3_native_fast_snapshot_fingerprints)),
         compiler(cache / "native-shaders") {
+    planner.SetDirectCpuMemoryCopies(direct);
     native_shader_cache=cache/"native-shaders"/NativeShaderCompiler::CacheVersion();
     async_shaders=REXCVAR_GET(gow3_native_async_shaders);
     async_shader_budget=std::chrono::milliseconds(std::max(0,REXCVAR_GET(gow3_native_async_shader_budget_ms)));
+    if(async_shaders) {
+      // Which shaders are on disk: one listing at start instead of a lookup
+      // per shader (setup precompiles 100k+ shaders, and under Wine a lookup
+      // of a missing file scans its folder). A worker loads each one; reading
+      // it on the GPU command thread took up to 30 ms there under Wine.
+      std::error_code error;
+      for(std::filesystem::recursive_directory_iterator entry(native_shader_cache,error),end;!error&&entry!=end;entry.increment(error)) {
+        auto name=entry->path().filename().string();
+        if(name.ends_with(".g3spv"))on_disk->keys.insert(name.substr(0,name.size()-6));
+      }
+    }
     try {
       // An existing journal is kept; this session's goes next to it with a
       // start-time suffix. The writer itself still never truncates a path.
@@ -1102,9 +1178,18 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       exact_fsi_compiler=std::make_unique<NativeFsiExactStoresCompiler>(compiler,
           cache.empty()?std::filesystem::path{}:cache/"native-fsi-exact-stores");
     }
+    // Same condition as SceneExecutorConfig::native_fsi below.
+    hardware_pipeline_recipes=!(description.ordered_pixel_interlock&&description.features.fragmentStoresAndAtomics&&
+        !REXCVAR_GET(gow3_native_hardware_render_targets));
     if(REXCVAR_GET(gow3_native_pipeline_prewarm)&&native_raster&&!cache.empty())try {
+      NativePipelineRecipeCache::Limits limits;
+      if(hardware_pipeline_recipes) {
+        limits.recipes=NativePipelineRecipeCache::kMaxRecipes;limits.sources=NativePipelineRecipeCache::kMaxSources;
+        limits.source_bytes=NativePipelineRecipeCache::kMaxSourceBytes;
+      }
       pipeline_recipes=std::make_shared<NativePipelineRecipeCache>(
-          cache/"native-pipeline-recipes"/"v1"/NativeShaderCompiler::CacheVersion(),NativeShaderCompiler::CacheVersion());
+          cache/(hardware_pipeline_recipes?"native-hardware-pipeline-recipes":"native-pipeline-recipes")/"v1"/
+              NativeShaderCompiler::CacheVersion(),NativeShaderCompiler::CacheVersion(),limits);
     }catch(const std::exception& error){REXLOG_WARN("Observed native pipeline cache unavailable: {}",error.what());}
     if(REXCVAR_GET(gow3_native_specialize_fsi_pipeline_state)&&REXCVAR_GET(gow3_native_fsi_state_forward_cfg))
       throw std::invalid_argument("Pure FSI state and composed forward FSI state are separate experiments");
@@ -1356,16 +1441,15 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     std::string key(digest);if(fsi)key+=".fsi";
     if(async_ready.contains(key))return true;
     bool ready=false;
-    {std::error_code error;ready=std::filesystem::exists(native_shader_cache/(key+".g3spv"),error);}
     const std::string job_key=std::string(digest)+(fsi?".fsi":".raster");
-    if(!ready){std::lock_guard lock(async_finished_mutex);ready=async_finished.contains(job_key);}
+    {std::lock_guard lock(async_finished_mutex);ready=async_finished.contains(job_key);}
     if(ready) {async_ready.insert(std::move(key));async_waiting.erase(job_key);return true;}
     const auto now=std::chrono::steady_clock::now();
     const auto [waiting,first]=async_waiting.try_emplace(job_key,now);
     if(first) {
       // Starts the compile on a real-request worker, or promotes it out of
       // the speculative lane. A running or already-queued job is unchanged.
-      async_enqueued+=shader_prewarm->TryEnqueue({job_key,resource.owner,fsi,false});
+      async_enqueued+=shader_prewarm->TryEnqueue({job_key,resource.owner,fsi,false,true});
     } else if(now-waiting->second>=async_shader_budget) {
       ++async_budget_blocks;async_waiting.erase(waiting);
       async_ready.insert(std::move(key));return true;  // Block in Get like the synchronous path.
@@ -1482,16 +1566,25 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       },unsigned(REXCVAR_GET(gow3_native_shader_prewarm_threads)),NativeShaderPrewarmQueue::kMaxJobs,
         NativeShaderPrewarmQueue::kMaxBytes,REXCVAR_GET(gow3_native_block_shader_prewarm));
       std::weak_ptr<NativeShaderPrewarmQueue> weak=shader_prewarm;
-      const bool use_fsi=description.ordered_pixel_interlock&&description.features.fragmentStoresAndAtomics;
-      Gow3SetShaderDiscoverySink([weak,fsi=use_fsi](std::shared_ptr<const std::vector<uint8_t>> source,bool pixel,bool speculative) {
+      // Same condition as SceneExecutorConfig::native_fsi: hardware render
+      // targets draw every pixel shader in raster mode, so an interlock
+      // compile there would never be used.
+      const bool use_fsi=description.ordered_pixel_interlock&&description.features.fragmentStoresAndAtomics&&
+          !REXCVAR_GET(gow3_native_hardware_render_targets);
+      Gow3SetShaderDiscoverySink([weak,fsi=use_fsi,disk=on_disk](std::shared_ptr<const std::vector<uint8_t>> source,bool pixel,bool speculative) {
         if(auto queue=weak.lock()) {
           const bool fragment_interlock=fsi&&pixel;
-          auto key=ContentHash(*source)+(fragment_interlock?".fsi":".raster");
-          queue->TryEnqueue({std::move(key),std::move(source),fragment_interlock,speculative});
+          const auto hash=ContentHash(*source);
+          // The game just linked this shader for a draw. A cached one is a
+          // short load: put it ahead of queued compiles so it is in memory
+          // before that draw.
+          const bool cached=!speculative&&disk->Contains(hash+(fragment_interlock?".fsi":""));
+          queue->TryEnqueue({hash+(fragment_interlock?".fsi":".raster"),std::move(source),fragment_interlock,speculative,cached});
         }
       });
-      REXLOG_INFO("Native shader prewarm enabled: workers={}, max_jobs={}, max_source_bytes={}",
-          shader_prewarm->statistics().workers,NativeShaderPrewarmQueue::kMaxJobs,NativeShaderPrewarmQueue::kMaxBytes);
+      REXLOG_INFO("Native shader prewarm enabled: workers={}, urgent_helpers={}, compile_slots={} (gameplay {}), pipeline_builders={}, max_jobs={}, max_source_bytes={}",
+          shader_prewarm->statistics().workers,shader_prewarm->statistics().urgent_helpers,
+          CompileSlots(),GameplayCompileSlots(),BackgroundPipelineThreads(),NativeShaderPrewarmQueue::kMaxJobs,NativeShaderPrewarmQueue::kMaxBytes);
     }catch(const std::exception& error) {
       Gow3SetShaderDiscoverySink({});
       if(shader_prewarm)shader_prewarm->StopAndJoin();
@@ -1511,7 +1604,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
 
   // Same parseable Scene counters for verbose frame reports and cold quiet-mode health.
   void LogSceneCounters() {
-    for(const auto* key:{"device","page_versions","cpu_stage_timings","texture_filtering","fsi_immutable_state_hoist","exact_fsi_stores","draw_batches","draw_command_groups","async_shaders","async_pipelines","fsi_draw_pass_groups","retained_opaque_phase_render_pass_groups","packed_color_render_pass_groups","packed_color_blend_pass_groups","packed_color_action_pass_groups","packed_depth_render_pass_groups","readonly_query_render_pass_groups","native_readonly_depth_no_write_metadata","dummy_fsi_render_pass","attachmentless_fsi_render_pass","cpu_memory_writes","cpu_write_upload_reuse","cpu_upload_receipts","vertex_buffer_pool","fsi_raster_attachment","texture_layout_cache","resolve_image_pool","resolve_descriptor_pool","pass_transfer_descriptor_pool","pass_transfer_render_pass_cache","resolve_identity_views","texture_eviction_reload_census","cpu_texture_drains","cpu_image_slot_lookup","draw_descriptors","unused_descriptor_sets","draw_descriptor_content_cache","constant_delta_uploads","pinned_null_constant_uploads","draw_recording","packed_zero_depth_clear","packed_primary_stencil_clear","packed_secondary_stencil_clear","atlas_depth_region_restores","fused_atlas_depth_clear","direct_atlas_depth_resolves","fused_packed_atlas_resolves","direct_packed_color_resolves","full_color_clear_restore","draw_barriers","builtin_atomic_depth","builtin_readonly_queries","native_readonly_depth_attachment","native_early_depth","native_early_depth_catalog","native_early_depth_guard_reuse","native_early_depth_material_retention","retained_fp24_depth_writer","retained_opaque_writer","retained_opaque_catalog","retained_opaque_phase","retained_shared_depth_queries","retained_disjoint_queries","native_stencil_material_cutoff","opaque_color_overwrite","forward_control_flow","forward_vertex_control_flow","forward_pixel_catalog","fsi_state_specialization","fsi_state_material_composition","cpu_texture_footprint_cache","gpu_alias_state_cache","compact_resolve_channels","canonical_resolve_stores","texture_updates","transfer_batches","gpu_work_queue","query_prefix_retirement","query_resets","alias_generations","gpu_timings",
+    for(const auto* key:{"device","page_versions","cpu_stage_timings","texture_filtering","fsi_immutable_state_hoist","exact_fsi_stores","draw_batches","draw_command_groups","async_shaders","async_pipelines","fsi_draw_pass_groups","retained_opaque_phase_render_pass_groups","packed_color_render_pass_groups","packed_color_blend_pass_groups","packed_color_action_pass_groups","packed_depth_render_pass_groups","readonly_query_render_pass_groups","native_readonly_depth_no_write_metadata","dummy_fsi_render_pass","attachmentless_fsi_render_pass","cpu_memory_writes","cpu_write_upload_reuse","cpu_upload_receipts","gpu_copy_publications","vertex_buffer_pool","fsi_raster_attachment","texture_layout_cache","resolve_image_pool","resolve_descriptor_pool","pass_transfer_descriptor_pool","pass_transfer_render_pass_cache","resolve_identity_views","texture_eviction_reload_census","cpu_texture_drains","cpu_image_slot_lookup","draw_descriptors","unused_descriptor_sets","draw_descriptor_content_cache","constant_delta_uploads","pinned_null_constant_uploads","draw_recording","packed_zero_depth_clear","packed_primary_stencil_clear","packed_secondary_stencil_clear","atlas_depth_region_restores","fused_atlas_depth_clear","direct_atlas_depth_resolves","fused_packed_atlas_resolves","direct_packed_color_resolves","full_color_clear_restore","draw_barriers","builtin_atomic_depth","builtin_readonly_queries","native_readonly_depth_attachment","native_early_depth","native_early_depth_catalog","native_early_depth_guard_reuse","native_early_depth_material_retention","retained_fp24_depth_writer","retained_opaque_writer","retained_opaque_catalog","retained_opaque_phase","retained_shared_depth_queries","retained_disjoint_queries","native_stencil_material_cutoff","opaque_color_overwrite","forward_control_flow","forward_vertex_control_flow","forward_pixel_catalog","fsi_state_specialization","fsi_state_material_composition","cpu_texture_footprint_cache","gpu_alias_state_cache","compact_resolve_channels","canonical_resolve_stores","direct_resolve_textures","direct_resolve_verifications","texture_updates","transfer_batches","gpu_work_queue","query_prefix_retirement","query_resets","alias_generations","gpu_timings",
                         "queued_volume_alias_loads","pipeline_cache","shader_cache","shader_lookup_lookaside","pipeline_lookup_lookaside","cpu_image_lookup_lookaside","msaa_fallback","index_cache","texture_cache","vertex_cache","full_cpu_texture_overlays","cpu_texture_sampling_storage","raw_gpu_float_cpu_textures","gpu_batch_attribution","gpu_physical_timings","gpu_draw_timings", "presentation_gpu_timings","depth_stencil_restores","surface_conversions","hardware_render_passes"})
       if(const auto values=renderer->report().find(key);values!=renderer->report().end())
         REXLOG_INFO("Native {}: {}",key,values->dump());
@@ -1547,6 +1640,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
           stats.retained_bytes,stats.peak_jobs,stats.peak_bytes);
       if(stats.speculative_worker)REXLOG_INFO("Native speculative shader prewarm: admitted={}, started={}, promoted={}",
           stats.speculative_admitted,stats.speculative_started,stats.promoted);
+      REXLOG_INFO("Native shader prewarm expedited for waiting draws: {}",stats.expedited);
       if(async_shaders)REXLOG_INFO("Native async shaders: not_ready_checks={}, enqueued={}, budget_blocks={}, budget_ms={}",
           async_not_ready,async_enqueued,async_budget_blocks,async_shader_budget.count());
     }
@@ -1620,6 +1714,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       REXLOG_INFO("Native GPU batch report saved to {}",gpu_batch_report_path.string());
     }catch(const std::exception& error) {
       REXLOG_WARN("Native GPU batch diagnostic export failed: {}",error.what());
+    }
+    gow3::renderer::hitch_trace::Stop();
+    try {gow3::renderer::edram_inventory::Flush();}catch(const std::exception& error) {
+      REXLOG_WARN("Native EDRAM inventory export failed: {}",error.what());
     }
     if(renderer&&!gpu_physical_report_path.empty())try {
       // Cold, nonsealing observation after ordinary shutdown synchronization.
@@ -1750,6 +1848,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         auto* destination=memory->TranslatePhysical(copy->destination);
         const auto* source=memory->TranslatePhysical(copy->source);
         if(!destination||!source)throw std::runtime_error("Direct memcpy has unmapped physical memory");
+        memory->PrepareHostWrite(destination,copy->bytes);
         std::memmove(destination,source,copy->bytes);
         ++direct_api_memory_copies;
       }
@@ -1809,6 +1908,11 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
 
   void QueuePlannerItem(PlannerItem&& item) {
     std::unique_lock lock(planner_mutex);
+    QueuePendingDirectInvalidation(lock);
+    PushPlannerItem(lock,std::move(item));
+  }
+  // planner_mutex held; waits for queue space.
+  void PushPlannerItem(std::unique_lock<std::mutex>& lock,PlannerItem&& item) {
     if(planner_queue.size()>=kPlannerQueueLimit) {
       ++planner_producer_waits;
       planner_space.wait(lock,[&]{return stopping||failed||planner_queue.size()<kPlannerQueueLimit;});
@@ -1818,6 +1922,13 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     planner_queue.push_back(std::move(item));++planner_items;
     planner_peak_queue=std::max(planner_peak_queue,planner_queue.size());
     if(planner_idle)planner_ready.notify_one();
+  }
+  // planner_mutex held. Every other item is queued after the held invalidation,
+  // so it keeps its API order.
+  void QueuePendingDirectInvalidation(std::unique_lock<std::mutex>& lock) {
+    if(!pending_direct_invalidation)return;
+    auto item=std::move(*pending_direct_invalidation);pending_direct_invalidation.reset();
+    PushPlannerItem(lock,std::move(item));
   }
   void StopPlanner() {
     if(async_planner&&processor)processor->SetDirectSwapRouter({});
@@ -1911,6 +2022,97 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       planner_space.notify_all();
     }
   }
+  // CPU writes caught since the last API boundary, copied at this boundary in
+  // API order. Guest thread only.
+  void QueueAsyncCpuInvalidations() {
+    for(const auto& [address,bytes]:memory_coherence.TakeInvalidated()) {
+      for(uint32_t offset=0;offset<bytes;offset+=NativeMemoryCoherence::kPage) {
+        const uint32_t first=address+offset,count=NativeMemoryCoherence::kPage;
+        // Identical to the synchronous path: copy under the SDK lock at the API point.
+        auto memory_lock=rex::thread::global_critical_region::AcquireDirect();
+        if(memory->IsExternalHostWritePending(first,count))
+          RejectUnsafeCoherence("overlapping_external_writer",first,count);
+        auto coherence_epoch=write_epochs[first/NativeMemoryCoherence::kPage].load();
+        std::vector<uint8_t> data;
+        const auto access=memory->GetPhysicalHeap()->QueryRangeAccess(first,first+count-1);
+        if(int(access)&int(rex::memory::PageAccess::kReadOnly)) {
+          auto snapshot=memory_coherence.CaptureCpuSnapshot(first,count,
+              [&](uint32_t address,uint32_t bytes) {
+                if(!memory->TryEnablePhysicalMemoryAccessCallbacks(address,bytes,true,false))
+                  RejectUnsafeCoherence("snapshot_rearm_failed",address,bytes);
+              },
+              [&] {return write_epochs[first/NativeMemoryCoherence::kPage].load();},
+              [&] {
+                const auto* source=memory->TranslatePhysical(first);
+                return std::vector<uint8_t>(source,source+count);
+              });
+          coherence_epoch=snapshot.first;
+          data=std::move(snapshot.second);
+        }
+        const auto published_epoch=write_epochs[first/NativeMemoryCoherence::kPage].load();
+        if(published_epoch!=coherence_epoch)
+          throw std::runtime_error(NativeMemoryCoherence::Conflict(
+              "publishing",first,count,coherence_epoch,published_epoch));
+        ownership_replica->InvalidateMemory(first,count);
+        PlannerItem item;item.invalidation=true;item.address=first;item.bytes=count;
+        item.data=std::move(data);item.coherence_epoch=coherence_epoch;
+        QueuePlannerItem(std::move(item));
+      }
+    }
+  }
+  // Direct execution: a GPU memcpy chunk whose source no GPU work owns copies
+  // CPU data, so it is performed at its API point like the guest expects, and
+  // only its destination's invalidation is ordered. Adjacent chunks of one
+  // move share a planner item. Guest thread only, before the event is captured.
+  bool DirectCpuMemoryCopy(const MemoryExportCopy& copy) {
+    if(!async_planner||!direct||stopping||failed||!ownership_replica||!planner_thread.joinable())return false;
+    if(!copy.bytes||uint64_t(copy.source)+copy.bytes>0x20000000ull||uint64_t(copy.destination)+copy.bytes>0x20000000ull)return false;
+    try {
+      QueueAsyncCpuInvalidations();
+      if(!ownership_replica->CpuOwned(copy.source,copy.bytes))return false;
+      auto* destination=memory->TranslatePhysical(copy.destination);
+      const auto* source=memory->TranslatePhysical(copy.source);
+      if(!destination||!source)throw std::runtime_error("Direct memcpy has unmapped physical memory");
+      memory->PrepareHostWrite(destination,copy.bytes);
+      std::memmove(destination,source,copy.bytes);
+      ++direct_api_memory_copies;++direct_unplanned_memory_copies;
+      if(direct_unplanned_memory_copies==1||direct_unplanned_memory_copies%100000==0)
+        REXLOG_INFO("Native unplanned direct CPU memcpy chunks: {}",direct_unplanned_memory_copies);
+      ownership_replica->InvalidateMemory(copy.destination,copy.bytes);
+      uint64_t epoch=0;
+      for(uint32_t page=copy.destination/NativeMemoryCoherence::kPage;
+          page<=(copy.destination+copy.bytes-1)/NativeMemoryCoherence::kPage;++page)
+        epoch=std::max(epoch,write_epochs[page].load());
+      // A move's chunks are adjacent. The planner empties its queue between
+      // chunks, so hold the invalidation back and extend it, bounded; the
+      // next item of any other kind queues it first.
+      std::unique_lock lock(planner_mutex);
+      for(uint32_t offset=0;offset<copy.bytes;) {
+        const uint32_t address=copy.destination+offset;
+        uint32_t bytes=std::min(copy.bytes-offset,kMaxQueuedInvalidation);
+        auto& pending=pending_direct_invalidation;
+        if(pending&&pending->bytes<kMaxQueuedInvalidation&&uint64_t(pending->address)+pending->bytes==address) {
+          bytes=std::min(bytes,kMaxQueuedInvalidation-pending->bytes);
+          pending->bytes+=bytes;pending->coherence_epoch=std::max(pending->coherence_epoch,epoch);
+        } else {
+          QueuePendingDirectInvalidation(lock);
+          if(stopping||failed)return true;
+          PlannerItem item;item.invalidation=true;item.address=address;item.bytes=bytes;
+          item.coherence_epoch=epoch;
+          pending=std::move(item);
+        }
+        offset+=bytes;
+      }
+      return true;
+    } catch(const std::exception& error) {
+      Fail(last_async_frame,error.what());
+      planner_failure_reported=true;
+      throw;
+    }
+  }
+  static constexpr uint32_t kMaxQueuedInvalidation=16u<<20;
+  uint32_t last_async_frame=0;
+  uint64_t direct_unplanned_memory_copies=0;
   void PushAsync(GraphicsBoundaryEvent&& event) {
     if(stopping)return;
     if(failed) {
@@ -1918,12 +2120,16 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       if(std::exchange(planner_failure_reported,true))return;
       throw std::runtime_error("Native renderer failed; async planner stopped");
     }
-    if(!ownership_replica)
+    if(!ownership_replica) {
       ownership_replica=std::make_unique<GearsLiveOwnership>([this](uint32_t address,uint32_t bytes){memory_coherence.Watch(address,bytes);});
+      ownership_replica->SetDirectCpuMemoryCopies(direct);
+    }
     if(!planner_thread.joinable()) {
       planner_thread=std::thread([this]{PlannerLoop();});
       processor->SetDirectSwapRouter([this](std::function<void()>& swap) {
         std::unique_lock lock(planner_mutex);
+        if(stopping||failed)return false;
+        QueuePendingDirectInvalidation(lock);
         if(stopping||failed)return false;
         PlannerItem item;item.swap=std::move(swap);
         planner_queue.push_back(std::move(item));++planner_items;
@@ -1932,42 +2138,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       });
     }
     const auto frame_number=event.frame;
+    last_async_frame=frame_number;
     const auto captured_write_epoch=next_write_epoch.load();
     try {
-      for(const auto& [address,bytes]:memory_coherence.TakeInvalidated()) {
-        for(uint32_t offset=0;offset<bytes;offset+=NativeMemoryCoherence::kPage) {
-          const uint32_t first=address+offset,count=NativeMemoryCoherence::kPage;
-          // Identical to the synchronous path: copy under the SDK lock at the API point.
-          auto memory_lock=rex::thread::global_critical_region::AcquireDirect();
-          if(memory->IsExternalHostWritePending(first,count))
-            RejectUnsafeCoherence("overlapping_external_writer",first,count);
-          auto coherence_epoch=write_epochs[first/NativeMemoryCoherence::kPage].load();
-          std::vector<uint8_t> data;
-          const auto access=memory->GetPhysicalHeap()->QueryRangeAccess(first,first+count-1);
-          if(int(access)&int(rex::memory::PageAccess::kReadOnly)) {
-            auto snapshot=memory_coherence.CaptureCpuSnapshot(first,count,
-                [&](uint32_t address,uint32_t bytes) {
-                  if(!memory->TryEnablePhysicalMemoryAccessCallbacks(address,bytes,true,false))
-                    RejectUnsafeCoherence("snapshot_rearm_failed",address,bytes);
-                },
-                [&] {return write_epochs[first/NativeMemoryCoherence::kPage].load();},
-                [&] {
-                  const auto* source=memory->TranslatePhysical(first);
-                  return std::vector<uint8_t>(source,source+count);
-                });
-            coherence_epoch=snapshot.first;
-            data=std::move(snapshot.second);
-          }
-          const auto published_epoch=write_epochs[first/NativeMemoryCoherence::kPage].load();
-          if(published_epoch!=coherence_epoch)
-            throw std::runtime_error(NativeMemoryCoherence::Conflict(
-                "publishing",first,count,coherence_epoch,published_epoch));
-          ownership_replica->InvalidateMemory(first,count);
-          PlannerItem item;item.invalidation=true;item.address=first;item.bytes=count;
-          item.data=std::move(data);item.coherence_epoch=coherence_epoch;
-          QueuePlannerItem(std::move(item));
-        }
-      }
+      QueueAsyncCpuInvalidations();
       const auto decision=ownership_replica->Observe(event);
       if(decision.texture_count) {
         const auto blocks=std::span<GraphicsBoundaryBlock* const>(decision.textures).first(decision.texture_count);
@@ -1983,6 +2157,9 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         auto* destination=memory->TranslatePhysical(copy->destination);
         const auto* source=memory->TranslatePhysical(copy->source);
         if(!destination||!source)throw std::runtime_error("Direct memcpy has unmapped physical memory");
+        // Texture streaming moves thousands of chunks into snapshotted pages;
+        // a write fault per page under the global lock stalls every thread.
+        memory->PrepareHostWrite(destination,copy->bytes);
         std::memmove(destination,source,copy->bytes);
         ++direct_api_memory_copies;
       }
@@ -2085,6 +2262,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     config.batch_transfers=native_raster&&REXCVAR_GET(gow3_native_batch_transfers);
     config.unified_gpu_queue=unified_gpu_queue;
     config.queue_cpu_memory_writes=queue_cpu_memory_writes;
+    config.queue_cpu_memory_copies=queue_cpu_memory_copies;
     config.diagnose_marker_query_cohorts=REXCVAR_GET(gpu_command_summary);
     config.reuse_cpu_write_upload=native_raster&&REXCVAR_GET(gow3_native_reuse_cpu_write_upload);
     config.forward_cpu_upload_receipts=native_raster&&REXCVAR_GET(gow3_native_forward_cpu_upload_receipts);
@@ -2119,6 +2297,13 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     config.texture_probe_hashes=REXCVAR_GET(gow3_native_texture_probe_hashes);
     config.native_fsi = description.ordered_pixel_interlock && description.features.fragmentStoresAndAtomics &&
         !REXCVAR_GET(gow3_native_hardware_render_targets);
+    if(!config.native_fsi) {
+      // Hardware render targets see every material's own pipelines; keep all
+      // recorded ones resident instead of evicting them as new areas load.
+      config.max_shader_cache_entries=kHardwareShaderCacheEntries;
+      config.max_shader_cache_bytes=kHardwareShaderCacheBytes;
+      config.max_pipeline_cache_entries=kHardwarePipelineCacheEntries;
+    }
     config.retain_fsi_raster_extent=REXCVAR_GET(gow3_native_retain_fsi_raster_extent);
     config.discard_dummy_fsi_attachment=REXCVAR_GET(gow3_native_discard_dummy_fsi_attachment);
     config.attachmentless_fsi=REXCVAR_GET(gow3_native_attachmentless_fsi);
@@ -2161,6 +2346,13 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     config.direct_atlas_depth_resolves=native_raster&&REXCVAR_GET(gow3_native_direct_atlas_depth_resolves);
     config.fused_packed_atlas_resolves=native_raster&&REXCVAR_GET(gow3_native_fused_packed_atlas_resolves);
     config.canonical_resolve_stores=native_raster&&REXCVAR_GET(gow3_native_canonical_resolve_stores);
+    config.direct_resolve_textures=native_raster&&REXCVAR_GET(gow3_native_direct_resolve_textures);
+    config.verify_direct_resolve_textures=config.direct_resolve_textures&&
+        REXCVAR_GET(gow3_native_verify_direct_resolve_textures);
+    config.deferred_resolve_stores=config.direct_resolve_textures&&REXCVAR_GET(gow3_native_deferred_resolve_stores);
+    config.hardware_skip_full_clear_restore=REXCVAR_GET(gow3_native_hardware_skip_full_clear_restore);
+    config.hardware_lazy_commits=REXCVAR_GET(gow3_native_hardware_lazy_commits);
+    config.hardware_direct_fixed_resolves=REXCVAR_GET(gow3_native_hardware_direct_fixed_resolves);
     config.direct_packed_color_resolves=native_raster&&REXCVAR_GET(gow3_native_direct_packed_color_resolves);
     config.skip_full_color_clear_restore=REXCVAR_GET(gow3_native_skip_full_color_clear_restore);
     config.recycle_resolve_images=REXCVAR_GET(gow3_native_recycle_resolve_images);
@@ -2170,6 +2362,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     config.reuse_resolve_identity_views=REXCVAR_GET(gow3_native_reuse_resolve_identity_views);
     config.diagnose_texture_eviction_reloads=REXCVAR_GET(gow3_native_diagnose_texture_eviction_reloads);
     config.recycle_vertex_buffers=REXCVAR_GET(gow3_native_recycle_vertex_buffers);
+    config.vertex_arena=REXCVAR_GET(gow3_native_vertex_arena);
     config.compact_resolve_channels=REXCVAR_GET(gow3_native_compact_resolve_channels);
     config.storage_image_extended_formats_enabled=description.features.shaderStorageImageExtendedFormats;
     config.implicit_fsi_barriers=REXCVAR_GET(gow3_native_implicit_fsi_barriers);
@@ -2271,6 +2464,159 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     device=std::move(initializing_device);queue=std::move(initializing_queue);renderer=std::move(initializing_renderer);
   }
 
+  // Hardware render target mode: compile the recorded shaders, then build each
+  // recorded pipeline on the CP thread before the guest starts.
+  void PrepareObservedHardwarePipelines(rex::graphics::ShaderStorageProgress &progress,
+                                        std::vector<ObservedNativePipeline> recipes) {
+    using Phase = rex::graphics::ShaderStorageProgress::Phase;
+    using Outcome = rex::graphics::ShaderStorageProgress::Outcome;
+    std::erase_if(recipes,[](const auto& item){return item.recipe.hardware.empty();});
+    std::map<std::string, NativeShaderPrewarmQueue::Job> sources;
+    for (const auto &item : recipes) {
+      sources.try_emplace(item.recipe.vertex + ".raster",
+                          NativeShaderPrewarmQueue::Job{item.recipe.vertex + ".raster", item.vertex, false});
+      if (item.pixel)
+        sources.try_emplace(*item.recipe.pixel + ".raster",
+                            NativeShaderPrewarmQueue::Job{*item.recipe.pixel + ".raster", item.pixel, false});
+    }
+    progress.Begin(Phase::kShaders, sources.size());
+    {
+      NativeShaderPrewarmQueue prepare(
+          [this, &progress](const NativeShaderPrewarmQueue::Job &job) {
+            if (stopping) {
+              progress.Advance(false);
+              return;
+            }
+            try {
+              compiler.Get(*job.source, NativeShaderMode::Raster);
+              progress.Advance();
+            } catch (...) {
+              progress.Advance(false);
+              throw;
+            }
+          },
+          unsigned(REXCVAR_GET(gow3_native_shader_prewarm_threads)));
+      for (auto &[key, job] : sources)
+        if (!stopping)
+          prepare.TryEnqueue(job);
+      prepare.Drain();
+      prepare.StopAndJoin();
+    }
+    struct Prepared {
+      NativeFsiPipelineRecipe recipe;
+      std::shared_ptr<const CompiledNativeShader> vertex, pixel;
+    };
+    std::vector<Prepared> prepared;
+    std::set<std::string> modules;
+    size_t module_bytes = 0;
+    uint64_t failed = 0, capped = 0;
+    // Three quarters of the Scene's hardware pipeline and shader cache limits,
+    // so the first new area does not immediately evict prepared entries.
+    for (const auto &item : recipes) {
+      if (stopping)
+        break;
+      if (prepared.size() >= kHardwarePipelineCacheEntries * 3 / 4) {
+        ++capped;
+        continue;
+      }
+      try {
+        auto vs = compiler.Get(*item.vertex, NativeShaderMode::Raster);
+        auto ps = item.pixel ? compiler.Get(*item.pixel, NativeShaderMode::Raster) : nullptr;
+        if (vs->stage != NativeShaderStage::Vertex || vs->source_sha256 != item.recipe.vertex ||
+            (ps && (ps->stage != NativeShaderStage::Pixel || ps->source_sha256 != *item.recipe.pixel)))
+          throw std::runtime_error("Observed hardware recipe source stage/identity mismatch");
+        const std::string vk = item.recipe.vertex, pk = item.recipe.pixel ? *item.recipe.pixel : std::string();
+        const size_t extra_count = size_t(!modules.contains(vk)) + size_t(ps && !modules.contains(pk));
+        const size_t extra_bytes = (modules.contains(vk) ? 0 : vs->spirv.size() * 4) +
+                                   (!ps || modules.contains(pk) ? 0 : ps->spirv.size() * 4);
+        if (modules.size() + extra_count > kHardwareShaderCacheEntries * 3 / 4 ||
+            extra_bytes > kHardwareShaderCacheBytes * 3 / 4 - module_bytes) {
+          ++capped;
+          continue;
+        }
+        modules.insert(vk);
+        if (ps)
+          modules.insert(pk);
+        module_bytes += extra_bytes;
+        prepared.push_back({item.recipe, std::move(vs), std::move(ps)});
+      } catch (const std::exception &error) {
+        ++failed;
+        REXLOG_WARN("Observed hardware pipeline source refused: {}", error.what());
+      }
+    }
+    REXLOG_INFO("Observed hardware pipeline admission: requested={}, selected={}, failed={}, capped={}, modules={}, module_bytes={}",
+                recipes.size(), prepared.size(), failed, capped, modules.size(), module_bytes);
+    if (stopping || prepared.empty() || processor->is_paused()) {
+      progress.Finish();
+      return;
+    }
+    progress.Begin(Phase::kPipelines, prepared.size());
+    std::weak_ptr<RuntimeState> weak = shared_from_this();
+    auto task = std::make_shared<NativePipelineStartupTask>([weak, &progress, prepared = std::move(prepared)] {
+      auto owner = weak.lock();
+      if (!owner || owner->stopping)
+        return;
+      owner->Initialize();
+      const auto began = std::chrono::steady_clock::now();
+      uint64_t loaded = 0, skipped = 0;
+      for (const auto &item : prepared) {
+        if (owner->stopping)
+          break;
+        try {
+          owner->renderer->PrewarmHardwarePipeline(item.recipe, item.vertex->spirv,
+              item.pixel ? std::span<const uint32_t>(item.pixel->spirv) : std::span<const uint32_t>());
+          ++loaded;
+          progress.Advance(Outcome::kPrepared);
+        } catch (const std::exception &error) {
+          ++skipped;
+          progress.Advance(false);
+          REXLOG_WARN("Hardware pipeline preparation skipped: {}", error.what());
+        }
+      }
+      REXLOG_INFO("Observed hardware pipeline preparation: loaded={}, skipped={}, cancelled={}, {:.0f} ms",
+                  loaded, skipped, owner->stopping.load(),
+                  std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count());
+    });
+    auto finished = task->Future();
+    processor->CallInThread([task] { task->Run(); });
+    const auto admission_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (finished.wait_for(std::chrono::milliseconds(10)) != std::future_status::ready) {
+      if (stopping || std::chrono::steady_clock::now() >= admission_deadline) {
+        if (task->CancelPending())
+          REXLOG_INFO("Native observed pipeline preparation cancelled before CP admission");
+      }
+    }
+    finished.get();
+    progress.Finish();
+  }
+  // Startup worker, before the guest runs. Closing the window stops it; what
+  // it compiled is kept and the next start continues.
+  void PrecompileGameShaders(rex::graphics::ShaderStorageProgress &progress,
+                             const std::vector<std::filesystem::path> &inputs) {
+    using Phase = rex::graphics::ShaderStorageProgress::Phase;
+    ShaderPrecompileCallbacks callbacks;
+    callbacks.begin = [&progress](ShaderPrecompilePhase phase, size_t total) {
+      progress.Begin(phase == ShaderPrecompilePhase::kFinding ? Phase::kFinding : Phase::kShaders, total);
+    };
+    callbacks.advance = [&progress](bool succeeded) { progress.Advance(succeeded); };
+    callbacks.stopping = [this] { return stopping.load(); };
+    const auto started = std::chrono::steady_clock::now();
+    auto result = PrecompileShaders(native_shader_cache.parent_path().parent_path(), inputs,
+                                    std::thread::hardware_concurrency(), true, callbacks);
+    if (result.up_to_date) {
+      REXLOG_INFO("Shader precompile: up to date ({} packages checked in {:.2f} s)", result.packages,
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+      return;
+    }
+    REXLOG_INFO("Shader precompile: {} packages, {} pixel shaders, {} compiled, {} already cached, {} failed in {:.1f} s{}",
+                result.packages, result.shaders, result.compiled.size(), result.already, result.failed,
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(),
+                result.complete ? "" : " (stopped)");
+    // On disk now: discovery loads them ahead of their draws.
+    std::lock_guard lock(on_disk->mutex);
+    for (auto &hash : result.compiled) on_disk->keys.insert(std::move(hash));
+  }
+
   void PrepareObservedPipelines(rex::graphics::ShaderStorageProgress &progress) {
     using Phase = rex::graphics::ShaderStorageProgress::Phase;
     using Outcome = rex::graphics::ShaderStorageProgress::Outcome;
@@ -2280,6 +2626,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     auto recipes = pipeline_recipes->Load();
     if (recipes.empty() || stopping) {
       progress.Finish();
+      return;
+    }
+    if (hardware_pipeline_recipes) {
+      PrepareObservedHardwarePipelines(progress, std::move(recipes));
       return;
     }
     auto state_records=fsi_state_recipes?fsi_state_recipes->Load(recipes):std::vector<RankedNativeFsiStateRecipe>{};
@@ -3426,7 +3776,8 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     cpu_write_queue_decisions.null_payloads+=control.at("payload").is_null();
     if(!queue_cpu_memory_writes||!unified_gpu_queue) {++cpu_write_queue_decisions.disabled;return false;}
     const uint32_t address=control.at("address"),count=control.at("bytes");
-    if(!NativeCpuWriteQueueEligible(true,true,address,count)) {++cpu_write_queue_decisions.bounds_refused;return false;}
+    const auto eligible=control.at("payload").is_null()?NativeCpuInvalidationQueueEligible:NativeCpuWriteQueueEligible;
+    if(!eligible(true,true,address,count)) {++cpu_write_queue_decisions.bounds_refused;return false;}
     const auto refuse_report=[&] {++cpu_write_queue_decisions.query_report_refused;return false;};
     // Generic CPU updates do not supersede SDK publication tickets. Keep the
     // exact pre-update completion/publication order for any report overlap,
@@ -3438,6 +3789,28 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     if(current_query_end&&NativeCpuWriteOverlapsQueryReport(address,count,current_query_end->boundary.end_address))return refuse_report();
     ++cpu_write_queue_decisions.queued;return true;
   }
+
+  // A guest GPU copy of CPU data. Its result is exactly the payload, so the
+  // guest copy is written from that (direct execution already wrote it at the
+  // API point) and the GPU history copy is ordered in the batch like a queued
+  // CPU write, instead of draining the GPU first and reading the result back.
+  bool QueueCpuMemoryCopy(const LiveOperation& operation) {
+    if(!queue_cpu_memory_copies)return false;
+    const auto& control=operation.Control();
+    if(control.at("source_kind")!="cpu_snapshot"&&control.at("source_kind")!="cpu_direct")return false;
+    const uint32_t destination=control.at("destination"),count=control.at("bytes");
+    if(!count||uint64_t(destination)+count>0x20000000ull)return false;
+    for(const auto& pending:pending_query_publications)
+      if(NativeCpuWriteOverlapsQueryReport(destination,count,pending.boundary.end_address))return false;
+    for(size_t i=next_ready_query;i<ready_query_publications.size();++i)
+      if(NativeCpuWriteOverlapsQueryReport(destination,count,ready_query_publications[i].result.end_address))return false;
+    if(current_query_end&&NativeCpuWriteOverlapsQueryReport(destination,count,current_query_end->boundary.end_address))
+      return false;
+    if(++queued_cpu_memory_copies==1||queued_cpu_memory_copies%1000==0)
+      REXLOG_INFO("Native queued CPU memory copies: {} (latest {} bytes)",queued_cpu_memory_copies,count);
+    return true;
+  }
+  uint64_t queued_cpu_memory_copies=0;
   void ExecuteOperation(const LiveOperation& operation) {
     // Provider entry points stop new admission. A close request during an
     // already-entered immutable prefix must let that prefix finish: interrupting
@@ -3448,7 +3821,8 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     if(REXCVAR_GET(gpu_command_summary))processor->ObserveNativeMarkerOperation(operation_type);
     const bool deferred_query=deferred_queries&&(operation_type=="query_begin"||operation_type=="query_end");
     const bool queued_cpu_write=operation_type=="cpu_memory_write"&&QueueCpuWrite(operation);
-    const bool queued_transfer=unified_gpu_queue&&(operation_type=="clearrect"||operation_type=="resolve"||queued_cpu_write);
+    const bool queued_copy=operation_type=="memory_copy"&&QueueCpuMemoryCopy(operation);
+    const bool queued_transfer=unified_gpu_queue&&(operation_type=="clearrect"||operation_type=="resolve"||queued_cpu_write||queued_copy);
     if(operation_type!="draw"&&!deferred_query&&!queued_transfer)
       CompletePending(diagnose_completion_causes?CompletionCauseForOperation(operation_type):CompletionCause::Unclassified);
     const auto began = time_cpu_stages?std::chrono::steady_clock::now():std::chrono::steady_clock::time_point{};
@@ -3495,15 +3869,32 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     }
     // Direct execution copied CPU-sourced bytes at the API point; writing the
     // GPU result back now could overwrite newer CPU writes.
-    if(copy&&direct&&operation.Control().at("source_kind")=="cpu_snapshot") {
+    if(copy&&direct&&(operation.Control().at("source_kind")=="cpu_snapshot"||operation.Control().at("source_kind")=="cpu_direct")) {
+    } else if(copy&&queued_copy) {
+      const auto* found=active_frame?active_frame->FindResource(
+          operation.Control().at("payload").get<std::string>()):nullptr;
+      if(!found||!*found||(*found)->size()!=copy_bytes)
+        throw NativeTransactionFatal("Queued native memcpy payload is unavailable");
+      if(!direct) {
+        if(LatestCpuWrite(copy_source,copy_bytes)!=copy_source_epoch||LatestCpuWrite(copy_destination,copy_bytes)!=copy_destination_epoch)
+          throw NativeTransactionFatal("CPU changed native memcpy memory during GPU execution");
+        memory->PrepareHostWrite(memory->TranslatePhysical(copy_destination),copy_bytes);
+        std::memcpy(memory->TranslatePhysical(copy_destination),(*found)->data(),copy_bytes);
+        if(LatestCpuWrite(copy_source,copy_bytes)!=copy_source_epoch||LatestCpuWrite(copy_destination,copy_bytes)!=copy_destination_epoch)
+          throw NativeTransactionFatal("CPU changed native memcpy memory during guest publication");
+      }
     } else if(copy&&direct) {
-      const auto data=renderer->ReadPhysical(copy_destination,copy_bytes);
-      std::memcpy(memory->TranslatePhysical(copy_destination),data.data(),data.size());
+      auto data=renderer->TakeCopyPublication(copy_destination,copy_bytes);
+      if(!data)data=renderer->ReadPhysical(copy_destination,copy_bytes);
+      memory->PrepareHostWrite(memory->TranslatePhysical(copy_destination),data->size());
+      std::memcpy(memory->TranslatePhysical(copy_destination),data->data(),data->size());
     } else if(copy) {
-      const auto data=renderer->ReadPhysical(copy_destination,copy_bytes);
+      auto data=renderer->TakeCopyPublication(copy_destination,copy_bytes);
+      if(!data)data=renderer->ReadPhysical(copy_destination,copy_bytes);
       if(LatestCpuWrite(copy_source,copy_bytes)!=copy_source_epoch||LatestCpuWrite(copy_destination,copy_bytes)!=copy_destination_epoch)
         throw NativeTransactionFatal("CPU changed native memcpy memory during GPU execution");
-      std::memcpy(memory->TranslatePhysical(copy_destination),data.data(),data.size());
+      memory->PrepareHostWrite(memory->TranslatePhysical(copy_destination),data->size());
+      std::memcpy(memory->TranslatePhysical(copy_destination),data->data(),data->size());
       if(LatestCpuWrite(copy_source,copy_bytes)!=copy_source_epoch||LatestCpuWrite(copy_destination,copy_bytes)!=copy_destination_epoch)
         throw NativeTransactionFatal("CPU changed native memcpy memory during guest publication");
     }
@@ -3529,6 +3920,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   }
 
   void RecordPresentationInterval(uint32_t frame,size_t operations) {
+    gow3::renderer::hitch_trace::FrameCompleted();
     const auto now=std::chrono::steady_clock::now();
     if(frame_journal.Active()) {
       NativeFrameJournal::Row row;
@@ -3616,6 +4008,30 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
   // Direct execution, on the CP thread in API order: every operation up to and
   // including this query end, draws included. The result publishes when its
   // fence retires (PublishReadyQueries), never by draining here.
+  // Consecutive memory copies and CPU writes share one transfer scope, so one
+  // GPU command list per 64 of them instead of one each. A texture streaming
+  // burst issues thousands per frame; per-operation lists filled the GPU work
+  // queue and held the command thread on fences while the game waited on its
+  // occlusion query behind them. A run never outlives this batch, so nothing
+  // recorded is left unsubmitted while the command thread idles.
+  void ExecuteOperations(const LiveOperations& operations) {
+    bool open=false;size_t run=0;
+    try {
+      for(const auto& operation:operations) {
+        const auto kind=operation.Kind();
+        const bool transfer=native_raster&&(kind=="memory_copy"||kind=="cpu_memory_write");
+        if(open&&(!transfer||run==64)){renderer->EndTransferRun();open=false;}
+        if(transfer&&!open){renderer->BeginTransferRun(operation.Event());open=true;run=0;}
+        ExecuteOperation(operation);
+        run+=transfer;
+      }
+      if(open){open=false;renderer->EndTransferRun();}
+    } catch(...) {
+      if(open)renderer->AbortTransferRun();
+      throw;
+    }
+  }
+
   void DirectQuery(LiveQueryPrefix prefix,uint64_t captured_write_epoch) {
     if(stopping||failed)return;
     const uint32_t frame_number=prefix.batch->frame;
@@ -3630,7 +4046,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         // A plain batch: no query end to register.
         active_capture_epoch=captured_write_epoch;
         RecordCpuWriteCohorts(active_frame->operations,0,active_frame->operations.size(),CpuWriteCohortPrefix::Packet);
-        for(const auto& operation:active_frame->operations)ExecuteOperation(operation);
+        ExecuteOperations(active_frame->operations);
         executed_operations=prefix.operation_end;
         active_frame.reset();
         return;
@@ -3644,7 +4060,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         CompleteQueryPressure(false);
       active_capture_epoch=captured_write_epoch;
       RecordCpuWriteCohorts(active_frame->operations,0,active_frame->operations.size(),CpuWriteCohortPrefix::Query);
-      for(const auto& operation:active_frame->operations)ExecuteOperation(operation);
+      ExecuteOperations(active_frame->operations);
       executed_operations=prefix.operation_end;
       latest_executed_query_generation=prefix.generation;
       pending_query_publications.push_back(*current_query_end);
@@ -3684,7 +4100,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
        prefix.operation_end-prefix.first_operation!=active_frame->operations.size())
       throw std::runtime_error("Native packet prefix is missing or repeats ordered operations");
     RecordCpuWriteCohorts(active_frame->operations,0,active_frame->operations.size(),CpuWriteCohortPrefix::Packet);
-    for(const auto& operation:active_frame->operations)ExecuteOperation(operation);
+    ExecuteOperations(active_frame->operations);
     executed_operations=prefix.operation_end;
     active_frame.reset();
   }
@@ -4002,6 +4418,43 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     }
   }
 
+  // A new area's first frames skip every draw whose shader or pipeline is
+  // still compiling, which shows as black surfaces that fill in. While enough
+  // of the presented frames' draws are missing, keep the last complete frame
+  // on screen instead, for a bounded time; the game itself keeps running. A
+  // few missing draws (one new object) are shown rather than held, which
+  // would read as a stutter.
+  bool HoldIncompleteFrame() {
+    static const auto limit=std::chrono::milliseconds(std::max(0,REXCVAR_GET(gow3_native_hold_incomplete_frames_ms)));
+    if(!renderer)return false;
+    const auto counts=renderer->ObserveCompileSkips();
+    const uint64_t draws=counts.draws-presented_skips.draws,skipped=counts.skipped-presented_skips.skipped;
+    presented_skips=counts;
+    const auto now=std::chrono::steady_clock::now();
+    // Start holding when 1 in 4 draws is missing, as in a new area or a
+    // cutscene's first shots; new enemies mid-fight miss far fewer, and a
+    // frozen frame there is a stutter. Once holding, keep going until none is
+    // missing, so the last few surfaces do not fill in on screen. One complete
+    // frame may come between incomplete ones (a pass that does not draw every
+    // frame), so the hold ends after two in a row.
+    const bool starts=skipped&&skipped*4>=draws;
+    if(!limit.count()||(!hold_started&&!starts)||(hold_started&&!skipped&&++clean_frames>=2)) {
+      if(hold_started&&held_frames)
+        REXLOG_INFO("Native presentation held {} frames; draws waited on compiles for {:.0f} ms",held_frames,
+            std::chrono::duration<double,std::milli>(now-*hold_started).count());
+      hold_started.reset();held_frames=0;clean_frames=0;
+      CompileSlot::SetCompileBoost(false);return false;
+    }
+    CompileSlot::SetCompileBoost(true);
+    if(skipped)clean_frames=0;
+    if(!hold_started) {
+      hold_started=now;
+      REXLOG_INFO("Native presentation hold: {} of {} draws wait on compiles",skipped,draws);
+    }
+    if(now-*hold_started>=limit)return false;  // Show the gaps rather than freeze longer.
+    ++held_frames;return true;
+  }
+
   std::optional<Processor::NativeSwapSource> Present(uint32_t frame, uint32_t, uint32_t width, uint32_t height) {
     if(stopping)return std::nullopt;
     if(failed) {
@@ -4147,6 +4600,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         std::shared_ptr<plume::RenderTexture> image;
       };
       Processor::NativeSwapSource source;
+      source.hold = HoldIncompleteFrame();
       source.device = description.device;
       source.image = texture.vk;
       source.view = texture.imageView;
@@ -4275,7 +4729,8 @@ void Gow3StartNativeRenderer(rex::graphics::GraphicsSystem* graphics, const std:
       });
       REXLOG_INFO("Native direct execution: guest D3D runs GPU-less; API calls execute without the PM4 command processor");
     }
-    Gow3SetGraphicsBoundarySink([state](GraphicsBoundaryEvent&& event) { state->Push(std::move(event)); });
+    Gow3SetGraphicsBoundarySink([state](GraphicsBoundaryEvent&& event) { state->Push(std::move(event)); },
+        [state](const MemoryExportCopy& copy) { return state->DirectCpuMemoryCopy(copy); });
     state->StartShaderPrewarm();
     // One synchronous CP transaction installs all providers before guest boot.
     // Startup failure propagates to the app and cannot launch a Xenia scene.
@@ -4405,10 +4860,19 @@ void Gow3StopNativeRenderer() {
   // presented images complete, while the host Vulkan device is still alive.
 }
 
-std::function<void(rex::graphics::ShaderStorageProgress&)> Gow3CreateNativePipelinePrewarmTask() {
+std::function<void(rex::graphics::ShaderStorageProgress&)> Gow3CreateNativePipelinePrewarmTask(
+    std::vector<std::filesystem::path> shader_inputs) {
   // UI-thread factory: never read global running from the background loader.
-  auto state=running;if(!state||!state->pipeline_recipes)return {};
-  return [state=std::move(state)](rex::graphics::ShaderStorageProgress& progress) {
+  auto state=running;if(!state)return {};
+  if(!REXCVAR_GET(gow3_native_shader_precompile))shader_inputs.clear();
+  if(!state->pipeline_recipes&&shader_inputs.empty())return {};
+  return [state=std::move(state),shader_inputs=std::move(shader_inputs)](rex::graphics::ShaderStorageProgress& progress) {
+    // Shaders first: the pipelines built next then find theirs compiled.
+    if(!shader_inputs.empty()) {
+      try {state->PrecompileGameShaders(progress,shader_inputs);}
+      catch(const std::exception& error){REXLOG_WARN("Shader precompile unavailable: {}",error.what());}
+    }
+    if(!state->pipeline_recipes||state->stopping)return;
     try {state->PrepareObservedPipelines(progress);}
     catch(const std::exception& error){REXLOG_WARN("Native observed pipeline preparation unavailable: {}",error.what());progress.Finish();}
   };

@@ -30,7 +30,25 @@ the command line:
 python3 tools/import-assets.py import "/path/to/gow3.iso"   # or a game folder
 python3 tools/import-assets.py dlc ~/Downloads               # DLC folders/archives
 python3 tools/setup-wizard.py --dlc                          # add DLC later
+python3 tools/setup-wizard.py --shaders                      # rescan and precompile shaders by hand
 ```
+
+At start, before the game runs, the native renderer compiles every pixel
+shader in the game files that isn't compiled yet, behind a progress bar
+("FINDING SHADERS", then "PREPARING SHADERS"). The first visit to an area then
+doesn't stall while its shaders compile. It decompresses the cooked packages,
+extracts the LZX-compressed shader units from each package's shader cache, and
+compiles them with the game's own compiler into `user/cache/native-shaders`.
+
+With the DLC that's about 142,000 shaders: roughly 20 minutes on a 16-thread
+CPU and 7.4 GB of cache, on the first start only. Later starts check the
+package files' names, sizes and times against the last complete run, which
+takes a fraction of a second; new DLC or a changed compiler triggers a rescan
+that only compiles what's missing. Closing the window during the first run is
+safe: what's compiled is kept and the next start continues. Set
+`gow3_native_shader_precompile = false` to skip it. Vertex shaders are not
+covered: the game links them against each mesh's vertex layout when it loads
+them, which rewrites their instructions, so they still compile in game.
 
 Each game has a definition in `tools/assets/games/` (`gow3.json` here): its
 executable, every base-game file with its size and SHA-256, and its known DLC
@@ -101,8 +119,9 @@ package is available at configure time. Otherwise it uses the bundled portable
 implementation with identical cache keys. Set `-DGOW3_NATIVE_ACCELERATED_HASH=OFF`
 to build without that optional dependency. Accelerated dynamic builds require
 the matching OpenSSL Crypto runtime library on the destination machine.
-Mouse and keyboard controls (`mnk_mode`) are switched on in the settings GUI's
-Input tab or with `--mnk_mode=true`; a controller keeps working alongside them.
+Mouse and keyboard controls (`mnk_mode`) are on by default; switch them off in
+the settings GUI's Input tab or with `--mnk_mode=false`. A controller keeps
+working alongside them.
 Keys act as controller buttons. The mouse aims with the engine's own mouse look:
 after the engine passes the controllers' axes to its viewport client
 (`0x8296DCB8`), the game also passes mouse motion as the `MouseX` and `MouseY`
@@ -113,16 +132,33 @@ with the game's stick aiming feel, for example for a gyro mapped to the mouse.
 locked: Wayland pointer constraints with unaccelerated relative motion, or a
 grab with re-centering on X11.
 
+Each player slot has its own controller settings (`controller1_*` to
+`controller4_*`; settings app tabs Controller 1 to 4). Player 1 stays the main
+profile's controller: the game remembers it (`user/player1-controller.txt`)
+and gives it player 1 at startup even if another pad is listed first;
+controllers connected while playing take the next free slot.
+
 Controllers with a gyro (DualSense, DualShock 4, Switch Pro and others SDL
 reads motion sensors from) can aim with it; it is off by default
-(`gyro_mode = "off"`). `"mouse"` passes the rotation through the same mouse
-look, at one camera degree per controller degree times `gyro_sensitivity` (the
-game turns 60/65536 of a turn per mouse count); `"joystick"` adds it to the
-right stick instead, starting at `gyro_stick_deadzone` (the game's 0.3 look dead
-zone). Like Steam Input, it is then always on unless
-`gyro_activation = "aiming"` limits it to while the left trigger is held, and
-`gyro_turn_axis` picks yaw (the default), roll or player space. The gyro
-calibrates itself whenever the controller rests.
+(`controllerN_gyro_mode = "off"`). `"mouse"` passes the rotation through the
+same mouse look, at one camera degree per controller degree times
+`controllerN_gyro_sensitivity` (the game turns 60/65536 of a turn per mouse
+count); `"joystick"` adds it to the right stick instead, starting at
+`controllerN_gyro_stick_deadzone` (the game's 0.3 look dead zone). Like Steam
+Input, it is then always on, unless `controllerN_gyro_activation` is `"aiming"`
+(while the left trigger is held) or `"button"` (while an input mapped to
+`gyro` is held). `controllerN_gyro_turn_axis` picks yaw (the default), roll or
+player space. The gyro calibrates itself whenever the controller rests. Older
+configs' `gyro_*` settings become player 1's.
+
+`controllerN_buttons` remaps inputs as comma-separated `source=target` pairs,
+for example `rpaddle1=gyro,lpaddle1=a,touchpad=back`; unlisted inputs keep their
+defaults. Sources are the physical inputs (face buttons by position: `a` is the
+bottom one), including the DualSense Edge and Elite back paddles, the touchpad
+click and both triggers; targets are any game button or trigger, `none` or
+`gyro`. The settings app edits it with a dropdown per input. Each slot can also
+swap the sticks, invert the right stick vertically, and add stick dead zones
+for a drifting stick.
 
 The Controls tab binds each action to one or more keys (`keybind_*`, a
 comma-separated list; `WheelUp` and `WheelDown` press briefly per wheel step).
@@ -185,11 +221,16 @@ with an error. Native currently uses 1× internal resolution, hardware render ta
 `gow3_native_hardware_render_targets = false`) and exact occlusion queries.
 These prerequisites are
 selected automatically without overwriting saved Xenia preferences.
-To explicitly select Xenia:
+The Xenia renderer is for development and testing only: release packages
+(built with `-DGOW3_XENIA_RENDERER=OFF`) and the settings menus offer only the
+native renderer. In a dev build from `tools/build-linux.sh`, select Xenia with:
 
 ```sh
 ./tools/run-linux.sh --gow3_renderer=xenia
 ```
+
+AMD Anti-Lag stays off with the Xenia renderer: Mesa's anti-lag layer crashes in
+`vkQueuePresentKHR` there.
 
 Native campaign rendering, movement, real query publication and clean shutdown
 have passed a saved-checkpoint test. Whole-game coverage and normal frame-rate
@@ -316,11 +357,9 @@ This is HDR presentation with highlight expansion from the completed SDR game
 image. It does not recover original pre-tonemap engine lighting or extra scene
 detail. HDR output/calibration changes currently require a game restart.
 
-Both settings interfaces show read-only **VRR (FreeSync)** status when the
-Wayland compositor reports it. The game leaves desktop VRR policy untouched.
-An enabled status reports the monitor's configuration, not proof of variable
-scanout on every frame. VSync and the frame-rate ceiling remain separate options;
-turning VSync off does not itself enable VRR.
+VRR (FreeSync/G-Sync) needs no game setting: when the display and compositor
+have it enabled, it applies automatically. The game leaves desktop VRR policy
+untouched.
 
 The in-game settings menu uses the same option schema and config as the
 standalone app. **L3+R3** (press both stick buttons) toggles it; **F4** is the
@@ -345,6 +384,11 @@ writes. The Shaders tab exposes Background shader translation; disable it with
 pipeline changes reduced stutter; the additional translation change removed
 GPU-thread translation work but the user reported similar overall stutter.
 Some stalls occur without shader compilation.
+
+In the native renderer a draw whose shader is still compiling is skipped (the
+object appears a moment late). `gow3_native_async_shader_budget_ms` (default
+5000) bounds that: past it, the draw waits for the shader instead. A shorter
+budget turns more pop-in into stalls, not fewer.
 
 Asynchronous visibility queries are also enabled for compatibility rendering. GPU query results are
 published after their submission fences complete, with pending batches drained

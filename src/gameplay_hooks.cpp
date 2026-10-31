@@ -1,5 +1,7 @@
 #include "gameplay_hooks.h"
 #include "gow3_renderer_mode.h"
+#include "gow3_tmap_find.h"
+#include "generated/default/gow3_init.h"
 
 #include <rex/cvar.h>
 #include <rex/input/mnk/mnk_input_driver.h>
@@ -8,6 +10,9 @@
 #include <rex/ppc/context.h>
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
+#include <cstring>
 #include <string>
 #include <utility>
 
@@ -190,4 +195,47 @@ REX_EXTERN(sub_8296DCB8) {
       rex::runtime::ResolveIndirectFunction(input_axis)(ctx, base);
     }
   }
+}
+
+// TMap<int32,...> element lookup (0x822AC700, r3 = result, r4 = map, r5 =
+// key). The texture pool's chunk map hashes aligned addresses into one bucket,
+// so texture streaming walks chains of 2000 elements thousands of times a
+// frame. A chain longer than kTMapWalkSteps is answered by TMapIntFindByScan
+// instead; every gow3_tmap_find_verify-th scan is checked against the full
+// walk, and a disagreement turns the scan off for the session.
+REXCVAR_DEFINE_INT32(gow3_tmap_find_verify, 64, "Game",
+                     "Check every Nth fast map lookup against the game's own walk (0 = never)");
+
+namespace {
+constexpr uint64_t kTMapWalkSteps = 32;
+std::atomic<bool> tmap_scan_enabled{true};
+std::atomic<uint32_t> tmap_scan_lookups{0};
+}  // namespace
+
+REX_EXTERN(sub_822AC700) {
+  const auto raw = [base](uint32_t address) {
+    uint32_t value;
+    std::memcpy(&value, REX_RAW_ADDR(address), sizeof(value));
+    return value;
+  };
+  const uint32_t map = ctx.r4.u32, key = ctx.r5.u32;
+  const bool scan = tmap_scan_enabled.load(std::memory_order_relaxed);
+  uint64_t index = gow3::TMapIntFind(raw, map, key, scan ? kTMapWalkSteps : UINT64_MAX);
+  if (index == gow3::kTMapUndecided) {
+    index = gow3::TMapIntFindByScan(raw, map, key);
+    const int32_t verify = REXCVAR_GET(gow3_tmap_find_verify);
+    if (index != gow3::kTMapUndecided && verify > 0 &&
+        tmap_scan_lookups.fetch_add(1, std::memory_order_relaxed) % uint32_t(verify) == 0) {
+      const uint64_t walked = gow3::TMapIntFind(raw, map, key);
+      if (walked != index) {
+        if (tmap_scan_enabled.exchange(false))
+          REXLOG_ERROR("Map lookup scan disagreed with the game's walk (map {:08X} key {:08X}: {} vs {}); "
+                       "using the walk from now on", map, key, index, walked);
+        index = walked;
+      }
+    }
+    if (index == gow3::kTMapUndecided) index = gow3::TMapIntFind(raw, map, key);
+  }
+  REX_STORE_U32(ctx.r3.u32, uint32_t(index));
+  ctx.r11.u64 = uint32_t(index);
 }

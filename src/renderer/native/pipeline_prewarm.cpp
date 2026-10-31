@@ -2,6 +2,7 @@
 #include "content_hash.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <fstream>
 #include <map>
@@ -86,12 +87,44 @@ bool OwnedTemporary(std::string_view name) {
     return separator != std::string_view::npos && decimal(suffix.substr(0, separator)) &&
            decimal(suffix.substr(separator + 1));
 }
+bool ValidRecipe(const NativeFsiPipelineRecipe &r) noexcept {
+    return r.hardware.empty() ? ValidNativeFsiPipelineRecipe(r) : ValidNativeHardwarePipelineRecipe(r);
+}
+// Hardware keys end in unused zero words; store them as trimmed hex.
+std::string HardwareHex(const std::vector<uint32_t> &words) {
+    size_t used = words.size();
+    while (used && !words[used - 1])
+        --used;
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string text;
+    text.reserve(used * 8);
+    for (size_t i = 0; i < used; ++i)
+        for (int shift = 28; shift >= 0; shift -= 4)
+            text.push_back(kHex[(words[i] >> shift) & 15]);
+    return text;
+}
+std::vector<uint32_t> HardwareWords(const std::string &text) {
+    if (text.size() % 8 || text.size() / 8 > kDrawStateWords)
+        throw std::runtime_error("Recipe hardware key extent");
+    std::vector<uint32_t> words(kDrawStateWords);
+    for (size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        const uint32_t digit = c >= '0' && c <= '9' ? uint32_t(c - '0')
+                               : c >= 'a' && c <= 'f' ? uint32_t(c - 'a' + 10)
+                                                      : throw std::runtime_error("Recipe hardware key digit");
+        words[i / 8] = words[i / 8] << 4 | digit;
+    }
+    return words;
+}
 Json ToJson(const NativeFsiPipelineRecipe &r) {
-    return {{"vertex", r.vertex},
-            {"pixel", r.pixel ? Json(*r.pixel) : Json(nullptr)},
-            {"raster", r.raster},
-            {"color", r.color_format},
-            {"depth", r.depth_format}};
+    Json j{{"vertex", r.vertex},
+           {"pixel", r.pixel ? Json(*r.pixel) : Json(nullptr)},
+           {"raster", r.raster},
+           {"color", r.color_format},
+           {"depth", r.depth_format}};
+    if (!r.hardware.empty())
+        j["hardware"] = HardwareHex(r.hardware);
+    return j;
 }
 int64_t Integer(const Json &value, int64_t minimum, int64_t maximum) {
     if (value.is_number_unsigned()) {
@@ -119,8 +152,10 @@ NativeFsiPipelineRecipe FromJson(const Json &j) {
         r.raster[i] = uint32_t(Integer(words[i], 0, UINT32_MAX));
     r.color_format = int32_t(Integer(j.at("color"), -1, INT32_MAX));
     r.depth_format = int32_t(Integer(j.at("depth"), -1, INT32_MAX));
-    if (!ValidNativeFsiPipelineRecipe(r))
-        throw std::runtime_error("Invalid observed FSI recipe");
+    if (const auto hardware = j.find("hardware"); hardware != j.end())
+        r.hardware = HardwareWords(hardware->get<std::string>());
+    if (!ValidRecipe(r))
+        throw std::runtime_error("Invalid observed pipeline recipe");
     return r;
 }
 std::vector<uint8_t> ReadBounded(const std::filesystem::path &path, size_t maximum) {
@@ -168,12 +203,126 @@ bool ValidNativeFsiPipelineRecipe(const NativeFsiPipelineRecipe &r) noexcept {
     using namespace plume;
     const auto &w = r.raster;
     const bool alpha = w[4] == 0 || ((w[4] & ~0x700u) == 2 && ((w[4] >> 8) & 7) != 1);
-    return Digest(r.vertex) && (!r.pixel || Digest(*r.pixel)) &&
+    return r.hardware.empty() && Digest(r.vertex) && (!r.pixel || Digest(*r.pixel)) &&
            w[0] >= uint32_t(RenderCullMode::NONE) && w[0] <= uint32_t(RenderCullMode::BACK) &&
            w[1] >= uint32_t(RenderFrontFace::CLOCKWISE) &&
            w[1] <= uint32_t(RenderFrontFace::COUNTER_CLOCKWISE) && w[2] <= 1 &&
            w[3] == uint32_t(RenderPrimitiveTopology::TRIANGLE_LIST) && alpha && w[5] <= 1 &&
            r.color_format == int32_t(RenderFormat::R8G8B8A8_UNORM) && r.depth_format == -1;
+}
+NativeHardwareRaster EncodeNativeHardwareRaster(const plume::RenderGraphicsPipelineDesc &p,
+                                                uint32_t specialization, bool rectangle) {
+    NativeHardwareRaster key{};
+    size_t n = 0;
+    auto put = [&](auto value) { key.at(n++) = uint32_t(value); };
+    put(p.primitiveTopology);put(p.cullMode);put(p.frontFace);put(p.depthClipEnabled);put(p.dynamicDepthBiasEnabled);
+    put(p.depthBias);put(std::bit_cast<uint32_t>(p.depthBiasClamp));put(std::bit_cast<uint32_t>(p.slopeScaledDepthBias));
+    put(p.depthEnabled);put(p.depthWriteEnabled);put(p.depthFunction);
+    put(p.stencilEnabled);put(p.stencilReadMask);put(p.stencilWriteMask);put(p.stencilReference);
+    for (const auto *face : {&p.stencilFrontFace, &p.stencilBackFace}) {
+        put(face->failOp);put(face->depthFailOp);put(face->passOp);put(face->compareFunction);
+    }
+    put(p.alphaToCoverageEnabled);put(p.logicOpEnabled);put(p.logicOp);
+    for (const auto &blend : p.renderTargetBlend) {
+        put(blend.blendEnabled);put(blend.srcBlend);put(blend.dstBlend);put(blend.blendOp);
+        put(blend.srcBlendAlpha);put(blend.dstBlendAlpha);put(blend.blendOpAlpha);put(blend.renderTargetWriteMask);
+    }
+    put(specialization);put(rectangle);
+    return key;
+}
+namespace {
+// Inverse of EncodeNativeHardwareRaster. Every enum must be in range and the
+// decoded state must encode back to the same words.
+bool DecodeHardwareRaster(const NativeHardwareRaster &w, plume::RenderGraphicsPipelineDesc &p,
+                          uint32_t &specialization, bool &rectangle) noexcept {
+    using namespace plume;
+    size_t n = 0;
+    bool valid = true;
+    auto get = [&](uint32_t maximum) {
+        const uint32_t value = w[n++];
+        valid = valid && value <= maximum;
+        return value;
+    };
+    auto flag = [&] { return get(1) != 0; };
+    const uint32_t any = UINT32_MAX;
+    const auto compare = uint32_t(RenderComparisonFunction::ALWAYS), stencil = uint32_t(RenderStencilOp::DECREMENT_AND_WRAP);
+    const auto factor = uint32_t(RenderBlend::INV_SRC1_ALPHA), operation = uint32_t(RenderBlendOperation::MAX);
+    p.primitiveTopology = RenderPrimitiveTopology(get(uint32_t(RenderPrimitiveTopology::TRIANGLE_FAN)));
+    p.cullMode = RenderCullMode(get(uint32_t(RenderCullMode::BACK)));
+    p.frontFace = RenderFrontFace(get(uint32_t(RenderFrontFace::COUNTER_CLOCKWISE)));
+    p.depthClipEnabled = flag();p.dynamicDepthBiasEnabled = flag();
+    p.depthBias = int32_t(get(any));
+    p.depthBiasClamp = std::bit_cast<float>(get(any));
+    p.slopeScaledDepthBias = std::bit_cast<float>(get(any));
+    p.depthEnabled = flag();p.depthWriteEnabled = flag();
+    p.depthFunction = RenderComparisonFunction(get(compare));
+    p.stencilEnabled = flag();
+    p.stencilReadMask = get(any);p.stencilWriteMask = get(any);p.stencilReference = get(any);
+    for (auto *face : {&p.stencilFrontFace, &p.stencilBackFace}) {
+        face->failOp = RenderStencilOp(get(stencil));
+        face->depthFailOp = RenderStencilOp(get(stencil));
+        face->passOp = RenderStencilOp(get(stencil));
+        face->compareFunction = RenderComparisonFunction(get(compare));
+    }
+    p.alphaToCoverageEnabled = flag();p.logicOpEnabled = flag();
+    p.logicOp = RenderLogicOperation(get(uint32_t(RenderLogicOperation::OR_INVERTED)));
+    for (auto &blend : p.renderTargetBlend) {
+        blend.blendEnabled = flag();
+        blend.srcBlend = RenderBlend(get(factor));blend.dstBlend = RenderBlend(get(factor));
+        blend.blendOp = RenderBlendOperation(get(operation));
+        blend.srcBlendAlpha = RenderBlend(get(factor));blend.dstBlendAlpha = RenderBlend(get(factor));
+        blend.blendOpAlpha = RenderBlendOperation(get(operation));
+        blend.renderTargetWriteMask = uint8_t(get(15));
+    }
+    specialization = get(any);
+    rectangle = flag();
+    return valid && EncodeNativeHardwareRaster(p, specialization, rectangle) == w;
+}
+bool ValidFormat(int32_t format) noexcept {
+    return format >= -1 && format < int32_t(plume::RenderFormat::MAX) &&
+           format != int32_t(plume::RenderFormat::UNKNOWN);
+}
+} // namespace
+bool ValidNativeHardwarePipelineRecipe(const NativeFsiPipelineRecipe &r) noexcept {
+    if (r.hardware.size() != kDrawStateWords || r.raster != std::array<uint32_t, 6>{} ||
+        !Digest(r.vertex) || (r.pixel && !Digest(*r.pixel)) || !ValidFormat(r.color_format) ||
+        !ValidFormat(r.depth_format))
+        return false;
+    NativeHardwareRaster words;
+    std::copy(r.hardware.begin(), r.hardware.end(), words.begin());
+    plume::RenderGraphicsPipelineDesc descriptor;
+    uint32_t specialization;
+    bool rectangle;
+    return DecodeHardwareRaster(words, descriptor, specialization, rectangle);
+}
+NativeHardwarePipelineDescriptor::NativeHardwarePipelineDescriptor(
+    const NativeHardwareRaster &raster, int32_t color, int32_t depth,
+    const plume::RenderPipelineLayout *layout, const plume::RenderShader *vertex,
+    const plume::RenderShader *pixel) {
+    using namespace plume;
+    uint32_t value = 0;
+    bool rectangle = false;
+    if (!DecodeHardwareRaster(raster, descriptor, value, rectangle) || !ValidFormat(color) ||
+        !ValidFormat(depth))
+        throw std::invalid_argument("Invalid hardware pipeline recipe");
+    specialization = RenderSpecConstant(0, value);
+    auto &p = descriptor;
+    p.pipelineLayout = layout;
+    p.vertexShader = vertex;
+    p.pixelShader = pixel;
+    if (rectangle) {
+        p.inputSlots = &slot;
+        p.inputSlotsCount = 1;
+        p.inputElements = &element;
+        p.inputElementsCount = 1;
+    }
+    p.renderTargetCount = color >= 0 ? 1 : 0;
+    if (color >= 0)
+        p.renderTargetFormat[0] = RenderFormat(color);
+    if (depth >= 0)
+        p.depthTargetFormat = RenderFormat(depth);
+    p.specConstants = &specialization;
+    p.specConstantsCount = 1;
 }
 NativeFsiPipelineDescriptor::NativeFsiPipelineDescriptor(const std::array<uint32_t, 6> &w,
                                                          int32_t color, int32_t depth,
@@ -260,7 +409,7 @@ NativePipelineRecipeCache::Statistics NativePipelineRecipeCache::statistics() co
 }
 void NativePipelineRecipeCache::Observe(ObservedNativePipeline o) noexcept {
     try {
-        if (!ValidNativeFsiPipelineRecipe(o.recipe) || !o.vertex || o.vertex->empty() ||
+        if (!ValidRecipe(o.recipe) || !o.vertex || o.vertex->empty() ||
             bool(o.recipe.pixel) != bool(o.pixel) || (o.pixel && o.pixel->empty()))
             return;
         const size_t bytes = o.vertex->size() + (o.pixel ? o.pixel->size() : 0);
@@ -296,7 +445,7 @@ void NativePipelineRecipeCache::Observe(ObservedNativePipeline o) noexcept {
 }
 std::vector<ObservedNativePipeline> NativePipelineRecipeCache::Load() const noexcept {
     try {
-        const auto raw = ReadBounded(directory_ / "recipes.json", 2u * 1024 * 1024);
+        const auto raw = ReadBounded(directory_ / "recipes.json", 16u * 1024 * 1024);
         const auto manifest = Json::parse(raw);
         if (manifest.at("schema") != kSchema || manifest.at("compiler") != version_)
             return {};
@@ -340,16 +489,34 @@ void NativePipelineRecipeCache::Worker() noexcept {
     std::vector<NativeFsiPipelineRecipe> stored;
     std::map<std::string, size_t> sources;
     size_t source_bytes = 0;
-    bool loaded = false;
+    bool loaded = false, manifest_dirty = false;
     std::unique_ptr<CacheWriterLease> writer_lease;
+    // The manifest is rewritten whole, so a burst of new pipelines writes it
+    // once after the last of them rather than once per recipe.
+    const auto write_manifest = [&] {
+        Json manifest{{"schema", kSchema}, {"compiler", version_}, {"recipes", Json::array()}};
+        for (const auto &item : stored)
+            manifest["recipes"].push_back(ToJson(item));
+        const auto text = manifest.dump();
+        WriteAtomic(directory_ / "recipes.json",
+                    std::span(reinterpret_cast<const uint8_t *>(text.data()), text.size()));
+        manifest_dirty = false;
+    };
     for (;;) {
         ObservedNativePipeline job;
         size_t bytes = 0;
         {
             std::unique_lock lock(mutex_);
             changed_.wait(lock, [&] { return stopping_ || !pending_.empty(); });
-            if (pending_.empty())
+            if (pending_.empty()) {
+                lock.unlock();
+                if (manifest_dirty)
+                    try {
+                        write_manifest();
+                    } catch (...) { /* Optional persistence; the next session records again. */
+                    }
                 return;
+            }
             job = std::move(pending_.front());
             pending_.pop_front();
             working_ = true;
@@ -432,17 +599,17 @@ void NativePipelineRecipeCache::Worker() noexcept {
                     }
                     source_bytes += owner->size();
                 }
-                Json manifest{
-                    {"schema", kSchema}, {"compiler", version_}, {"recipes", Json::array()}};
-                for (const auto &item : stored)
-                    manifest["recipes"].push_back(ToJson(item));
-                manifest["recipes"].push_back(ToJson(job.recipe));
-                const auto text = manifest.dump();
-                WriteAtomic(directory_ / "recipes.json",
-                            std::span(reinterpret_cast<const uint8_t *>(text.data()), text.size()));
                 stored.push_back(job.recipe);
-                success = true;
+                manifest_dirty = true;
             }
+            bool more;
+            {
+                std::lock_guard lock(mutex_);
+                more = !pending_.empty() && !stopping_;
+            }
+            if (manifest_dirty && !more)
+                write_manifest();
+            success = true;
         } catch (...) {
             // A rename may have committed before later allocation/bookkeeping
             // failed. Rebuild accounting from disk under the lease before any

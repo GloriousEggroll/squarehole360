@@ -1,4 +1,5 @@
 #pragma once
+#include "bytes_equal.h"
 #include "parallel_snapshot_compare.h"
 #include <array>
 #include <algorithm>
@@ -133,7 +134,7 @@ public:
         if(it!=entries_.end()) {
             if(certified.bytes==it->second.bytes || (!certified.bytes&&it->second.bytes->size()==data.size()&&
                (!data.size()||(comparison_?comparison_->Equal(*it->second.bytes,data):
-                  !std::memcmp(it->second.bytes->data(),data.data(),data.size()))))) {
+                  BytesEqual(it->second.bytes->data(),data.data(),data.size()))))) {
                 if(certified.bytes)it->second.certificate=std::move(certified.token);
                 order_.splice(order_.end(),order_,it->second.age);
                 return it->second.bytes;
@@ -434,7 +435,7 @@ private:
                 ++stable_stats_.exact_fallbacks;stable_stats_.exact_fallback_bytes+=data.size();
                 if(it->second.bytes->size()==data.size()&&(!data.size()||
                    (comparison_?comparison_->Equal(*it->second.bytes,data):
-                    !std::memcmp(it->second.bytes->data(),data.data(),data.size())))) {
+                    BytesEqual(it->second.bytes->data(),data.data(),data.size())))) {
                     ++stable_stats_.exact_hits;
                     if(eligible)stability.exact_hits=std::min(stability.required_hits,stability.exact_hits+1);
                     it->second.stability=stability;

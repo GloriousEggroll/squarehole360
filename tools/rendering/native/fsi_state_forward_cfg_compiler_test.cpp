@@ -63,8 +63,8 @@ int main(int argc,char** argv)try {
     const auto canonical_vs=compiler.Get(vertex,NativeShaderMode::Raster);
     Require(canonical->source_sha256==kFsiStateForwardCfgPixel&&canonical_vs->source_sha256==kFsiStateForwardCfgVertex,
         "Pinned source bytes differ from manifest");
-    const auto canonical_path=directory/"canonical"/version/(canonical->source_sha256+".fsi.g3spv");
-    const auto vs_path=directory/"canonical"/version/(canonical_vs->source_sha256+".g3spv");
+    const auto canonical_path=NativeShaderCompiler::CachePath(directory/"canonical"/version,canonical->source_sha256+".fsi");
+    const auto vs_path=NativeShaderCompiler::CachePath(directory/"canonical"/version,canonical_vs->source_sha256);
     const auto original_cache=Read(canonical_path),original_vs_cache=Read(vs_path);
     auto candidate=TryPrepareFsiStateForwardCfg(compiler,pixel,directory/"combined");
     Require(candidate&&!candidate->disk_cache_hit,"Actual cold composition refused");Check(*candidate,*canonical);

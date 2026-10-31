@@ -46,6 +46,9 @@ MemoryExportCopy DecodeMemoryExportCopy(std::span<const uint8_t> shader,
         "Unsupported native memory-export shader; only the verified Gears memcpy kernel is implemented");
     return DecodeState(state,args);
 }
+MemoryExportCopy DecodeVerifiedMemoryExportCopy(std::span<const uint8_t> state,const std::array<uint32_t,8>& args) {
+    return DecodeState(state,args);
+}
 MemoryExportCopy DecodeMemoryExportPacket(std::span<const uint32_t> shader_words,
     const std::array<uint32_t,2>& fetch95,const std::array<uint32_t,8>& constants,
     uint32_t clip_control,uint32_t vte_control,uint32_t first,uint32_t count) {

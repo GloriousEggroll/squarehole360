@@ -4,6 +4,15 @@
 #include <cstdlib>
 #include <new>
 #include <cstddef>
+#if GOW3_HOST_MIMALLOC
+// rexruntime frees through mimalloc, so the gate allocates from it too.
+#include <mimalloc.h>
+#define GOW3_FIXTURE_MALLOC mi_malloc
+#define GOW3_FIXTURE_FREE mi_free
+#else
+#define GOW3_FIXTURE_MALLOC std::malloc
+#define GOW3_FIXTURE_FREE std::free
+#endif
 namespace snapshot_batch_fixture {
 inline thread_local std::ptrdiff_t allocation_fail_after = -1;
 inline thread_local size_t reached_allocations = 0;
@@ -17,13 +26,13 @@ inline void* Allocate(size_t size) {
     ++reached_allocations;
     if (allocation_fail_after-- == 0) throw std::bad_alloc();
   }
-  if (auto* pointer = std::malloc(size ? size : 1)) return pointer;
+  if (auto* pointer = GOW3_FIXTURE_MALLOC(size ? size : 1)) return pointer;
   throw std::bad_alloc();
 }
 }
 void* operator new(std::size_t size) { return snapshot_batch_fixture::Allocate(size); }
 void* operator new[](std::size_t size) { return snapshot_batch_fixture::Allocate(size); }
-void operator delete(void* pointer) noexcept { std::free(pointer); }
-void operator delete[](void* pointer) noexcept { std::free(pointer); }
-void operator delete(void* pointer, std::size_t) noexcept { std::free(pointer); }
-void operator delete[](void* pointer, std::size_t) noexcept { std::free(pointer); }
+void operator delete(void* pointer) noexcept { GOW3_FIXTURE_FREE(pointer); }
+void operator delete[](void* pointer) noexcept { GOW3_FIXTURE_FREE(pointer); }
+void operator delete(void* pointer, std::size_t) noexcept { GOW3_FIXTURE_FREE(pointer); }
+void operator delete[](void* pointer, std::size_t) noexcept { GOW3_FIXTURE_FREE(pointer); }

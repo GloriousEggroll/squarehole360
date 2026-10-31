@@ -14,7 +14,7 @@
 #include <unordered_map>
 
 #include <dxcapi.h>
-#include <picosha2.h>
+#include "renderer/native/content_hash.h"
 #include "native_shader_embedded.h"
 #include "shader_recompiler.h"
 #include "renderer/native/shader_abi.h"
@@ -114,9 +114,9 @@ NativeShaderStage ValidateContainer(std::span<const uint8_t> bytes) {
   return pixel ? NativeShaderStage::Pixel : NativeShaderStage::Vertex;
 }
 
-std::string Hash(std::span<const uint8_t> bytes) {
-  return picosha2::hash256_hex_string(bytes.begin(), bytes.end());
-}
+// The same SHA-256 as any other, with the CPU's SHA instructions where it has
+// them: the GPU command thread hashes every shader it requests.
+std::string Hash(std::span<const uint8_t> bytes) { return ContentHash(bytes); }
 
 void Put32(std::vector<uint8_t>& bytes, uint32_t value) {
   for (unsigned shift = 0; shift != 32; shift += 8) bytes.push_back(uint8_t(value >> shift));
@@ -254,6 +254,27 @@ void StoreCache(const std::filesystem::path& path, const CompiledNativeShader& s
   }
   std::filesystem::remove(temporary, error);
 }
+
+// Earlier builds kept every entry in the version folder itself; move those
+// into their subfolders. Nothing is recompiled.
+void MigrateFlatCache(const std::filesystem::path& directory) {
+  std::error_code error;
+  std::vector<std::filesystem::path> flat;
+  for (std::filesystem::directory_iterator entry(directory, error), end; !error && entry != end; entry.increment(error)) {
+    const auto name = entry->path().filename().string();
+    std::error_code type_error;
+    if (name.ends_with(".g3spv") && entry->is_regular_file(type_error)) flat.push_back(entry->path());
+  }
+  for (const auto& path : flat) {
+    const auto name = path.filename().string();
+    const auto target = NativeShaderCompiler::CachePath(directory, std::string_view(name).substr(0, name.size() - 6));
+    std::filesystem::create_directories(target.parent_path(), error);
+    std::filesystem::rename(path, target, error);
+    // Already moved by another process (Windows rename does not replace), or
+    // unmovable: drop the old copy; a missing entry is compiled again.
+    if (error) std::filesystem::remove(path, error);
+  }
+}
 }  // namespace
 
 struct NativeShaderCompiler::Impl {
@@ -266,10 +287,16 @@ struct NativeShaderCompiler::Impl {
 };
 
 NativeShaderCompiler::NativeShaderCompiler(std::filesystem::path cache_directory) : impl_(std::make_unique<Impl>()) {
-  if (!cache_directory.empty()) impl_->cache_directory = std::move(cache_directory) / CacheVersion();
+  if (!cache_directory.empty()) {
+    impl_->cache_directory = std::move(cache_directory) / CacheVersion();
+    MigrateFlatCache(impl_->cache_directory);
+  }
 }
 NativeShaderCompiler::~NativeShaderCompiler() = default;
 std::string NativeShaderCompiler::CacheVersion() { return kNativeShaderVersion; }
+std::filesystem::path NativeShaderCompiler::CachePath(const std::filesystem::path& version_directory, std::string_view key) {
+  return version_directory / std::string(key.substr(0, 2)) / (std::string(key) + ".g3spv");
+}
 
 std::shared_ptr<const CompiledNativeShader> NativeShaderCompiler::Get(
     std::span<const uint8_t> container, NativeShaderMode mode) {
@@ -327,7 +354,7 @@ std::shared_ptr<const CompiledNativeShader> NativeShaderCompiler::Impl::Get(
       shader->stage = stage;
       shader->mode = mode;
       shader->source_sha256 = source_hash;
-      const auto path = cache_directory / (key + ".g3spv");
+      const auto path = NativeShaderCompiler::CachePath(cache_directory, key);
       if (cache_directory.empty() || !LoadCache(path, *shader)) {
         generate(*shader);
         if (!cache_directory.empty()) {

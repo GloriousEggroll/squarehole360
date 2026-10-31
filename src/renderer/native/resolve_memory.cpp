@@ -15,8 +15,16 @@
 #include "footprint_ranges.h"
 #include "transfer_batch.h"
 #include "plume_vulkan.h"
+// Standalone GPU tests build this file without the SDK and its logging.
+#if __has_include(<rex/logging.h>)
+#include <rex/logging.h>
+#define GOW3_RESOLVE_MEMORY_LOG(...) REXLOG_INFO(__VA_ARGS__)
+#else
+#define GOW3_RESOLVE_MEMORY_LOG(...) ((void)0)
+#endif
 #include <bit>
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 #include <exception>
@@ -171,7 +179,10 @@ void ResolveMemory::SetCpuUploadReceiptForwardingEnabled(bool enabled) {
     if(cpu_upload_receipts_configured_||mutation_serial_)
         throw std::logic_error("CPU upload receipts must be configured once before use");
     cpu_upload_receipts_configured_=true;
-    cpu_upload_receipts_.Configure(enabled,dynamic_cast<NativeCheckedQueueCompletion*>(&queue_)!=nullptr);
+    // 128 MB of pages: one texture streaming burst uploads and moves tens of
+    // MB that the following draws sample; a smaller direct-mapped table
+    // evicted most of a burst before its draws.
+    cpu_upload_receipts_.Configure(enabled,dynamic_cast<NativeCheckedQueueCompletion*>(&queue_)!=nullptr,32768);
 }
 void ResolveMemory::SetCpuWriteUploadReuseEnabled(bool enabled) {
     if(cpu_write_upload_reuse_configured_||mutation_serial_)
@@ -321,14 +332,17 @@ void ResolveMemory::InitializeCpuWrite(uint32_t address,std::span<const uint8_t>
     const bool recorded=queued&&batch_->statistics().stages!=stages_before;
     if(recorded)++cpu_write_stats_.queued_uploads;else ++cpu_write_stats_.synchronous_uploads;
     cpu_write_stats_.uploaded_bytes+=data.size();
-    // Original completion/Define has already succeeded. Use actual recorded
-    // work, not the queue request: a reserved-upload refusal may be synchronous.
-    cpu_upload_receipts_.Remember(address,data,!recorded,
+    // Define has already succeeded, so the page version names exactly these
+    // bytes. A queued upload has not run yet, but in operation order the
+    // buffer holds them from here on: any reader that would read the page
+    // back first flushes this batch, and any later write retires the receipt.
+    cpu_upload_receipts_.Remember(address,data,true,
         [this](uint32_t page){return page_versions_.Max(page,page+1);});
 }
 void ResolveMemory::InitializeCpuWriteReusable(uint32_t address,std::span<const uint8_t> data) {
     auto& stats=cpu_write_upload_reuse_stats_;
     try {
+        if(!data.empty())MaterializeDeferredStores(address,uint32_t(std::min<uint64_t>(uint64_t(address)+data.size(),capacity_)));
         if(batch_)batch_->Flush();
         if(stats.poisoned||!stats.enabled||!stats.checked_queue||data.size()!=4096||
            address%4096||uint64_t(address)+data.size()>capacity_)
@@ -363,6 +377,7 @@ void ResolveMemory::InitializeCpuWriteReusable(uint32_t address,std::span<const 
     } catch(...) {stats.poisoned=true;throw;}
 }
 void ResolveMemory::InitializeBytes(uint32_t address,std::span<const uint8_t> data,bool queued) {
+    if(!data.empty())MaterializeDeferredStores(address,uint32_t(std::min<uint64_t>(uint64_t(address)+data.size(),capacity_)));
     if(!queued&&batch_)batch_->Flush();
     if(data.empty()||address%4||data.size()%4||uint64_t(address)+data.size()>capacity_)
         throw std::runtime_error("Invalid GPU history byte range");
@@ -391,11 +406,12 @@ void ResolveMemory::Invalidate(uint32_t address,uint32_t count) {
     InvalidateBytes(address,count,false);
 }
 void ResolveMemory::InvalidateCpuWrite(uint32_t address,uint32_t count,bool allow_queue) {
-    const bool queued=batch_&&batch_->active()&&NativeCpuWriteQueueEligible(allow_queue,true,address,count);
+    const bool queued=batch_&&batch_->active()&&NativeCpuInvalidationQueueEligible(allow_queue,true,address,count);
     InvalidateBytes(address,count,queued);
     if(queued)++cpu_write_stats_.queued_invalidations;else ++cpu_write_stats_.synchronous_invalidations;
 }
 void ResolveMemory::InvalidateBytes(uint32_t address,uint32_t count,bool queued) {
+    if(count)MaterializeDeferredStores(address,uint32_t(std::min<uint64_t>(uint64_t(address)+count,capacity_)));
     if(!queued&&batch_)batch_->Flush();
     if(!count||uint64_t(address)+count>capacity_)throw std::runtime_error("Invalid GPU memory invalidation");
     const uint32_t last=address+count;AdvancePhysicalSerial();++mutation_serial_;
@@ -414,6 +430,52 @@ bool ResolveMemory::BytesDefined(uint32_t address,uint32_t count) const {
     return it!=defined_.begin()&&std::prev(it)->second>=uint64_t(address)+count;
 }
 void ResolveMemory::Copy(uint32_t source,uint32_t destination,uint32_t count) {
+    CopyBuffer(source,destination,count,nullptr);
+}
+std::vector<uint8_t> ResolveMemory::CopyAndRead(uint32_t source,uint32_t destination,uint32_t count) {
+    std::vector<uint8_t> result;
+    CopyBuffer(source,destination,count,&result);
+    ++copy_publication_stats_.readbacks;
+    return result;
+}
+bool ResolveMemory::CopyFromReceipts(uint32_t source,uint32_t destination,uint32_t count,std::vector<uint8_t>& result) {
+    auto& stats=copy_publication_stats_;
+    if(!batch_||!batch_->active()){++stats.inactive_batch;return false;}
+    if(!count||((source|destination|count)&3)||uint64_t(source)+count>capacity_||
+       uint64_t(destination)+count>capacity_||(uint64_t(source)+count>destination&&uint64_t(destination)+count>source)||
+       !BytesDefined(source,count)){++stats.ineligible;return false;}
+    // Pending stores into either range change their page versions first.
+    MaterializeDeferredStores(source,source+count);
+    MaterializeDeferredStores(destination,destination+count);
+    result.resize(count);
+    const NativeCpuUploadReceipts::Copy copy{source,source+count,result.data()};
+    if(!cpu_upload_receipts_.TryForward(std::span(&copy,1),
+        [this](uint32_t page){return page_versions_.Max(page,page+1);})){++stats.receipt_misses;return false;}
+    // In operation order this copy reads exactly the forwarded bytes; batch
+    // barriers order it after every earlier write, like a queued upload.
+    auto& commands=batch_->BeginStage();
+    ++mutation_serial_;
+    commands.barriers(RenderBarrierStage::COPY,RenderBufferBarrier(bytes_.get(),RenderBufferAccess::READ|RenderBufferAccess::WRITE));
+    // Consecutive copies in one stage chain (A to B, then B to C); the state
+    // tracker sees no transition between them, so order them explicitly.
+    VkMemoryBarrier ordered{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    ordered.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT;
+    ordered.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(static_cast<VulkanCommandList&>(commands).vk,
+        VK_PIPELINE_STAGE_TRANSFER_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,1,&ordered,0,nullptr,0,nullptr);
+    commands.copyBufferRegion(RenderBufferReference(bytes_.get(),destination),RenderBufferReference(bytes_.get(),source),count);
+    Define({{destination,destination+count}});
+    cpu_upload_receipts_.RememberPages(destination,result,
+        [this](uint32_t page){return page_versions_.Max(page,page+1);});
+    ++stats.receipts;
+    return true;
+}
+void ResolveMemory::CopyBuffer(uint32_t source,uint32_t destination,uint32_t count,std::vector<uint8_t>* read) {
+    if(count) {
+        MaterializeDeferredStores(source,uint32_t(std::min<uint64_t>(uint64_t(source)+count,capacity_)));
+        MaterializeDeferredStores(destination,uint32_t(std::min<uint64_t>(uint64_t(destination)+count,capacity_)));
+    }
     if(batch_)batch_->Flush();
     if(!count||((source|destination|count)&3)||uint64_t(destination)+count>capacity_||
         !BytesDefined(source,count))throw std::runtime_error("Undefined or invalid native buffer copy: source="+
@@ -424,10 +486,38 @@ void ResolveMemory::Copy(uint32_t source,uint32_t destination,uint32_t count) {
     commands_->begin();++mutation_serial_;
     commands_->barriers(RenderBarrierStage::COPY,RenderBufferBarrier(bytes_.get(),RenderBufferAccess::READ|RenderBufferAccess::WRITE));
     commands_->copyBufferRegion(RenderBufferReference(bytes_.get(),destination),RenderBufferReference(bytes_.get(),source),count);
+    if(read) {
+        if(!copy_readback_||copy_readback_bytes_<count) {
+            copy_readback_bytes_=std::max<uint64_t>(count,64*1024);
+            copy_readback_=device_.createBuffer(RenderBufferDesc::ReadbackBuffer(copy_readback_bytes_));
+            if(!copy_readback_)throw std::runtime_error("Cannot allocate native copy readback");
+        }
+        // The copy's write must land before its readback in this same list.
+        const auto vk_commands=static_cast<VulkanCommandList&>(*commands_).vk;
+        VkMemoryBarrier written{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        written.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;written.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(vk_commands,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,1,&written,0,nullptr,0,nullptr);
+        commands_->copyBufferRegion(RenderBufferReference(copy_readback_.get()),RenderBufferReference(bytes_.get(),destination),count);
+        VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(vk_commands,VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
+    }
     commands_->end();queue_.executeCommandLists(commands_.get(),fence_.get());queue_.waitForCommandFence(fence_.get());
     Define({{destination,destination+count}});
+    if(read) {
+        const auto& buffer=static_cast<VulkanBuffer&>(*copy_readback_);
+        const void* mapped=copy_readback_->map();
+        if(!mapped||vmaInvalidateAllocation(buffer.device->allocator,buffer.allocation,0,VK_WHOLE_SIZE)!=VK_SUCCESS)
+            throw std::runtime_error("Cannot read native copy result");
+        read->resize(count);std::memcpy(read->data(),mapped,count);copy_readback_->unmap();
+        // The copy completed and Define succeeded: the destination's pages
+        // now hold exactly these bytes until a later write changes them.
+        cpu_upload_receipts_.RememberPages(destination,*read,
+            [this](uint32_t page){return page_versions_.Max(page,page+1);});
+    }
 }
-void ResolveMemory::CopyFromCpu(uint32_t source,uint32_t destination,std::span<const uint8_t> data) {
+void ResolveMemory::CopyFromCpu(uint32_t source,uint32_t destination,std::span<const uint8_t> data,bool queued) {
     if(data.empty()||data.size()>capacity_||((source|destination|data.size())&3)||
         uint64_t(source)+data.size()>capacity_||uint64_t(destination)+data.size()>capacity_)
         throw std::runtime_error("Invalid native CPU buffer copy");
@@ -435,7 +525,12 @@ void ResolveMemory::CopyFromCpu(uint32_t source,uint32_t destination,std::span<c
         throw std::runtime_error("Overlapping native CPU buffer copy");
     // Seeding source as well would make an unwatched CPU allocation eligible
     // to overwrite later texture snapshots through GPU-history overlays.
-    Initialize(destination,data);
+    // Queued copies record into the active transfer batch (falling back to the
+    // synchronous path when its upload budget is exhausted).
+    InitializeBytes(destination,data,queued&&batch_&&batch_->active());
+    // As a CPU write's upload: the destination holds these bytes from here on.
+    cpu_upload_receipts_.RememberPages(destination,data,
+        [this](uint32_t page){return page_versions_.Max(page,page+1);});
 }
 void ResolveMemory::CopyFromMixed(uint32_t source,uint32_t destination,std::span<const uint8_t> data,
     std::span<const std::pair<uint32_t,uint32_t>> gpu_ranges) {
@@ -457,6 +552,7 @@ void ResolveMemory::CopyFromMixed(uint32_t source,uint32_t destination,std::span
         if(!aligned.empty()&&begin<=aligned.back().second)aligned.back().second=std::max(aligned.back().second,end);
         else aligned.emplace_back(begin,end);
     }
+    MaterializeDeferredStores(source,uint32_t(uint64_t(source)+data.size()));
     if(batch_)batch_->Flush();
     std::vector<uint8_t> composed(data.begin(),data.end());
     auto readback=device_.createBuffer(RenderBufferDesc::ReadbackBuffer(data.size()));
@@ -480,6 +576,7 @@ void ResolveMemory::CopyFromMixed(uint32_t source,uint32_t destination,std::span
     CopyFromCpu(source,destination,composed);
 }
 std::vector<uint8_t> ResolveMemory::ReadBytes(uint32_t address,uint32_t count) {
+    if(count)MaterializeDeferredStores(address,uint32_t(std::min<uint64_t>(uint64_t(address)+count,capacity_)));
     if(batch_)batch_->Flush();
     if(((address|count)&3)||!BytesDefined(address,count))throw std::runtime_error("Undefined native buffer readback");
     auto readback=device_.createBuffer(RenderBufferDesc::ReadbackBuffer(count));
@@ -541,7 +638,7 @@ ResolveMemory::CpuTextureFootprint& ResolveMemory::CachedCpuTextureFootprint(con
         result.ranges=std::move(ranges);return result;
     });
 }
-uint64_t ResolveMemory::CpuTextureVersion(const TextureLayout& t) const {
+uint64_t ResolveMemory::CpuTextureVersion(const TextureLayout& t,bool* gpu_bytes) const {
     auto& cached=CachedCpuTextureFootprint(t);
     // The optional independent write tracker permits reuse across mutations
     // outside conservative base/mip covers. All original page-version writers
@@ -553,6 +650,7 @@ uint64_t ResolveMemory::CpuTextureVersion(const TextureLayout& t) const {
         if(cached.version_serial==serial_)++cpu_version_stats_.memo_hits;
         else ++cpu_version_stats_.range_hits;
         cached.version_serial=serial_;cached.range_revision=page_versions_.revision();
+        if(gpu_bytes)*gpu_bytes=cached.gpu_bytes;
         return cached.version;
     }
     const auto scan=[&] {
@@ -573,11 +671,22 @@ uint64_t ResolveMemory::CpuTextureVersion(const TextureLayout& t) const {
     // Publish only after a successful exact scan. Exhausted tracking stamps
     // stay invalid, so even a repeated physical serial cannot skip this scan.
     const auto version=scan();
-    cached.version=version;cached.version_serial=serial_;cached.version_valid=true;
-    cached.range_revision=page_versions_.revision();return version;
+    // Every defined_ change (including deferred stores, defined when queued)
+    // assigns its pages, so this is current exactly while the version memo is.
+    bool defined=false;
+    for(const auto& region:cached.ranges)for(const auto& [first,last]:region) {
+        auto it=defined_.upper_bound(first);
+        if(it!=defined_.begin()&&std::prev(it)->second>first)--it;
+        defined|=it!=defined_.end()&&it->first<last;
+    }
+    cached.version=version;cached.gpu_bytes=defined;cached.version_serial=serial_;cached.version_valid=true;
+    cached.range_revision=page_versions_.revision();
+    if(gpu_bytes)*gpu_bytes=defined;
+    return version;
 }
 uint64_t ResolveMemory::OverlayCpuTexture(const TextureLayout& t,std::span<uint8_t> base,std::span<uint8_t> mips,
                                          TextureOverlayStats* stats,const std::function<void()>& before_readback) {
+    if(!pending_stores_.empty())for(const auto& footprint:CpuTextureFootprints(t))MaterializeDeferredStores(footprint);
     if(!before_readback&&batch_)batch_->Flush();
     if(stats)*stats={};
     using Copy=NativeCpuUploadReceipts::Copy;
@@ -669,11 +778,23 @@ uint64_t ResolveMemory::OverlayCpuTexture(const TextureLayout& t,std::span<uint8
             if(region==regions.end()||source<region->srcOffset)
                 throw std::logic_error("Texture overlay readback missed an owned range");
             const uint32_t count=uint32_t(std::min<uint64_t>(c.last-source,region->srcOffset+region->size-source));
-            std::memcpy(c.destination+(source-c.first),mapped+region->dstOffset+(source-region->srcOffset),count);
+            const auto* fresh=mapped+region->dstOffset+(source-region->srcOffset);
+            auto* snapshot=c.destination+(source-c.first);
+            for(uint32_t at=0;at<count;at+=4096) {
+                const uint32_t piece=std::min(count-at,4096u);
+                if(!std::memcmp(snapshot+at,fresh+at,piece))overlay_identical_bytes_+=piece;
+            }
+            std::memcpy(snapshot,fresh,count);
             source+=count;++region;
         }
     }
     readback->unmap();
+    ++overlay_readbacks_;overlay_owned_bytes_+=owned_bytes;
+    if(overlay_owned_bytes_>=overlay_next_report_) {
+        overlay_next_report_=overlay_owned_bytes_+(64ull<<20);
+        GOW3_RESOLVE_MEMORY_LOG("Texture overlay readbacks: {} reads, {} MB owned by the GPU copy, {} MB of it equal to the CPU snapshot",
+            overlay_readbacks_,overlay_owned_bytes_>>20,overlay_identical_bytes_>>20);
+    }
     if(stats) {stats->copy_regions=regions.size();stats->readback_bytes=size;stats->owned_bytes=owned_bytes;}
     return owned_bytes;
 }
@@ -683,6 +804,73 @@ void ResolveMemory::RecordImportedBytes(uint32_t address,uint32_t count) {
 }
 void ResolveMemory::Store(RenderTexture& image,const TextureLayout& layout,const RenderRect& rectangle,uint32_t address) {
     Transfer(image,layout,rectangle,true,address);
+}
+std::array<uint32_t,10> ResolveMemory::StoreFootprintKey(const TextureLayout& layout,const RenderRect& rectangle,
+                                                        uint32_t address) {
+    const uint32_t pitch=layout.levels.size()==1?layout.levels.front().pitch_blocks:UINT32_MAX;
+    return {address,layout.width,layout.height,layout.format,uint32_t(layout.tiled)|(layout.endian<<1),pitch,
+        uint32_t(rectangle.left),uint32_t(rectangle.top),uint32_t(rectangle.right),uint32_t(rectangle.bottom)};
+}
+void ResolveMemory::ReleaseDeferredImage(const RenderTexture& image,const std::array<uint32_t,10>& next_footprint) {
+    if(pending_stores_.empty())return;
+    const auto before=pending_stores_.size();
+    std::erase_if(pending_stores_,[&](const PendingStore& p){return p.image.get()==&image&&p.footprint==next_footprint;});
+    deferred_store_stats_.superseded+=before-pending_stores_.size();
+    std::vector<PendingStore> due;
+    std::erase_if(pending_stores_,[&](PendingStore& p) {
+        if(p.image.get()!=&image)return false;
+        due.push_back(std::move(p));return true;
+    });
+    for(auto& p:due) {
+        if(batch_&&batch_->active()) {
+            const auto& desc=static_cast<const VulkanTexture&>(*p.image).desc;
+            batch_->KeepImage(p.image,uint64_t(desc.width)*desc.height*16);
+        }
+        // An older store may run inside a newer one's deferral; run it for real.
+        auto deferring=std::exchange(deferring_image_,nullptr);
+        try {Dispatch(*p.image,p.push,true,nullptr,p.first_byte,p.byte_count);}
+        catch(...) {deferring_image_=std::move(deferring);throw;}
+        deferring_image_=std::move(deferring);
+        ++deferred_store_stats_.materialized;
+    }
+}
+bool ResolveMemory::DeferStore(std::shared_ptr<RenderTexture> image,const TextureLayout& layout,
+                               const RenderRect& rectangle,uint32_t address) {
+    if(!deferred_stores_||!image||!batch_||!batch_->active()||layout.levels.size()!=1)return false;
+    const auto footprint=StoreFootprintKey(layout,rectangle,address);
+    // Bytes the new store rewrites in full; never executing the old one is
+    // equivalent. Different footprints keep order through materialization.
+    const auto before=pending_stores_.size();
+    std::erase_if(pending_stores_,[&](const PendingStore& p){return p.footprint==footprint;});
+    deferred_store_stats_.superseded+=before-pending_stores_.size();
+    deferring_image_=std::move(image);deferring_footprint_=footprint;
+    try {Transfer(*deferring_image_,layout,rectangle,true,address);}
+    catch(...) {deferring_image_.reset();throw;}
+    deferring_image_.reset();
+    ++deferred_store_stats_.deferred;
+    deferred_store_stats_.peak_pending=std::max<uint64_t>(deferred_store_stats_.peak_pending,pending_stores_.size());
+    return true;
+}
+void ResolveMemory::MaterializeDeferredStores(uint32_t first,uint32_t last) {
+    if(pending_stores_.empty()||first>=last)return;
+    std::vector<PendingStore> due;
+    std::erase_if(pending_stores_,[&](PendingStore& p) {
+        if(p.first_byte>=last||uint64_t(p.first_byte)+p.byte_count<=first)return false;
+        due.push_back(std::move(p));return true;
+    });
+    for(auto& p:due) {
+        // The packet must own the source image until its dispatch retires.
+        if(batch_&&batch_->active()) {
+            const auto& desc=static_cast<const VulkanTexture&>(*p.image).desc;
+            batch_->KeepImage(p.image,uint64_t(desc.width)*desc.height*16);
+        }
+        // An older store may run inside a newer one's deferral; run it for real.
+        auto deferring=std::exchange(deferring_image_,nullptr);
+        try {Dispatch(*p.image,p.push,true,nullptr,p.first_byte,p.byte_count);}
+        catch(...) {deferring_image_=std::move(deferring);throw;}
+        deferring_image_=std::move(deferring);
+        ++deferred_store_stats_.materialized;
+    }
 }
 bool ResolveMemory::EnableCanonicalStoreReceipt(std::span<const uint32_t> code) {
     if(canonical_store_stats_.configured||mutation_serial_||descriptor_dispatch_started_)
@@ -1045,9 +1233,14 @@ void ResolveMemory::Transfer(RenderTexture& image,const TextureLayout& t,const R
     // 2_10_10_10_FLOAT_AS_16_16_16_16 stores raw 7e3 bits (64), as the
     // guest resolve does; titles also sample those bytes as UNorm 2_10_10_10.
     if(format==54)format=64;
-    if(format!=2&&format!=6&&format!=7&&format!=22&&format!=23&&format!=24&&format!=25&&format!=26&&
-       format!=30&&format!=31&&format!=32&&format!=36&&format!=37&&format!=38&&format!=64)
-        throw std::runtime_error("Unsupported resolved storage format");
+    // 8_8 (10) only decodes: the game samples other resolves' bytes as 8_8 but
+    // never resolves into it, so it has no encoder.
+    if(format!=2&&format!=6&&format!=7&&(format!=10||store)&&format!=22&&format!=23&&format!=24&&format!=25&&
+       format!=26&&format!=30&&format!=31&&format!=32&&format!=36&&format!=37&&format!=38&&format!=64)
+        throw std::runtime_error("Unsupported resolved storage format "+std::to_string(t.format)+" ("+
+            std::to_string(t.width)+"x"+std::to_string(t.height)+(t.tiled?" tiled":" linear")+", endian "+
+            std::to_string(t.endian)+(store?", store":", load")+" at 0x"+[&]{char text[16];
+            std::snprintf(text,sizeof text,"%08X",address);return std::string(text);}()+")");
     const auto& level=t.levels.front();
     // Validate all reachable addresses, including tiled swizzles at odd pitches.
     const auto& footprint=Footprint(t,r,address);
@@ -1078,6 +1271,14 @@ void ResolveMemory::Dispatch(RenderTexture& image,Parameters push,bool store,Ren
                              const NativeSynchronousGpuTimingContext* presentation_timing,bool rgba_stencil) {
     if(!byte_count||first_byte%descriptor_alignment_||byte_count>descriptor_range_||uint64_t(first_byte)+byte_count>capacity_)
         throw std::runtime_error("Invalid resolve storage descriptor range");
+    // Earlier deferred stores into these bytes run first, in order.
+    MaterializeDeferredStores(first_byte,first_byte+byte_count);
+    if(deferring_image_) {
+        if(!store||stencil||rgba_stencil||&image!=deferring_image_.get())
+            throw std::logic_error("Deferred resolve store accepts only its own plain store dispatches");
+        pending_stores_.push_back({deferring_image_,push,first_byte,byte_count,deferring_footprint_});
+        return;
+    }
     // Unsigned arithmetic deliberately permits a base before the descriptor:
     // adding the validated texel offset produces the window-relative address.
     push.offset-=first_byte;push.words=byte_count/4;
@@ -1292,6 +1493,7 @@ bool ResolveMemory::CanLoadRawFloatCpuTexture(const TextureLayout& t,size_t cpu_
     return last<=capacity_&&last-first<=descriptor_range_;
 }
 void ResolveMemory::LoadRawFloatCpuTexture(const std::shared_ptr<RenderTexture>& image,const TextureLayout& t) {
+    if(!pending_stores_.empty())for(const auto& footprint:CpuTextureFootprints(t))MaterializeDeferredStores(footprint);
     if(!image||!CanLoadRawFloatCpuTexture(t,kRawFloatCpuTextureBytes))
         throw std::runtime_error("Raw float CPU texture source lacks exact owned layout");
     const auto& target=static_cast<const VulkanTexture&>(*image);const auto& d=target.desc;
@@ -1380,18 +1582,21 @@ bool ResolveMemory::RestoreColorSurface(RenderTexture& target,const SurfaceLayou
     const uint32_t bytes=NativeEdramBytes();
     const Parameters push{s.width,s.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,2u,0,
         SurfaceStorageFormat(s),0,s.base*5120,bytes/4,0,0};
-    const RenderDescriptorRange range(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1);
-    auto descriptors=device_.createDescriptorSet(RenderDescriptorSetDesc(&range,1));
-    if(!descriptors)throw std::runtime_error("Direct color restore descriptor allocation failed");
-    const RenderBufferStructuredView window(4,0);
-    descriptors->setBuffer(0,bytes_.get(),bytes,&window);
+    if(!restore_descriptors_) {
+        const RenderDescriptorRange range(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1);
+        auto created=device_.createDescriptorSet(RenderDescriptorSetDesc(&range,1));
+        if(!created)throw std::runtime_error("Direct color restore descriptor allocation failed");
+        const RenderBufferStructuredView window(4,0);
+        created->setBuffer(0,bytes_.get(),bytes,&window);
+        restore_descriptors_=std::move(created);
+    }
     const RenderTexture* attachment=&target;
     RenderFramebufferDesc fd;fd.colorAttachments=&attachment;fd.colorAttachmentsCount=1;
     auto framebuffer=device_.createFramebuffer(fd);
     if(!framebuffer)throw std::runtime_error("Direct color restore framebuffer creation failed");
     auto* commands=&batch_->BeginStage();
-    auto* descriptor_ptr=descriptors.get();auto* framebuffer_ptr=framebuffer.get();
-    batch_->Keep(std::move(descriptors));batch_->Keep(std::move(framebuffer));
+    auto* descriptor_ptr=restore_descriptors_.get();auto* framebuffer_ptr=framebuffer.get();
+    batch_->Keep(std::move(framebuffer));
     commands->barriers(RenderBarrierStage::GRAPHICS,RenderBufferBarrier(bytes_.get(),RenderBufferAccess::READ));
     commands->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(&target,RenderTextureLayout::COLOR_WRITE));
     commands->setFramebuffer(framebuffer_ptr);

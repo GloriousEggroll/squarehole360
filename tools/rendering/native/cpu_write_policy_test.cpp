@@ -21,6 +21,10 @@ int main() try {
         Check(!NativeCpuWriteQueueEligible(enabled,unified,0x1fffffff,2),"Out-of-domain update queued");
     }
     Check(NativeCpuWriteQueueEligible(true,true,0x1ffff000,4096),"Last physical page rejected");
+    for(bool enabled:{false,true})for(bool unified:{false,true})
+        Check(NativeCpuInvalidationQueueEligible(enabled,unified,0x1000,16u<<20)==(enabled&&unified),"Flags do not gate invalidations");
+    Check(!NativeCpuInvalidationQueueEligible(true,true,0x1000,0),"Empty invalidation queued");
+    Check(!NativeCpuInvalidationQueueEligible(true,true,0x1fffffff,2),"Out-of-domain invalidation queued");
     for(uint32_t report:{0u,0x1000u,0x1fffffc0u}) {
         Check(NativeCpuWriteOverlapsQueryReport(report,32,report),"End record overlap not eager");
         Check(NativeCpuWriteOverlapsQueryReport(report+32,32,report),"Begin record overlap not eager");

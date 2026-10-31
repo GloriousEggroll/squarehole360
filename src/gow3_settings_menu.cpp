@@ -2,7 +2,6 @@
 #include "menu_guide_latch.h"
 #include "gow3_settings_navigation.h"
 #include "gow3_settings.h"
-#include "gow3_vrr.h"
 #include "gow3_settings_schema.h"
 #include <rex/ui/imgui_dialog.h>
 #include <rex/ui/imgui_drawer.h>
@@ -14,7 +13,9 @@
 #include <imgui.h>
 #include <toml++/toml.hpp>
 #include "gow3_host.h"
+#include <chrono>
 #include <fstream>
+#include <optional>
 #include <sstream>
 #include <algorithm>
 #include <map>
@@ -35,8 +36,9 @@ std::string Hash(const std::string& text) {
 }
 class GameSettings final : public rex::ui::ImGuiDialog {
  public:
-  GameSettings(rex::ui::ImGuiDrawer* drawer, std::filesystem::path path, std::function<void()> close)
-      : ImGuiDialog(drawer), path_(std::move(path)), close_(std::move(close)) {
+  GameSettings(rex::ui::ImGuiDrawer* drawer, std::filesystem::path path, std::function<void()> close,
+               std::function<void()> exit_game)
+      : ImGuiDialog(drawer), path_(std::move(path)), close_(std::move(close)), exit_game_(std::move(exit_game)) {
     // Controller navigation is an explicit category/options hierarchy. ImGui's
     // default navigation would also consume A/B and move between child windows.
     navigation_flags_ = GetIO().ConfigFlags & kNavigationFlags;
@@ -176,21 +178,11 @@ class GameSettings final : public rex::ui::ImGuiDialog {
     if (std::string(s.key) == "monitor" && value == "0") return "AUTOMATIC";
     return value;
   }
-  std::string VrrStatusText() {
-    const auto status = Gow3GetVrrStatus();
-    std::string text = "DISPLAY VRR: ";
-    if (!status.available) text += "UNAVAILABLE";
-    else text += status.enabled ? "ENABLED" : "DISABLED";
-    if (status.pending) text += " (checking)";
-    if (!status.output.empty()) text += " (" + status.output + ")";
-    if (!status.error.empty()) text += " — " + status.error;
-    text += ". The compositor controls VRR automatically; desktop policy is unchanged. Reported Enabled does not confirm variable scanout on every frame.";
-    return text;
-  }
   void HandleNavigation(ImGuiIO& io) {
     using Command = MenuNavigation::Command;
     auto pressed = [](ImGuiKey key, bool repeat = false) { return ImGui::IsKeyPressed(key, repeat); };
     std::optional<Command> command;
+    if (pressed(ImGuiKey_GamepadBack) || pressed(ImGuiKey_F10)) { RequestExit(); return; }
     if (pressed(ImGuiKey_GamepadFaceRight) || pressed(ImGuiKey_Escape)) command = Command::Back;
     else if (pressed(ImGuiKey_GamepadFaceLeft) || (io.KeyCtrl && pressed(ImGuiKey_Enter))) command = Command::Apply;
     else if (pressed(ImGuiKey_GamepadFaceUp) || pressed(ImGuiKey_F6)) command = Command::Reload;
@@ -273,10 +265,6 @@ class GameSettings final : public rex::ui::ImGuiDialog {
     ImGui::EndChild(); ImGui::SameLine();
     ImGui::BeginChild("options", ImVec2(0,-footer), false);
     if (drawn_section_ != navigation_.Section()) { ImGui::SetScrollY(0); drawn_section_ = navigation_.Section(); }
-    if (layout_.sections[navigation_.Section()] == "Display") {
-      ImGui::TextWrapped("%s", VrrStatusText().c_str());
-      ImGui::Separator();
-    }
     const auto& options = layout_.options[navigation_.Section()];
     for (int index = 0; index < int(options.size()); ++index) {
       const auto& s = *options[index];
@@ -316,14 +304,13 @@ class GameSettings final : public rex::ui::ImGuiDialog {
     if (navigation_.InOptions()) {
       const auto& setting = *options[navigation_.Option()];
       ImGui::TextWrapped("%s %s", setting.help, setting.live ? "Applies while playing." : "Requires a game restart.");
-    } else if (layout_.sections[navigation_.Section()] == "Display") {
-      ImGui::TextWrapped("%s", VrrStatusText().c_str());
     } else {
       ImGui::TextWrapped("Select a category with A. Move through options with the D-pad or left stick, then use left/right to change a value.");
     }
     ImGui::EndChild();
     auto status = Gow3GetLiveSettingsStatus();
-    if (!error_.empty()) ImGui::TextWrapped("%s", error_.c_str());
+    if (ExitArmed()) ImGui::TextUnformatted("PRESS EXIT GAME AGAIN TO QUIT");
+    else if (!error_.empty()) ImGui::TextWrapped("%s", error_.c_str());
     else if (!status.error.empty()) ImGui::TextWrapped("%s", status.error.c_str());
     else if (!awaiting_.empty() && (status.pending || status.digest != awaiting_)) ImGui::TextUnformatted("APPLYING CHANGES...");
     else if (!status.restart.empty()) ImGui::TextUnformatted("GAME RESTART NEEDED FOR SOME CHANGES");
@@ -334,12 +321,29 @@ class GameSettings final : public rex::ui::ImGuiDialog {
     if (ImGui::Button(navigation_.InOptions() ? "B  BACK" : "B  CLOSE", ImVec2(150,38))) {
       if (navigation_.Handle(MenuNavigation::Command::Back) == MenuNavigation::Action::Close) close_();
     }
-    ImGui::TextUnformatted("A  SELECT     B  BACK     RB  FASTER ADJUSTMENT     L3+R3 / F4  CLOSE");
+    ImGui::SameLine();
+    if (ImGui::Button("VIEW  EXIT GAME", ImVec2(190,38))) RequestExit();
+    ImGui::TextUnformatted("A  SELECT     B  BACK     RB  FASTER ADJUSTMENT     L3+R3 / F4  CLOSE     VIEW / F10  EXIT GAME");
     ImGui::End();
     ImGui::PopStyleColor(20); ImGui::PopStyleVar(6);
   }
+  // Exit takes a second press within three seconds, so a stray button press
+  // cannot end the game.
+  bool ExitArmed() const {
+    return exit_armed_ && std::chrono::steady_clock::now() - *exit_armed_ < std::chrono::seconds(3);
+  }
+  void RequestExit() {
+    if (ExitArmed()) {
+      exit_armed_.reset();
+      exit_game_();
+    } else {
+      exit_armed_ = std::chrono::steady_clock::now();
+    }
+  }
   std::filesystem::path path_;
   std::function<void()> close_;
+  std::function<void()> exit_game_;
+  std::optional<std::chrono::steady_clock::time_point> exit_armed_;
   toml::table table_;
   std::string original_, error_, awaiting_, visible_renderer_;
   std::map<std::string,std::string> values_, saved_;
@@ -385,6 +389,7 @@ void PollMenu() {
     {ImGuiKey_GamepadDpadDown,rex::input::X_INPUT_GAMEPAD_DPAD_DOWN},
     {ImGuiKey_GamepadDpadLeft,rex::input::X_INPUT_GAMEPAD_DPAD_LEFT},
     {ImGuiKey_GamepadDpadRight,rex::input::X_INPUT_GAMEPAD_DPAD_RIGHT},
+    {ImGuiKey_GamepadBack,rex::input::X_INPUT_GAMEPAD_BACK},
     {ImGuiKey_GamepadL1,rex::input::X_INPUT_GAMEPAD_LEFT_SHOULDER},
     {ImGuiKey_GamepadR1,rex::input::X_INPUT_GAMEPAD_RIGHT_SHOULDER}};
   for (auto [key, mask] : keys) io.AddKeyEvent(key, active && (buttons & mask));
@@ -399,8 +404,8 @@ void PollMenu() {
 }
 }
 std::unique_ptr<rex::ui::ImGuiDialog> Gow3CreateSettingsMenu(rex::ui::ImGuiDrawer* drawer,
-    const std::filesystem::path& path, std::function<void()> close) {
-  return std::make_unique<GameSettings>(drawer,path,std::move(close));
+    const std::filesystem::path& path, std::function<void()> close, std::function<void()> exit_game) {
+  return std::make_unique<GameSettings>(drawer,path,std::move(close),std::move(exit_game));
 }
 void Gow3ConfigureMenuFonts(ImFontAtlas* atlas) {
   const auto regular = Gow3MenuFontPath(false).string();

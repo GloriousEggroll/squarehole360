@@ -18,4 +18,4 @@ python3 tools/audit.py --require-clean-codegen
 cmake --build build --target gow3-xex-image-dump --parallel "$jobs" 2>&1 | tee logs/build-image-dump.log
 python3 tools/porting/generate_getdata.py
 cmake -S . -B build 2>&1 | tee logs/configure-game.log
-cmake --build build --target gow3 squarehole-lobby --parallel "$jobs" 2>&1 | tee logs/build-game.log
+cmake --build build --target gow3 gow3-shader-precompile squarehole-lobby --parallel "$jobs" 2>&1 | tee logs/build-game.log

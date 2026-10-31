@@ -106,6 +106,18 @@ void NativeTransferBatch::Finish() {
     if(work_queue_)Seal();else Flush();
     images_.clear();image_bytes_=0;in_scope_=false;synchronous_=false;
 }
+void NativeTransferBatch::BeginScope(uint64_t event) {
+    if(in_scope_||failed_)throw NativeTransferBatchError("Nested or failed native transfer scope");
+    attribution_tag_.reset();in_scope_=true;event_=event;
+}
+void NativeTransferBatch::EndScope() {
+    if(!in_scope_)throw NativeTransferBatchError("No native transfer scope to end");
+    Finish();
+}
+void NativeTransferBatch::AbortScope() {
+    if(!in_scope_||failed_)return;
+    Flush();Finish();
+}
 void NativeTransferBatch::Run(const std::function<void()>& operation,uint64_t event,const NativeGpuWorkTag* tag) {
     if(in_scope_||failed_)throw NativeTransferBatchError("Nested or failed native transfer scope");
     if(tag)attribution_tag_=*tag;else attribution_tag_.reset();

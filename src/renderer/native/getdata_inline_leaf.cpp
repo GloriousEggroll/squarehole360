@@ -1,6 +1,8 @@
 // Default-OFF Native CPU experiment. The source-auth build guard and startup
 // instruction/alias checks must succeed before selecting this exact body.
 #include "getdata_inline_leaf.h"
+#include <cstdint>
+#include <cstring>
 #include "generated/default/gow3_init.h"
 
 namespace {
@@ -53,6 +55,21 @@ bool Gow3GetDataExactInlineLeafAvailable() noexcept {
     auto* volatile imported_save=&__imp____savegprlr_26;
     auto* volatile restore=&__restgprlr_26;
     auto* volatile imported_restore=&__imp____restgprlr_26;
+#if defined(__APPLE__) && defined(__aarch64__)
+    // Mach-O has no aliases: the generated weak symbol is a single branch to
+    // the import, which a strong override would not be.
+    const auto branches_to=[](const void* function,const void* target) {
+        uint32_t instruction;
+        std::memcpy(&instruction,function,sizeof(instruction));
+        if((instruction&0xFC000000u)!=0x14000000u)return false;  // B imm26
+        const int64_t offset=int64_t(int32_t(instruction<<6)>>6)*4;
+        return reinterpret_cast<uintptr_t>(function)+uintptr_t(offset)==
+            reinterpret_cast<uintptr_t>(target);
+    };
+    return branches_to(reinterpret_cast<const void*>(save),reinterpret_cast<const void*>(imported_save))&&
+        branches_to(reinterpret_cast<const void*>(restore),reinterpret_cast<const void*>(imported_restore));
+#else
     return save==imported_save&&restore==imported_restore;
+#endif
 #endif
 }

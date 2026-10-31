@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <map>
@@ -451,6 +452,51 @@ struct GearsLivePlan::State {
         prefix_operation=end;
     }
 
+    bool direct_cpu_copies=false;
+    // The verified GPU memcpy kernel and its identity, decoded once.
+    Bytes memcpy_kernel;std::string memcpy_kernel_digest;
+    // A memcpy draw's source bytes belong to that one operation: keep them
+    // under a unique key, without the content identity's fingerprint lookup,
+    // comparisons and SHA-256. Keys are 64 hex digits like a digest: a mixed
+    // sequence (LiveResourceHash reads the first 16 digits), the sequence
+    // itself (so none repeats) and a fixed tag. snapshot, when given, is an
+    // immutable owner of exactly these bytes and is kept instead of a copy.
+    uint64_t transient_payloads=0;
+    // Large texture and buffer payloads key only in-memory caches; SHA-256 of
+    // a streamed texture burst costs more than the frame. Two independent
+    // XXH3-128 digests form the same 64-hex shape. Shaders, whose identities
+    // persist, and small blocks such as device states, which alias, stay SHA-256.
+    static std::string PayloadDigest(std::span<const uint8_t> bytes,bool shader) {
+        static_assert(LazyDeviceState::kBytes<kFastPayloadDigestBytes);
+        if(shader||bytes.size()<kFastPayloadDigestBytes)return ContentHash(bytes);
+        const auto a=XXH3_128bits(bytes.data(),bytes.size());
+        const auto b=XXH3_128bits_withSeed(bytes.data(),bytes.size(),0x6f77335f70617931ull);
+        char key[65];
+        std::snprintf(key,sizeof key,"%016llx%016llx%016llx%016llx",
+            static_cast<unsigned long long>(a.high64),static_cast<unsigned long long>(a.low64),
+            static_cast<unsigned long long>(b.high64),static_cast<unsigned long long>(b.low64));
+        return key;
+    }
+    static constexpr size_t kFastPayloadDigestBytes=64*1024;
+    std::string InternTransient(std::span<const uint8_t> bytes,std::shared_ptr<const Bytes> snapshot={}) {
+        static const std::string tag=ContentHash(std::span<const uint8_t>(
+            reinterpret_cast<const uint8_t*>("gow3 transient payload"),22)).substr(0,32);
+        if(frame->retained_bytes+bytes.size()>SnapshotLimit())
+            throw std::runtime_error("Live frame exceeds its snapshot memory limit");
+        static std::atomic<uint64_t> sequence{0};
+        const uint64_t id=++sequence;
+        uint64_t mixed=id+0x9E3779B97F4A7C15ull;
+        mixed=(mixed^(mixed>>30))*0xBF58476D1CE4E5B9ull;mixed=(mixed^(mixed>>27))*0x94D049BB133111EBull;mixed^=mixed>>31;
+        char unique[33];
+        std::snprintf(unique,sizeof unique,"%016llx%016llx",static_cast<unsigned long long>(mixed),static_cast<unsigned long long>(id));
+        auto key=unique+tag;
+        if(!snapshot||snapshot->data()!=bytes.data()||snapshot->size()!=bytes.size())
+            snapshot=std::make_shared<const Bytes>(bytes.begin(),bytes.end());
+        const auto& stored=*frame->payloads.emplace(key,std::move(snapshot)).first;
+        frame->retained_bytes+=bytes.size();RecordPayload(stored,false);
+        ++transient_payloads;CountPayload(3,bytes.size());
+        return key;
+    }
     void RecordPayload(const LiveResourceMap::value_type& value,bool shader) {
         if(!shader&&lazy_states)frame->lazy_payloads->Append(value.first,value.second,true);
     }
@@ -612,7 +658,7 @@ struct GearsLivePlan::State {
             if(!shader)CountPayload(2,bytes.size());
             return *stored;
         }
-        const auto digest=ContentHash(bytes);
+        const auto digest=PayloadDigest(bytes,shader);
         auto stored=values.find(digest);
         if (stored==values.end()) {
             if (frame->retained_bytes+bytes.size()>SnapshotLimit())
@@ -832,6 +878,7 @@ std::optional<LiveQueryPrefix> GearsLivePlan::TakeDirectPrefix(size_t min_operat
     s.prefix_operation=end;
     return prefix;
 }
+void GearsLivePlan::SetDirectCpuMemoryCopies(bool enabled) {state_->direct_cpu_copies=enabled;}
 std::optional<GearsLivePlan::MemoryCopy> GearsLivePlan::TakeMemoryCopy() {
     return std::exchange(state_->ready_memory_copy,{});
 }
@@ -976,24 +1023,37 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
     } else if (draw&&!data(2).empty()&&(Word(data(2),0)&0x10)) {
         Bytes shader(data(2).begin(),data(2).end());shader.insert(shader.end(),data(3).begin(),data(3).end());
         if(event.function!=profile::d3d::kDrawVertices)throw std::runtime_error("Unsupported native memory-export draw ABI");
-        const auto copy=DecodeMemoryExportCopy(shader,state,a);
+        MemoryExportCopy copy;
+        if(shader==s.memcpy_kernel)copy=DecodeVerifiedMemoryExportCopy(state,a);
+        else {
+            copy=DecodeMemoryExportCopy(shader,state,a);
+            s.memcpy_kernel=shader;s.memcpy_kernel_digest=ContentHash(shader);
+        }
         op["type"]="memory_copy";op["source"]=copy.source;op["destination"]=copy.destination;
         const auto gpu_ranges=s.GPUByteRanges(copy.source,copy.bytes);
         const bool fully_gpu=gpu_ranges.size()==1&&gpu_ranges[0].first==copy.source&&
             gpu_ranges[0].second==copy.source+copy.bytes;
-        op["bytes"]=copy.bytes;op["source_kind"]=fully_gpu?"gpu_memory":gpu_ranges.empty()?"cpu_snapshot":"mixed_memory";
+        // Direct execution already moved CPU-sourced bytes at the API point:
+        // the destination is ordinary CPU memory, with no payload to keep.
+        const bool cpu_direct=s.direct_cpu_copies&&gpu_ranges.empty();
+        op["bytes"]=copy.bytes;op["source_kind"]=cpu_direct?"cpu_direct":fully_gpu?"gpu_memory":gpu_ranges.empty()?"cpu_snapshot":"mixed_memory";
         // Preserve the exact ownership at capture, including sub-word holes
         // made by CPU writes. A partial overlap is not a full GPU buffer.
         if(!fully_gpu&&!gpu_ranges.empty())op["gpu_ranges"]=gpu_ranges;
-        op["payload"]=nullptr;op["shader"]=ContentHash(shader);op["published_to_guest"]=false;
+        op["payload"]=nullptr;op["shader"]=s.memcpy_kernel_digest;op["published_to_guest"]=false;
         diagnostic_hash_field="shader";
-        if(!fully_gpu) {
+        if(!fully_gpu&&!cpu_direct) {
+            // The live bridge snapshots just this chunk; a full capture holds
+            // the whole bound buffer. Either way take exactly the copied bytes.
             const auto bytes=data(14);
-            if(!blocks[14]||blocks[14]->address!=copy.source_binding||
-                uint64_t(copy.source_offset)+copy.bytes>bytes.size())throw std::runtime_error("Missing native memcpy source bytes");
-            s.AssignDependency(op["payload"],s.Intern(bytes.subspan(copy.source_offset,copy.bytes)));
+            if(!blocks[14]||copy.source<blocks[14]->address||
+                uint64_t(copy.source-blocks[14]->address)+copy.bytes>bytes.size())throw std::runtime_error("Missing native memcpy source bytes");
+            const auto chunk=bytes.subspan(copy.source-blocks[14]->address,copy.bytes);
+            s.AssignDependency(op["payload"],chunk.size()==LazyDeviceState::kBytes?s.Intern(chunk):
+                s.InternTransient(chunk,blocks[14]->shared_bytes));
         }
-        s.Mark({{copy.destination,copy.destination+copy.bytes}});
+        if(cpu_direct)s.ownership.Invalidate(copy.destination,copy.bytes);
+        else s.Mark({{copy.destination,copy.destination+copy.bytes}});
         s.ready_memory_copy=GearsLivePlan::MemoryCopy{copy.source,copy.destination,copy.bytes,gpu_ranges.empty()};
     } else if (draw) {
         TypedLiveDraw typed;typed.event=event.sequence;typed.frame=event.frame;typed.args=a;
@@ -1169,8 +1229,13 @@ std::shared_ptr<LiveRenderFrame> GearsLivePlan::Push(GraphicsBoundaryEvent&& eve
 
 struct GearsLiveOwnership::State {
     OwnershipRanges ownership;
+    bool direct_cpu_copies=false;
+    // The verified GPU memcpy kernel, so each copy draw decodes without
+    // hashing its shader again.
+    Bytes memcpy_kernel;
     uint64_t query_generation=0;
 };
+void GearsLiveOwnership::SetDirectCpuMemoryCopies(bool enabled) {state_->direct_cpu_copies=enabled;}
 GearsLiveOwnership::GearsLiveOwnership(std::function<void(uint32_t,uint32_t)> watch_memory):state_(std::make_unique<State>()) {
     state_->ownership.watch_memory=std::move(watch_memory);
 }
@@ -1178,6 +1243,9 @@ GearsLiveOwnership::~GearsLiveOwnership()=default;
 void GearsLiveOwnership::InvalidateMemory(uint32_t address,uint32_t bytes) {
     if(!bytes||uint64_t(address)+bytes>0x20000000ull)throw std::runtime_error("Invalid CPU memory invalidation");
     state_->ownership.Invalidate(address,bytes);
+}
+bool GearsLiveOwnership::CpuOwned(uint32_t address,uint32_t bytes) const {
+    return bytes&&uint64_t(address)+bytes<=0x20000000ull&&state_->ownership.GPUByteRanges(address,bytes).empty();
 }
 GearsLiveOwnership::Decision GearsLiveOwnership::Observe(GraphicsBoundaryEvent& event) {
     auto& s=*state_;Decision decision;
@@ -1206,9 +1274,12 @@ GearsLiveOwnership::Decision GearsLiveOwnership::Observe(GraphicsBoundaryEvent& 
     if(!data(2).empty()&&(Word(data(2),0)&0x10)) {
         Bytes shader(data(2).begin(),data(2).end());shader.insert(shader.end(),data(3).begin(),data(3).end());
         if(event.function!=profile::d3d::kDrawVertices)throw std::runtime_error("Unsupported native memory-export draw ABI");
-        const auto copy=DecodeMemoryExportCopy(shader,state,a);
+        MemoryExportCopy copy;
+        if(shader==s.memcpy_kernel)copy=DecodeVerifiedMemoryExportCopy(state,a);
+        else {copy=DecodeMemoryExportCopy(shader,state,a);s.memcpy_kernel=shader;}
         const auto gpu_ranges=s.ownership.GPUByteRanges(copy.source,copy.bytes);
-        s.ownership.Mark({{copy.destination,copy.destination+copy.bytes}});
+        if(s.direct_cpu_copies&&gpu_ranges.empty())s.ownership.Invalidate(copy.destination,copy.bytes);
+        else s.ownership.Mark({{copy.destination,copy.destination+copy.bytes}});
         decision.memory_copy=GearsLivePlan::MemoryCopy{copy.source,copy.destination,copy.bytes,gpu_ranges.empty()};
         return decision;
     }

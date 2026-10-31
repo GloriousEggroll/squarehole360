@@ -1,5 +1,7 @@
 #pragma once
 #include "texture_data.h"
+#include <functional>
+#include <memory>
 #include "shader_abi.h"
 #include "plume_render_interface.h"
 
@@ -32,7 +34,10 @@ plume::RenderSamplerDesc TextureSampler(const TextureLayout& layout,
 TextureBinding BindTexture(plume::RenderDevice& device, plume::RenderTexture& image,
                            const TextureLayout& layout,bool decoded_float=false,
                            int32_t anisotropy_override=-1,uint32_t max_anisotropy=16);
+// acquire_staging, when given, may supply an upload buffer of at least the
+// requested size; otherwise one of exactly that size is created.
 NativeTexture UploadTexture(plume::RenderDevice& device, plume::RenderCommandList& commands,
                             const TextureData& data,int32_t anisotropy_override=-1,
-                            uint32_t max_anisotropy=16);
+                            uint32_t max_anisotropy=16,
+                            const std::function<std::unique_ptr<plume::RenderBuffer>(uint64_t)>& acquire_staging={});
 } // namespace gow3::renderer

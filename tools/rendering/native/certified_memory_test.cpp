@@ -169,7 +169,7 @@ void Run(bool early,bool batch){
 }
 }
 int main(){try{
-#if REX_PLATFORM_LINUX
+#if REX_PLATFORM_LINUX || REX_PLATFORM_WIN32
   for(bool batch:{false,true})for(bool early:{false,true})Run(early,batch);
 #else
   Memory memory;Check(!memory.SetCertifiedPhysicalSnapshotsEnabled(true),"unsupported platform enabled certificate");

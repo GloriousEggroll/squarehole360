@@ -31,5 +31,22 @@ int main() try {
         }
         set(offsets[target],0x10001);
     }
-    std::cout<<"PASS: 512 packed blend factor cases, RGBA constant mapping, and 64 host-path rejection cases\n";
+    // The draw path skips exactly the viewports DecodeDrawState rejects.
+    const float nan=std::bit_cast<float>(0x7fc00000u);
+    const struct {float xs,ys,zs,zo;bool representable;} viewports[]{
+        {8,-8,1,0,true},{8,-8,-1,1,true},{8,-8,0,0,true},{8,-8,.5f,.5f,true},
+        {0,-8,1,0,false},{-8,-8,1,0,false},{8,0,1,0,false},{8,8,1,0,false},
+        {8,-8,1,.5f,false},{8,-8,1,-.1f,false},{8,-8,-1,.5f,false},{nan,-8,1,0,false},{8,-8,nan,0,false}};
+    unsigned viewport_cases=0;
+    for(const auto& v:viewports) {
+        set(0x2908,std::bit_cast<uint32_t>(v.xs));set(0x2910,std::bit_cast<uint32_t>(v.ys));
+        set(0x2918,std::bit_cast<uint32_t>(v.zs));set(0x291c,std::bit_cast<uint32_t>(v.zo));
+        bool decoded=true;
+        try {(void)DecodeDrawState(words,16,16,4,true);}catch(const std::runtime_error&){decoded=false;}
+        if(DecodeDrawViewport(words).Representable()!=v.representable||decoded!=v.representable)
+            throw std::logic_error("Viewport skip rule disagrees with the draw-state decode");
+        ++viewport_cases;
+    }
+    std::cout<<"PASS: 512 packed blend factor cases, RGBA constant mapping, 64 host-path rejection cases and "
+             <<viewport_cases<<" viewport cases\n";
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

@@ -12,6 +12,9 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/sysctl.h>
+#endif
 #endif
 
 int64_t Gow3ProcessId() {
@@ -27,6 +30,13 @@ std::string Gow3ProcessStartTime() {
   FILETIME created{}, exited{}, kernel{}, user{};
   if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return {};
   return std::to_string((uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime);
+#elif defined(__APPLE__)
+  kinfo_proc info{};
+  size_t size = sizeof(info);
+  int name[] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()};
+  if (sysctl(name, 4, &info, &size, nullptr, 0) != 0 || !size) return {};
+  const auto& start = info.kp_proc.p_starttime;
+  return std::to_string(uint64_t(start.tv_sec) * 1000000 + uint64_t(start.tv_usec));
 #else
   // Field 22 of /proc/self/stat: start time in clock ticks since boot.
   std::ifstream stream("/proc/self/stat");
@@ -78,6 +88,11 @@ std::filesystem::path Gow3MenuFontPath(bool bold) {
   std::filesystem::path fonts = std::filesystem::path(windir ? windir : "C:\\Windows") / "Fonts";
   for (const char* name : bold ? std::initializer_list<const char*>{"segoeuib.ttf", "arialbd.ttf"}
                                : std::initializer_list<const char*>{"segoeui.ttf", "arial.ttf"})
+    if (std::filesystem::exists(fonts / name)) return fonts / name;
+#elif defined(__APPLE__)
+  const std::filesystem::path fonts = "/System/Library/Fonts/Supplemental";
+  for (const char* name : bold ? std::initializer_list<const char*>{"Arial Bold.ttf", "Verdana Bold.ttf"}
+                               : std::initializer_list<const char*>{"Arial.ttf", "Verdana.ttf"})
     if (std::filesystem::exists(fonts / name)) return fonts / name;
 #else
   std::filesystem::path font = bold

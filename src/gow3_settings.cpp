@@ -37,18 +37,40 @@ bool Gow3SettingAppliesToRenderer(std::string_view key, Gow3RendererMode mode) {
   return Gow3MenuKeyApplies(key, mode);
 }
 
+// Release builds (GOW3_XENIA_RENDERER=0) offer only the native renderer; the
+// Xenia renderer is for dev and test builds, which select it in the config or
+// with --gow3_renderer=xenia.
+static Gow3RendererMode AvailableRenderer(Gow3RendererMode mode) {
+#if !GOW3_XENIA_RENDERER
+  if (mode == Gow3RendererMode::Xenia) {
+    REXLOG_WARN("This build includes only the native renderer; ignoring gow3_renderer = xenia");
+    return Gow3RendererMode::Native;
+  }
+#endif
+  return mode;
+}
+
 void Gow3LoadSettingsConfig(const std::filesystem::path& path) {
   // Renderer selection is resolved before unrelated backend flags are validated.
   if (rex::cvar::IsCommandLineOverride("gow3_renderer")) {
-    const auto mode = ParseGow3RendererMode(rex::cvar::GetFlagByName("gow3_renderer"));
+    const auto mode = AvailableRenderer(ParseGow3RendererMode(rex::cvar::GetFlagByName("gow3_renderer")));
     rex::cvar::SetFlagByName("gow3_renderer", std::string(Gow3RendererName(mode)));
   }
   rex::cvar::LoadConfig(path, [](rex::cvar::ConfigValues& values) {
     const auto selected = rex::cvar::IsCommandLineOverride("gow3_renderer")
         ? rex::cvar::GetFlagByName("gow3_renderer")
         : values.contains("gow3_renderer") ? values.at("gow3_renderer") : "native";
-    const auto mode = ParseGow3RendererMode(selected);
+    const auto mode = AvailableRenderer(ParseGow3RendererMode(selected));
     values["gow3_renderer"] = Gow3RendererName(mode);
+    // Gyro settings from before per-controller settings belong to player 1
+    // (tools/settings/model.py migrates them the same way).
+    for (const char* key : {"gyro_mode", "gyro_activation", "gyro_turn_axis", "gyro_sensitivity",
+                            "gyro_invert_y", "gyro_stick_deadzone"}) {
+      if (const auto found = values.find(key); found != values.end()) {
+        values.try_emplace(std::string("controller1_") + key, found->second);
+        values.erase(found);
+      }
+    }
     for (auto it = values.begin(); it != values.end();) {
       if (!Gow3SettingAppliesToRenderer(it->first, mode)) it = values.erase(it);
       else ++it;
@@ -69,6 +91,13 @@ void Gow3LoadSettingsConfig(const std::filesystem::path& path) {
       }
     }
   });
+  // Mesa's anti-lag layer crashes in vkQueuePresentKHR with the Xenia
+  // renderer, so it stays off there even when requested on the command line.
+  if (ParseGow3RendererMode(rex::cvar::GetFlagByName("gow3_renderer")) == Gow3RendererMode::Xenia &&
+      rex::cvar::GetFlagByName("present_anti_lag") == "true") {
+    REXLOG_WARN("AMD Anti-Lag is unavailable with the Xenia renderer; turning it off");
+    rex::cvar::SetFlagByName("present_anti_lag", "false");
+  }
   // CLI and environment overrides must not restore forced filtering either.
   if (!rex::cvar::SetFlagByName("anisotropic_override", "-1"))
     throw std::runtime_error("Unable to select original game texture filtering");

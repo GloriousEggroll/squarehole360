@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <vector>
 
 namespace rex::graphics { class GraphicsSystem; class ShaderStorageProgress; }
 
@@ -15,7 +16,10 @@ void Gow3StopNativeRenderer();
 
 // Called on UI before the startup worker exists. The closure owns runtime
 // lifetime through source preparation and its CP task, including close/cancel.
-std::function<void(rex::graphics::ShaderStorageProgress&)> Gow3CreateNativePipelinePrewarmTask();
+// It first precompiles pixel shaders from shader_inputs (cooked package
+// folders) when gow3_native_shader_precompile is on.
+std::function<void(rex::graphics::ShaderStorageProgress&)> Gow3CreateNativePipelinePrewarmTask(
+    std::vector<std::filesystem::path> shader_inputs);
 
 // Low-latency pacing: waits until the native renderer has completed API frame
 // `frame` (or the timeout passes). Returns false at once when no native

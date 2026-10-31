@@ -50,8 +50,8 @@ The GPU's command processor, not its shaders, is now the limit.
 
 ## Requirements
 
-- Linux to build. The game runs on Linux, and on Windows from a cross-compiled
-  build (see below)
+- Linux to build. The game runs on Linux, on Windows from a cross-compiled
+  build, and on Apple silicon Macs (see below)
 - Clang, CMake 3.25+, Ninja, Python 3.11+
 - A modern Vulkan GPU and driver (developed and tested on an AMD RX 9070 XT
   with RADV)
@@ -76,6 +76,10 @@ tools/build-linux.sh                   # recompiles the game, then builds it
 tools/run-linux.sh
 ```
 
+The first start compiles every pixel shader in the game into `user/cache`
+behind a progress bar (about 20 minutes, 7.4 GB), so new areas don't stall on
+their first visit; see `docs/gears3.md`.
+
 `tools/build-linux.sh` runs `rexglue codegen` on your executable. It then
 generates the XDK-derived inputs (`tools/porting/generate_getdata.py`) and
 builds `build/bin/gow3`. Saves and caches live in `user/`, and logs in
@@ -94,11 +98,33 @@ tools/build-linux.sh                   # generates the recompiled sources
 tools/build-windows.sh                 # builds build-windows/bin/gow3.exe
 ```
 
-Copy the checkout (or at least `build-windows/`, `config/`, `game/` and
-`tools/`) to Windows and run `tools\run-windows.bat`; the settings editor is
-`tools\settings-windows.bat`. It needs the Microsoft Visual C++ 2015-2022
-runtime and a Vulkan 1.3 driver. The same build also runs under Wine and
-Proton.
+To run it on Windows, package it (`tools/fetch-runtime-deps.sh windows`
+once, then `tools/package-windows.sh`) and double-click `squarehole360.exe` in
+the extracted zip; the settings editor is `Settings.exe` (from a command
+prompt, `tools\run-windows.bat` and `tools\settings-windows.bat`). The
+package carries the Visual C++ runtime and a Python with PySide6 for the setup
+wizard and settings, so Windows needs only a Vulkan 1.3 driver. The same build
+also runs under Wine and Proton.
+
+### macOS build
+
+The Mac version (Apple silicon, macOS 14 or newer) runs on Vulkan through
+MoltenVK. It builds on the Mac from the sources generated on Linux, with the
+Xcode command-line tools and Homebrew (`cmake ninja llvm molten-vk
+vulkan-loader openssl glslang`):
+
+```sh
+tools/build-linux.sh                   # on Linux: generates the recompiled sources
+# copy the checkout, including generated/, to the Mac, then on the Mac:
+tools/build-macos.sh                   # builds build/bin/gow3
+tools/fetch-runtime-deps.sh macos      # once: Python with PySide6 for the package
+tools/package-macos.sh                 # dist/squarehole360-macos-arm64.tar.gz
+```
+
+The package carries MoltenVK, the Vulkan loader, OpenSSL and its own Python,
+so players need no Homebrew. Run `tools/run-macos.sh`; the settings editor is
+`tools/settings-macos.sh`. FSR 3.1, frame generation, DLSS and XeSS are not
+available on macOS.
 
 Settings live in `config/gow3.toml`. You can change them in the standalone
 editor (`tools/settings.sh`) or in game (L3+R3, or F4). The

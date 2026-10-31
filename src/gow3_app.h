@@ -3,6 +3,7 @@
 // Customize your app by overriding virtual hooks from rex::ReXApp.
 
 #pragma once
+#include <rex/input/sdl/sdl_input_driver.h>
 #include <thread>
 #include <cstdlib>
 #include <cstdio>
@@ -24,6 +25,9 @@
 #include "renderer/native/runtime_bridge.h"
 #endif
 #include <rex/ui/windowed_app_context.h>
+#if GOW3_HOST_MIMALLOC
+#include <mimalloc.h>
+#endif
 
 class Gow3App : public rex::ReXApp {
  public:
@@ -31,6 +35,13 @@ class Gow3App : public rex::ReXApp {
 
   static std::unique_ptr<rex::ui::WindowedApp> Create(
       rex::ui::WindowedAppContext& ctx) {
+#if GOW3_HOST_MIMALLOC
+    // Keep freed heap pages mapped. A purged page (decommitted after a
+    // second) faults back in on its next use; texture streaming refills
+    // ~10 MB of snapshot buffers in one frame, ~2500 faults on the guest's
+    // render thread. The heap then stays at its peak size instead.
+    mi_option_set(mi_option_purge_delay, -1);
+#endif
     return std::unique_ptr<Gow3App>(new Gow3App(ctx, "gow3",
         PPCImageConfig));
   }
@@ -47,7 +58,11 @@ class Gow3App : public rex::ReXApp {
   }
 
   // Before the runtime creates the profile; logging is up by now.
-  void OnPostInitLogging() override { Gow3PrepareIdentity(user_data_root()); }
+  void OnPostInitLogging() override {
+    Gow3PrepareIdentity(user_data_root());
+    // Player 1 stays the main profile's controller across launches.
+    rex::input::sdl::SetControllerMemoryPath(user_data_root() / "player1-controller.txt");
+  }
 
   void OnPostLoadXexImage() override {
     Gow3ConfigureFrameRate(runtime()->memory()->virtual_membase());
@@ -71,7 +86,13 @@ class Gow3App : public rex::ReXApp {
 
   std::function<void(rex::graphics::ShaderStorageProgress&)> CreateGraphicsPreparationTask() override {
 #ifdef GOW3_HAS_NATIVE_RENDERER
-    return Gow3CreateNativePipelinePrewarmTask();
+    // The game's packages, and DLC once OnPostLoadXexImage has unpacked it.
+    std::vector<std::filesystem::path> shader_inputs;
+    std::error_code error;
+    for (auto folder : {runtime()->game_data_root() / "GearGame" / "CookedXbox360",
+                        user_data_root() / "0000000000000000"})
+      if (std::filesystem::is_directory(folder, error)) shader_inputs.push_back(std::move(folder));
+    return Gow3CreateNativePipelinePrewarmTask(std::move(shader_inputs));
 #else
     return {};
 #endif
@@ -108,6 +129,8 @@ class Gow3App : public rex::ReXApp {
       rex::ui::ImGuiDrawer* drawer, const std::filesystem::path& path) override {
     return Gow3CreateSettingsMenu(drawer, path, [this] {
       app_context().CallInUIThreadDeferred([this] { ToggleSettingsOverlay(); });
+    }, [this] {
+      app_context().CallInUIThreadDeferred([this] { if (window()) window()->RequestClose(); });
     });
   }
 

@@ -6,6 +6,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <vector>
 
 using gow3::renderer::DormantCache;
 using gow3::renderer::DormantCacheEntry;
@@ -243,11 +244,48 @@ uint64_t ReferenceOracle() {
 }
 }  // namespace
 
+
+// One-scan binding eviction erases exactly the victims, in the same order, that
+// repeated single evictions would, and stops as soon as its condition holds.
+uint64_t BatchedBindingEviction() {
+  std::mt19937 random(7);
+  uint64_t checks = 0;
+  for (int round = 0; round < 200; ++round) {
+    Fixture single({1u << 30, 4096, 1000}), batched({1u << 30, 4096, 1000});
+    std::set<uint32_t> ineligible;
+    const int frames = 2 + int(random() % 6);
+    for (int frame = 0; frame < frames; ++frame) {
+      for (int touch = 0, count = 1 + int(random() % 12); touch < count; ++touch) {
+        const uint32_t identity = random() % 40;
+        single.Touch(identity); batched.Touch(identity);
+        if (random() % 5 == 0) ineligible.insert(identity);
+      }
+      if (frame + 1 < frames) { single.End(); batched.End(); }
+    }
+    const auto eligible = [&](const Entry& entry) { return !ineligible.count(entry.resource->identity); };
+    std::vector<uint32_t> expected, actual;
+    const size_t want = random() % 16;
+    while (expected.size() < want && single.policy.EvictUnusedForBindings(single.entries,
+           [&](const Entry& entry) { single.BeforeErase(entry); expected.push_back(entry.resource->identity); },
+           eligible)) {}
+    const auto erased = batched.policy.EvictUnusedForBindingsUntil(batched.entries,
+        [&](const Entry& entry) { batched.BeforeErase(entry); actual.push_back(entry.resource->identity); },
+        eligible, [&] { return actual.size() >= want; });
+    Check(actual == expected && erased == actual.size(), "Batched binding eviction chose different victims");
+    Check(single.policy.statistics().binding_evictions == batched.policy.statistics().binding_evictions,
+          "Batched binding eviction miscounted");
+    Check(single.entries.size() == batched.entries.size(), "Batched binding eviction left a different cache");
+    ++checks;
+  }
+  return checks;
+}
+
 int main() try {
   LifetimeAndBounds(); WrapAndFailure(); DiagnosticTextureEntryBudget();
+  const auto batched = BatchedBindingEviction();
   std::cout << "Dormant cache passed ownership, zero/byte/count/age bounds, preparing protection, wrap, "
                "failure retry, shipping512/diagnostic2048 texture entry bounds and "
-            << ReferenceOracle() << " independent history checks\n";
+            << ReferenceOracle() << " independent history checks, " << batched << " batched binding evictions\n";
 } catch (const std::exception& error) {
   std::cerr << error.what() << '\n'; return 1;
 }

@@ -40,12 +40,19 @@ if [[ "$steamrt" == true ]]; then
 else
   test -x build/bin/gow3 || { echo 'Build first: tools/build-linux.sh' >&2; exit 1; }
 fi
+# Release packages offer only the native renderer (GOW3_XENIA_RENDERER=OFF);
+# the dev build from tools/build-linux.sh keeps the Xenia renderer for tests.
+if ! grep -q '^GOW3_XENIA_RENDERER:BOOL=OFF$' "$build/CMakeCache.txt"; then
+  echo "$build still includes the Xenia renderer. Package from tools/build-steamrt.sh (--steamrt)," >&2
+  echo "or reconfigure with: cmake -S . -B $build -DGOW3_XENIA_RENDERER=OFF" >&2
+  exit 1
+fi
 stage="dist/linux/squarehole360"
 rm -rf "$stage"
 mkdir -p "$stage/build/bin" "$stage/build/lib" "$stage/config" "$stage/docs" "$stage/tools"
 
 # Program files.
-for file in gow3 gow3-hdr-probe gow3-vrr-probe librexruntime.so libamd_fidelityfx_vk.so libdxcompiler.so; do
+for file in gow3 gow3-shader-precompile gow3-hdr-probe librexruntime.so libamd_fidelityfx_vk.so libdxcompiler.so; do
   cp -aL "$build/bin/$file" "$stage/build/bin/"
 done
 cp -a build/bin/libnvidia-ngx-dlss.so.* "$stage/build/bin/" 2>/dev/null || true
@@ -77,6 +84,9 @@ cp docs/gears3.md docs/multiplayer.md "$stage/docs/"
 git show HEAD:config/gow3.toml > "$stage/config/gow3.toml"
 cp tools/run-linux.sh tools/settings.sh tools/import-assets.py tools/setup-wizard.py "$stage/tools/"
 cp -r tools/settings tools/assets "$stage/tools/"
+# The importer reads the global shader cache with this scanner.
+mkdir -p "$stage/tools/rendering"
+cp tools/rendering/extract-shaders.py "$stage/tools/rendering/"
 find "$stage/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
 cat > "$stage/README-LINUX.txt" <<'EOF'
 squarehole360 - Gears of War 3, Linux build (x86-64, Vulkan)

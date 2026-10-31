@@ -1,4 +1,5 @@
 #include "renderer/native/edram_extent.h"
+#include "renderer/native/edram_inventory.h"
 #include <unordered_map>
 #include <condition_variable>
 #include <thread>
@@ -16,7 +17,10 @@
 #include "fsi_exact_stores_policy.h"
 #include "native_fsi_exact_stores_version.h"
 #include "native_fsi_hoist_version.h"
+#include "staging_buffer_pool.h"
+#include "background_thread_priority.h"
 #include "retired_buffer_pool.h"
+#include "vertex_arena.h"
 #include "cpu_write_policy.h"
 #include "packed_zero_depth_clear.h"
 #include "packed_primary_stencil_clear.h"
@@ -458,23 +462,7 @@ struct VertexDigestEqual {
 // pipeline state. Keying raw register words built duplicate pipelines for
 // each of those and omitted the draw's primitive topology.
 std::array<uint32_t,kDrawStateWords> HardwarePipelineRasterKey(const DrawState& state,bool rectangle) {
-    const auto& p=state.pipeline;
-    std::array<uint32_t,kDrawStateWords> key{};size_t n=0;
-    auto put=[&](auto value){key.at(n++)=uint32_t(value);};
-    put(p.primitiveTopology);put(p.cullMode);put(p.frontFace);put(p.depthClipEnabled);put(p.dynamicDepthBiasEnabled);
-    put(p.depthBias);put(std::bit_cast<uint32_t>(p.depthBiasClamp));put(std::bit_cast<uint32_t>(p.slopeScaledDepthBias));
-    put(p.depthEnabled);put(p.depthWriteEnabled);put(p.depthFunction);
-    put(p.stencilEnabled);put(p.stencilReadMask);put(p.stencilWriteMask);put(p.stencilReference);
-    for(const auto* face:{&p.stencilFrontFace,&p.stencilBackFace}) {
-        put(face->failOp);put(face->depthFailOp);put(face->passOp);put(face->compareFunction);
-    }
-    put(p.alphaToCoverageEnabled);put(p.logicOpEnabled);put(p.logicOp);
-    for(const auto& blend:p.renderTargetBlend) {
-        put(blend.blendEnabled);put(blend.srcBlend);put(blend.dstBlend);put(blend.blendOp);
-        put(blend.srcBlendAlpha);put(blend.dstBlendAlpha);put(blend.blendOpAlpha);put(blend.renderTargetWriteMask);
-    }
-    put(state.specialization);put(rectangle);
-    return key;
+    return EncodeNativeHardwareRaster(state.pipeline,state.specialization,rectangle);
 }
 using PipelineIdentity=PipelineKey<std::string>;
 using PipelineLookup=PipelineKey<std::string_view>;
@@ -513,7 +501,7 @@ std::string TextureKey(const Json& t) {return t.dump();}
 using TextureBindingKey=std::array<uint32_t,8>;
 using TextureBindingCache=std::map<TextureBindingKey,TextureBinding>;
 struct Image {
-    std::unique_ptr<RenderTexture> texture; Json identity;uint64_t version=0;bool dirty=false;std::bitset<kNativeEdramMaxTiles> tiles;
+    std::shared_ptr<RenderTexture> texture; Json identity;uint64_t version=0;bool dirty=false;std::bitset<kNativeEdramMaxTiles> tiles;
     // Pre-encode host floats after a fused clear. This is clean read state,
     // never a dirty working image or a source for a packed commit.
     ResolveMemory::AtlasDepthClearReceipt atlas_clear_receipt;
@@ -521,6 +509,9 @@ struct Image {
     std::optional<ResolveMemory::SurfacePageMask> physical_pages;
     // Views must be destroyed before their image, including on cache eviction.
     TextureBindingCache bindings;
+    // Resolve targets only: earlier images still owned by sampled draws or
+    // pending stores, reused once nothing else holds them.
+    std::vector<std::shared_ptr<RenderTexture>> spares;
 };
 struct AliasRetention {
     static constexpr uint64_t kMaxBytes=128u*1024*1024,kMaxGenerations=256,kMaxBindings=4096;
@@ -537,6 +528,8 @@ struct AliasGeneration {
     std::shared_ptr<RenderTexture> texture;
     TextureBindingCache bindings;
     uint64_t version=0,bytes=0;
+    // A resolve image in its native sampling format, not a decoded float image.
+    bool native_format=false;
     std::shared_ptr<AliasRetention> stale;
     ~AliasGeneration() {
         if(stale) {
@@ -554,7 +547,7 @@ struct SampledImage {std::shared_ptr<AliasGeneration> current;};
 struct UploadedImage {NativeTexture texture;TextureBindingCache bindings;DormantCacheEntry residency;
     std::array<uint32_t,6> initial_fetch{}; // Diagnostic only, never storage authority.
 };
-struct CachedVertex {std::unique_ptr<RenderBuffer> buffer;DormantCacheEntry residency;};
+struct CachedVertex {std::unique_ptr<RenderBuffer> buffer;NativeVertexArena::Slice slice;DormantCacheEntry residency;};
 uint64_t TextureAllocationBytes(const NativeTexture& texture) {
     const uint64_t image=static_cast<const VulkanTexture&>(*texture.GetImage()).allocationInfo.size;
     const uint64_t staging=texture.staging?static_cast<const VulkanBuffer&>(*texture.staging).allocationInfo.size:0;
@@ -745,7 +738,18 @@ struct SceneExecutor::State {
     struct FsiDrawPassStats {uint64_t candidates=0,shape_refusals=0,plane_refusals=0,eligible=0,selected=0,
         continued=0,boundaries=0,groups=0,maximum_group_draws=0,sampled_barriers_avoided=0,queried_selected=0,query_controls_preserved=0;} fsi_draw_pass_stats_;
     bool open_fsi_draw_pass_=false;
-    uint64_t async_shader_skipped_draws_=0,invalid_texture_skipped_draws_=0;
+    uint64_t async_shader_skipped_draws_=0,invalid_texture_skipped_draws_=0,viewport_skipped_draws_=0;
+    uint64_t draws_seen_=0;
+    template<class Op>std::optional<DrawViewport> UnrepresentableViewport(const Op& o) {
+        const auto payload=ViewPayload(o.State());
+        const auto raw=payload.bytes();
+        if(kDrawStateOffset+kDrawStateWords*4>raw.size())return std::nullopt;  // Draw reports the truncation
+        std::array<uint32_t,kDrawStateWords> words;
+        for(unsigned i=0;i<words.size();++i)words[i]=std::byteswap(LoadUnalignedU32(raw.data()+kDrawStateOffset+i*4));
+        const auto viewport=DecodeDrawViewport(words);
+        if(viewport.Representable())return std::nullopt;
+        return viewport;
+    }
     uint32_t fsi_draw_pass_draws_=0;
     NativeFsiPassPlanes open_fsi_draw_planes_{};
     bool open_packed_depth_pass_=false,open_packed_depth_atomic_=false;
@@ -914,6 +918,17 @@ struct SceneExecutor::State {
         uint64_t stores=0,adopted=0,discarded=0,budget_refusals=0,
                  receipt_bytes=0,peak_receipt_bytes=0;
     } canonical_resolve_stats_;
+    // Resolve destinations whose image equals the memory they last stored, by
+    // base address. Sampled reads of that memory may bind the image directly.
+    struct DirectResolveTarget {std::string key;TextureLayout layout;};
+    std::map<uint32_t,DirectResolveTarget> direct_resolve_targets_;
+    std::vector<std::shared_ptr<RenderTexture>> presentation_targets_;
+    struct DirectResolveStatistics {
+        uint64_t adopted=0,copy_on_write=0,spare_reuses=0,fixed_resolves=0,missing=0,stale=0,layout_refusals=0,format_refusals=0,
+                 verified=0,verify_mismatches=0;
+        double verify_max_difference=0;
+        std::map<std::string,uint64_t> verified_keys;
+    } direct_resolve_stats_;
     std::map<std::string,SampledImage> sampled_resolves_;
     SampledAliasIndex<decltype(sampled_resolves_)> sampled_alias_index_{sampled_resolves_};
     std::shared_ptr<AliasRetention> alias_retention_=std::make_shared<AliasRetention>();
@@ -929,6 +944,11 @@ struct SceneExecutor::State {
     uint64_t texture_binding_hits_=0,texture_binding_misses_=0,texture_binding_transient_=0;
     LookasideMap<std::string,CachedVertex,std::less<>,VertexDigestIndex,VertexDigestEqual> vertex_buffers_{config_.vertex_lookup_lookaside};
     std::unique_ptr<RetiredBufferPool<RenderBuffer>> vertex_buffer_pool_;
+    // Texture staging buffers of this frame's uploads, recycled once its
+    // submissions retire.
+    std::vector<std::unique_ptr<RenderBuffer>> frame_staging_;
+    StagingBufferPool<RenderBuffer> staging_pool_{256ull*1024*1024};
+    std::unique_ptr<NativeVertexArena> vertex_arena_;
     uint64_t vertex_buffer_allocations_=0,vertex_buffer_reuses_=0;
     DormantCache texture_cache_{{config_.max_dormant_texture_bytes,config_.max_dormant_texture_entries,config_.max_dormant_texture_epochs}};
     std::unique_ptr<NativeTextureEvictionReloadCensus> texture_eviction_reload_census_;
@@ -1476,12 +1496,17 @@ struct SceneExecutor::State {
     NativeTextureEvictionReloadCensus::Observer TextureCensusObserver() noexcept {
         return {texture_eviction_reload_census_.get(),texture_census_frame_,texture_census_frame_valid_};
     }
-    bool EvictTextureForBindings() {
+    // At the binding limit, evict down to kBindingEvictionTarget in one scan of
+    // the texture cache. Evicting one image per new binding rescanned the whole
+    // cache each time, which texture streaming turned into milliseconds.
+    static constexpr size_t kBindingEvictionLimit=4096,kBindingEvictionTarget=3584;
+    void EvictTexturesForBindings() {
+        const auto done=[&]{return cached_texture_bindings_<kBindingEvictionTarget;};
+        const auto retire=[&](const auto& entry){RetireCpuImageBindings(entry);};
+        const auto eligible=[](const auto& entry){return !entry.bindings.empty();};
         if(config_.diagnose_texture_eviction_reloads)
-            return texture_cache_.EvictUnusedForBindings(textures_,[&](const auto& entry){RetireCpuImageBindings(entry);},
-                [](const auto& entry){return !entry.bindings.empty();},TextureCensusObserver());
-        return texture_cache_.EvictUnusedForBindings(textures_,[&](const auto& entry){RetireCpuImageBindings(entry);},
-            [](const auto& entry){return !entry.bindings.empty();});
+            texture_cache_.EvictUnusedForBindingsUntil(textures_,retire,eligible,done,TextureCensusObserver());
+        else texture_cache_.EvictUnusedForBindingsUntil(textures_,retire,eligible,done);
     }
     void RetireCpuImageBindings(const UploadedImage& image) {
         // Both frame retirement and binding-pressure eviction call this before
@@ -1512,7 +1537,7 @@ struct SceneExecutor::State {
         const auto binding_limit=CpuTextureSamplingBindingLimit(texture.fetch,shared_cpu_storage);
         if(shared_cpu_storage&&cache.size()>=binding_limit&&cache.size()<16)
             ++cpu_texture_sampling_.reserved_binding_refusals;
-        if(cache.size()<binding_limit)while(cached_texture_bindings_>=4096&&EvictTextureForBindings()) {}
+        if(cache.size()<binding_limit&&cached_texture_bindings_>=kBindingEvictionLimit)EvictTexturesForBindings();
         // UploadTexture already creates a binding for its initial fetch state.
         // Adopt it on first use instead of allocating a duplicate view/sampler.
         auto binding=uploaded_binding&&uploaded_binding->view?std::move(*uploaded_binding):
@@ -1525,7 +1550,7 @@ struct SceneExecutor::State {
         // Avoid unbounded sampler variants when settings or guest fetch state
         // animate. At the bound, keep this draw's binding alive until its fence
         // completes rather than evicting a view used by an earlier draw slot.
-        if(cache.size()<binding_limit&&cached_texture_bindings_<4096) {
+        if(cache.size()<binding_limit&&cached_texture_bindings_<kBindingEvictionLimit) {
             ++cached_texture_bindings_;
             if(shared_cpu_storage&&!(texture.fetch[4]&0x003ff000u))++cpu_texture_sampling_.zero_bias_cached;
             return cache.emplace(key,std::move(binding)).first->second;
@@ -1654,11 +1679,13 @@ struct SceneExecutor::State {
             throw std::invalid_argument("Invalid transfer-only depth source region");
         frame_surfaces_.insert(key);
         const auto tiles=SurfaceTiles(storage);
+        std::vector<std::pair<std::string,uint64_t>> inventory_commits;
         // Commit dirty images before a different interpretation can read or
         // overwrite their tiles. Base addresses need not be equal to alias.
         for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
             const auto previous=SurfaceStorage(image.identity);
             ++surface_conversions_.commits;surface_conversions_.commit_pixels+=uint64_t(previous.width)*previous.height;
+            if(edram_inventory::Enabled())inventory_commits.emplace_back(other,uint64_t(previous.width)*previous.height);
             if(surface_conversions_.commit_keys.size()<64||surface_conversions_.commit_keys.contains(other))
                 ++surface_conversions_.commit_keys[other+"->"+key];
             edram_memory_->StoreSurface(*image.texture,previous);
@@ -1698,6 +1725,17 @@ struct SceneExecutor::State {
             overwrite->right==int32_t(storage.width)&&overwrite->bottom==int32_t(storage.height);
         if(overwrite)++full_color_clear_restore_stats_.requests;
         if(full_overwrite)++full_color_clear_restore_stats_.full_overwrites;
+        if(edram_inventory::Enabled()) {
+            // What became of the bytes the commits above stored for this access.
+            const char* decision=entry.dirty?"target_dirty":version==entry.version?"target_current":
+                full_overwrite?"restore_skipped_full_clear":depth_read_region?"region_restored":"restored";
+            const std::string access=write?(overwrite?"clear":"write"):depth_read_region?"depth_region_read":"read";
+            for(const auto& [other,pixels]:inventory_commits)
+                edram_inventory::Note("commit",other,key,decision,pixels);
+            if(!entry.dirty&&version!=entry.version)
+                edram_inventory::Note(full_overwrite?"restore_skipped":"restore",key,"",access,
+                    uint64_t(storage.width)*storage.height);
+        }
         if(!entry.dirty&&version!=entry.version&&full_overwrite) {
             ++full_color_clear_restore_stats_.skipped_restores;
             full_color_clear_restore_stats_.skipped_restore_pixels+=uint64_t(storage.width)*storage.height;
@@ -2270,14 +2308,9 @@ struct SceneExecutor::State {
         });
         return valid&&slots==1&&vertices==1&&indices==1;
     }
-    void PrewarmFsiPipeline(const NativeFsiPipelineRecipe &recipe, std::span<const uint32_t> vertex,
-                            std::span<const uint32_t> pixel) {
-        if (!config_.native_fsi || mutation_serial() || HasPendingGpuWork() || queries_->active() ||
-            !deferred_queries_.empty())
-            throw std::runtime_error("Pipeline prewarm requires an unexecuted packed Scene");
-        if (!ValidNativeFsiPipelineRecipe(recipe))
-            throw std::invalid_argument("Invalid native pipeline recipe");
-        const auto module = [&](std::string_view digest, bool fsi, std::span<const uint32_t> code,
+    // Startup only: the shader module a prewarmed pipeline uses, created
+    // exactly as Draw would create it on its first use.
+    RenderShader* PrewarmModule(std::string_view digest, bool fsi, std::span<const uint32_t> code,
                                 const RenderShader *protect, NativeShaderVariant variant,
                                 bool *audited_vertex = nullptr,bool pinned_atomic = false) {
             const ShaderCacheLookup key{digest, fsi, variant};
@@ -2358,7 +2391,35 @@ struct SceneExecutor::State {
             if (audited_vertex)
                 *audited_vertex = found->second.audited_atomic_vertex;
             return found->second.shader.get();
-        };
+    }
+    // Hardware render target mode: rebuild a recorded pipeline under the same
+    // key Draw looks up, so its first draw neither waits nor is skipped.
+    void PrewarmHardwarePipeline(const NativeFsiPipelineRecipe &recipe, std::span<const uint32_t> vertex,
+                                 std::span<const uint32_t> pixel) {
+        if (config_.native_fsi || mutation_serial() || HasPendingGpuWork() || queries_->active() ||
+            !deferred_queries_.empty())
+            throw std::runtime_error("Pipeline prewarm requires an unexecuted hardware render target Scene");
+        if (!ValidNativeHardwarePipelineRecipe(recipe) || bool(recipe.pixel) != !pixel.empty())
+            throw std::invalid_argument("Invalid hardware pipeline recipe");
+        auto *vs = PrewarmModule(recipe.vertex, false, vertex, nullptr, NativeShaderVariant::Unmodified);
+        auto *ps = recipe.pixel ? PrewarmModule(*recipe.pixel, false, pixel, vs, NativeShaderVariant::Unmodified) : nullptr;
+        NativeHardwareRaster raster;
+        std::copy(recipe.hardware.begin(), recipe.hardware.end(), raster.begin());
+        const NativeHardwarePipelineDescriptor owned(raster, recipe.color_format, recipe.depth_format,
+                                                     layout_.get(), vs, ps);
+        const PipelineLookup key{std::string_view(recipe.vertex),
+                                 recipe.pixel ? std::optional<std::string_view>(*recipe.pixel) : std::nullopt,
+                                 PipelineRasterKey(raster), recipe.color_format, recipe.depth_format};
+        Pipeline(key, owned.descriptor);
+    }
+    void PrewarmFsiPipeline(const NativeFsiPipelineRecipe &recipe, std::span<const uint32_t> vertex,
+                            std::span<const uint32_t> pixel) {
+        if (!config_.native_fsi || mutation_serial() || HasPendingGpuWork() || queries_->active() ||
+            !deferred_queries_.empty())
+            throw std::runtime_error("Pipeline prewarm requires an unexecuted packed Scene");
+        if (!ValidNativeFsiPipelineRecipe(recipe))
+            throw std::invalid_argument("Invalid native pipeline recipe");
+        const auto module = [&](auto&&... args) {return PrewarmModule(std::forward<decltype(args)>(args)...);};
         bool audited_vertex = false;
         auto *vs = module(recipe.vertex, false, vertex, nullptr, ShaderVariant(false), &audited_vertex);
         auto *ps = module(recipe.pixel ? std::string_view(*recipe.pixel) : std::string_view("depth-only"),
@@ -3968,7 +4029,7 @@ struct SceneExecutor::State {
             !(layout.base_address&3u);
         const uint32_t format=layout.format>=27&&layout.format<=29?layout.format+3:
             layout.format==54?7:layout.format;
-        const bool format_supported=format==2||format==6||format==7||format==22||format==23||
+        const bool format_supported=format==2||format==6||format==7||format==10||format==22||format==23||
             format==24||format==25||format==26||format==30||format==31||format==32||
             format==36||format==37||format==38;
         diagnostic.storage_layout_supported+=storage_layout;
@@ -4056,10 +4117,14 @@ public:
             throw std::runtime_error("Native draw batch size must be between 1 and 64");
         if(config_.max_stale_alias_bytes>AliasRetention::kMaxBytes)
             throw std::invalid_argument("Native stale alias budget exceeds 128 MiB");
-        if(!config_.max_pipeline_cache_entries||config_.max_pipeline_cache_entries>2048||
-           !NativeFsiMaterialShaderCacheBoundsValid(config_.fsi_state_cache_headroom,
+        // Hardware render targets may keep every recorded pipeline resident.
+        const bool hardware_bounds=!config_.native_fsi&&!config_.fsi_state_cache_headroom&&
+            config_.max_shader_cache_entries>=2&&config_.max_shader_cache_entries<=4096&&
+            config_.max_shader_cache_bytes&&config_.max_shader_cache_bytes<=256u*1024*1024;
+        if(!config_.max_pipeline_cache_entries||config_.max_pipeline_cache_entries>(config_.native_fsi?2048u:8192u)||
+           (!hardware_bounds&&!NativeFsiMaterialShaderCacheBoundsValid(config_.fsi_state_cache_headroom,
                config_.fsi_state_material_composition,config_.specialize_fsi_pipeline_state,
-               config_.max_shader_cache_entries,config_.max_shader_cache_bytes))
+               config_.max_shader_cache_entries,config_.max_shader_cache_bytes)))
             throw std::invalid_argument("Native persistent pipeline/shader cache bounds are invalid");
         if(config_.max_dormant_texture_bytes>2048ull*1024*1024||config_.max_dormant_texture_entries>4096||
            config_.max_dormant_texture_epochs>7200||
@@ -4210,7 +4275,7 @@ public:
         // Hardware render targets batch like FSI: each draw keeps its own
         // command list, framebuffer and image references until its fence.
         submission_capacity_=NativeSubmissionCapacity(config_.async_submission_capacity,config_.async_gpu_submissions);
-        if(config_.async_pipelines&&device_)async_pipelines_.Start(4);
+        if(config_.async_pipelines&&device_)async_pipelines_.Start(BackgroundPipelineThreads());
         pending_draws_.reserve(submission_capacity_.lists);
         diagnostic_counters_.completed_frames.reserve(65);
         if(!output_.empty())fs::create_directories(output_);
@@ -4470,6 +4535,7 @@ public:
         transfers_->SetDescriptorPoolEnabled(config_.recycle_pass_transfer_descriptors);
         transfers_->SetRenderPassCacheEnabled(config_.recycle_pass_transfer_render_passes);
         if(config_.recycle_vertex_buffers)vertex_buffer_pool_=std::make_unique<RetiredBufferPool<RenderBuffer>>();
+        if(config_.vertex_arena)vertex_arena_=std::make_unique<NativeVertexArena>(*device_);
         resolve_memory_=std::make_unique<ResolveMemory>(*device_,*queue_,memory_store_spv,memory_load_spv,512u*1024*1024,0,transfer_batch_.get(),config_.compact_cpu_texture_version_pages,config_.block_page_versions,config_.range_texture_versions,config_.coalesced_texture_ranges,config_.reuse_defined_ranges);
         resolve_memory_->SetCpuWriteUploadReuseEnabled(config_.reuse_cpu_write_upload);
         resolve_memory_->SetCpuUploadReceiptForwardingEnabled(config_.forward_cpu_upload_receipts);
@@ -4477,6 +4543,7 @@ public:
         resolve_memory_->SetImagePoolEnabled(config_.recycle_resolve_images);
         resolve_memory_->SetDescriptorPoolEnabled(config_.recycle_resolve_descriptors);
         resolve_memory_->SetIdentityViewReuseEnabled(config_.reuse_resolve_identity_views);
+        resolve_memory_->SetDeferredStoresEnabled(config_.deferred_resolve_stores);
         if(config_.canonical_resolve_stores&&config_.native_fsi)
             canonical_resolve_stats_.configured=resolve_memory_->EnableCanonicalStoreReceipt(memory_store_canonical_spv);
         if(config_.direct_atlas_depth_resolves&&config_.native_fsi)
@@ -5039,6 +5106,11 @@ public:
         }
         report["vertex_cache"]=residency_report(vertex_buffers_,vertex_cache_);
         const auto vertex_pool=vertex_buffer_pool_?vertex_buffer_pool_->statistics():RetiredBufferPool<RenderBuffer>::Statistics{};
+        if(vertex_arena_) {
+            const auto& arena=vertex_arena_->statistics();
+            report["vertex_arena"]={{"slices",arena.slices},{"fallbacks",arena.fallbacks},
+                {"chunk_creations",arena.chunk_creations},{"rewinds",arena.rewinds},{"chunks",vertex_arena_->chunks()}};
+        } else report["vertex_arena"]={{"enabled",false}};
         report["vertex_buffer_pool"]={{"enabled",config_.recycle_vertex_buffers},
             {"actual_allocations",vertex_buffer_allocations_},{"actual_reuses",vertex_buffer_reuses_},
             {"hits",vertex_pool.hits},{"misses",vertex_pool.misses},{"returns",vertex_pool.returns},
@@ -5047,6 +5119,17 @@ public:
             {"peak_idle_buffers",vertex_pool.peak_idle_buffers},{"peak_idle_allocation_bytes",vertex_pool.peak_idle_bytes},
             {"maximum_idle_buffers",RetiredBufferPool<RenderBuffer>::kMaxBuffers},
             {"maximum_idle_allocation_bytes",RetiredBufferPool<RenderBuffer>::kMaxBytes}};
+        if(config_.direct_resolve_textures) {
+            const auto& direct=direct_resolve_stats_;
+            report["direct_resolve_textures"]={{"adopted",direct.adopted},{"copy_on_write",direct.copy_on_write},{"spare_reuses",direct.spare_reuses},{"fixed_resolves",direct.fixed_resolves},
+                {"missing",direct.missing},{"stale",direct.stale},{"layout_refusals",direct.layout_refusals},
+                {"format_refusals",direct.format_refusals},{"verified",direct.verified},
+                {"verify_mismatches",direct.verify_mismatches},{"verify_max_difference",direct.verify_max_difference}};
+            const auto deferred=resolve_memory_->deferred_store_statistics();
+            report["direct_resolve_textures"]["deferred_stores"]={{"enabled",config_.deferred_resolve_stores},
+                {"deferred",deferred.deferred},{"superseded",deferred.superseded},{"materialized",deferred.materialized},
+                {"pending",deferred.pending},{"peak_pending",deferred.peak_pending}};
+        }
         const auto& canonical=canonical_resolve_stats_;
         report["canonical_resolve_stores"]={{"enabled",config_.canonical_resolve_stores},
             {"configured",canonical.configured},{"stores",canonical.stores},
@@ -5405,10 +5488,13 @@ public:
             {"uploaded_bytes",cpu_writes.uploaded_bytes}};
         if(config_.forward_cpu_upload_receipts) {
             const auto& receipts=resolve_memory_->cpu_upload_receipt_statistics();
+            const auto& copies=resolve_memory_->copy_publication_statistics();
+            report["gpu_copy_publications"]={{"receipts",copies.receipts},{"readbacks",copies.readbacks},
+                {"inactive_batch",copies.inactive_batch},{"ineligible",copies.ineligible},{"receipt_misses",copies.receipt_misses}};
             report["cpu_upload_receipts"]={{"requested",receipts.requested},{"enabled",receipts.enabled},{"checked_queue",receipts.checked_queue},
                 {"unchecked_queue_refusals",receipts.unchecked_queue_refusals},
-                {"maximum_pages",NativeCpuUploadReceipts::kSlots},
-                {"maximum_payload_bytes",NativeCpuUploadReceipts::kMaximumPayloadBytes},
+                {"maximum_pages",resolve_memory_->cpu_upload_receipt_slots()},
+                {"maximum_payload_bytes",resolve_memory_->cpu_upload_receipt_payload_bytes()},
                 {"storage_bytes",receipts.storage_bytes},{"allocation_refusals",receipts.allocation_refusals},
                 {"write_attempts",receipts.write_attempts},{"admitted_pages",receipts.admitted_pages},
                 {"admitted_bytes",receipts.admitted_bytes},{"queued_refusals",receipts.queued_refusals},
@@ -5694,11 +5780,26 @@ public:
         readonly_query_read_owner_.reset();
         transfer_report_dirty_=true;
         SealDrawCommandGroup();
+        // Inside a transfer run (BeginTransferRun) the work joins that scope:
+        // the same ordered command list it would otherwise open after.
+        if(transfer_batch_->in_scope()){work();return;}
         try {transfer_batch_->Run(work,event,tag);}
         catch(const NativeTransferBatchError& error) {throw NativeBatchCompletionError(error.what());}
     }
+    // Mirrors the runtime's QueueCpuMemoryCopy; a disagreement only falls back
+    // to the synchronous copy.
+    bool QueueCpuMemoryCopy(const Json& o) const {
+        if(!config_.queue_cpu_memory_copies||!gpu_work_queue_||
+           (o.at("source_kind")!="cpu_snapshot"&&o.at("source_kind")!="cpu_direct"))return false;
+        const uint32_t destination=o.at("destination"),count=o.at("bytes");
+        if(!count||uint64_t(destination)+count>0x20000000ull)return false;
+        for(const auto& pending:deferred_queries_)
+            if(NativeCpuWriteOverlapsQueryReport(destination,count,pending.query.result.end_address))return false;
+        return true;
+    }
     bool QueueCpuWrite(const Json& o) const {
-        if(!NativeCpuWriteQueueEligible(config_.queue_cpu_memory_writes,bool(gpu_work_queue_),
+        const auto eligible=o.at("payload").is_null()?NativeCpuInvalidationQueueEligible:NativeCpuWriteQueueEligible;
+        if(!eligible(config_.queue_cpu_memory_writes,bool(gpu_work_queue_),
                 o.at("address").get<uint32_t>(),o.at("bytes").get<uint32_t>()))return false;
         for(const auto& pending:deferred_queries_)
             if(NativeCpuWriteOverlapsQueryReport(o.at("address"),o.at("bytes"),pending.query.result.end_address))return false;
@@ -5972,7 +6073,10 @@ public:
         };
         RenderTexture* depth=flags&0x30?attachment("10"):nullptr;
         auto color=o.at("color").is_null()?std::array<float,4>{}:o.at("color").get<std::array<float,4>>();
-        if(config_.skip_full_color_clear_restore&&config_.native_fsi&&!(flags&0x30)&&(flags&0xf)) {
+        // Depth is fetched above without discard, so only color attachments can
+        // skip their restore; with hardware targets that holds for combined clears.
+        const bool hardware_discard=config_.hardware_skip_full_clear_restore&&!config_.native_fsi&&(flags&0xf);
+        if(hardware_discard||(config_.skip_full_color_clear_restore&&config_.native_fsi&&!(flags&0x30)&&(flags&0xf))) {
             // PassTransfer validates depth even for color-only clears. Refuse
             // omission on malformed/range-invalid scalar input, preserving the
             // original validation path rather than leaving a stale image dirty.
@@ -6141,6 +6245,87 @@ public:
         ++canonical_resolve_stats_.discarded;
         canonical_resolve_receipts_.erase(found);
     }
+    // Formats whose memory encoding is lossless for the resolve image, so the
+    // decoded alias and the image sample identically. 7/54 store packed bits
+    // that titles reinterpret; 2 and depth keep their verified decode paths.
+    bool DirectResolveFormat(const TextureLayout& layout) const {
+        switch(layout.format) {
+            // Depth 22/23 verified exact (or one float rounding step) against
+            // the decode of their 24-bit stores.
+            case 6:case 22:case 23:case 25:case 26:case 27:case 28:case 29:case 30:case 31:case 32:case 36:case 37:case 38:break;
+            // 54 stores packed 7e3 bits that read back up to ~0.002 apart; it
+            // stays a candidate for verification only.
+            case 54:if(config_.verify_direct_resolve_textures)break;return false;
+            default:return false;
+        }
+        return layout.dimension==1&&layout.layers==1&&!layout.max_mip&&!layout.min_mip&&
+            layout.levels.size()==1&&layout.block.block_width==1;
+    }
+    static bool SameDirectResolveLayout(const TextureLayout& a,const TextureLayout& b) {
+        const auto& x=a.levels.front();const auto& y=b.levels.front();
+        return a.format==b.format&&a.width==b.width&&a.height==b.height&&a.depth==b.depth&&
+            a.dimension==b.dimension&&a.layers==b.layers&&a.tiled==b.tiled&&a.endian==b.endian&&
+            a.block.bytes==b.block.bytes&&a.block.components==b.block.components&&
+            x.x==y.x&&x.y==y.y&&x.pitch_blocks==y.pitch_blocks&&x.offset==y.offset&&
+            NativeTextureFormat(a)==NativeTextureFormat(b);
+    }
+    std::shared_ptr<RenderTexture> DirectResolveTexture(const TextureLayout& layout,uint32_t address,uint64_t version) {
+        auto& stats=direct_resolve_stats_;
+        if(!DirectResolveFormat(layout)){++stats.format_refusals;return {};}
+        const auto found=direct_resolve_targets_.find(address);
+        if(found==direct_resolve_targets_.end()){++stats.missing;return {};}
+        if(!SameDirectResolveLayout(found->second.layout,layout)){++stats.layout_refusals;return {};}
+        const auto image=resolved_.find(found->second.key);
+        if(image==resolved_.end()||!image->second.texture||image->second.version!=version) {
+            ++stats.stale;return {};
+        }
+        ++stats.adopted;
+        return image->second.texture;
+    }
+    // Presented images rotate: the presenter may still sample earlier ones.
+    std::shared_ptr<RenderTexture> PresentationTarget(uint32_t width,uint32_t height) {
+        for(const auto& target:presentation_targets_) {
+            const auto& desc=static_cast<const VulkanTexture&>(*target).desc;
+            if(target.use_count()==1&&desc.width==width&&desc.height==height)return target;
+        }
+        std::shared_ptr<RenderTexture> created=device_->createTexture(
+            RenderTextureDesc::ColorTarget(width,height,RenderFormat::R32G32B32A32_FLOAT));
+        if(!created)throw std::runtime_error("Cannot allocate native presentation image");
+        std::erase_if(presentation_targets_,[](const auto& target){return target.use_count()==1;});
+        if(presentation_targets_.size()<4)presentation_targets_.push_back(created);
+        return created;
+    }
+    // Diagnostic: compare the resolve image with the decode of the memory it
+    // just stored, both as float32, for the first few resolves of each target.
+    void VerifyDirectResolve(RenderTexture& image,const TextureLayout& layout,uint32_t address,const std::string& key) {
+        auto& stats=direct_resolve_stats_;
+        if(stats.verified_keys[key]++>=4)return;
+        NativeTransferBatch::Suspension synchronous(transfer_batch_.get());
+        FlushPendingDraws();
+        const RenderRect r(0,0,layout.width,layout.height);
+        auto direct=device_->createTexture(RenderTextureDesc::ColorTarget(layout.width,layout.height,RenderFormat::R32G32B32A32_FLOAT));
+        transfers_->Resolve(image,*direct,r,r);
+        auto decoded=resolve_memory_->Load(layout,address);
+        auto decoded_float=device_->createTexture(RenderTextureDesc::ColorTarget(layout.width,layout.height,RenderFormat::R32G32B32A32_FLOAT));
+        transfers_->Resolve(*decoded,*decoded_float,r,r);
+        const auto a=validation::ReadImage(*device_,*queue_,*direct,16);
+        const auto b=validation::ReadImage(*device_,*queue_,*decoded_float,16);
+        uint64_t mismatches=0;double largest=0;
+        const unsigned channels=layout.block.components;
+        for(size_t i=0;i+16<=std::min(a.size(),b.size());i+=16)for(unsigned c=0;c<channels;++c) {
+            float x,y;std::memcpy(&x,a.data()+i+c*4,4);std::memcpy(&y,b.data()+i+c*4,4);
+            if(std::memcmp(&x,&y,4)) {
+                ++mismatches;
+                const double difference=std::isfinite(x)&&std::isfinite(y)?std::abs(double(x)-y):INFINITY;
+                largest=std::max(largest,difference);
+            }
+        }
+        ++stats.verified;stats.verify_max_difference=std::max(stats.verify_max_difference,largest);
+        if(mismatches)++stats.verify_mismatches;
+        auto& results=report["direct_resolve_verifications"];
+        if(results.size()<256)results.push_back({{"key",key},{"format",layout.format},{"width",layout.width},
+            {"height",layout.height},{"mismatched_channel_values",mismatches},{"max_difference",largest}});
+    }
     bool StoreCanonicalResolve(RenderTexture& image,const TextureLayout& layout,
                                const RenderRect& rectangle,uint32_t address) {
         if(!canonical_resolve_stats_.configured)return false;
@@ -6205,17 +6390,36 @@ public:
         // They are never replaced with CPU snapshots or a fabricated clear.
         if(!full&&!resolve_memory_->FullyDefined(layout,address))report["uninitialized_resolve_regions"].push_back({{"event",o.at("event")},{"identity",identity},{"written_rectangle",o.at("destination_rectangle")}});
         auto& dest=resolved_[key];
+        if(dest.texture&&size_t(dest.texture.use_count())>1+resolve_memory_->PendingStoreReferences(dest.texture.get())) {
+            // Sampled generations own the previous image and require it to stay
+            // immutable. Write another one; a partial resolve first restores it.
+            auto held=std::move(dest.texture);dest.version=0;++direct_resolve_stats_.copy_on_write;
+            for(auto& spare:dest.spares)if(spare&&spare.use_count()==1) {
+                dest.texture=std::move(spare);++direct_resolve_stats_.spare_reuses;break;
+            }
+            std::erase_if(dest.spares,[](const auto& spare){return !spare;});
+            if(dest.spares.size()<4)dest.spares.push_back(std::move(held));
+        }
         if(!dest.texture) {
             dest.texture=device_->createTexture(RenderTextureDesc::ColorTarget(layout.width,layout.height,NativeTextureFormat(layout)));
             dest.identity=identity;
         }
         if(!full&&dest.version!=resolve_memory_->Version(layout,address)&&resolve_memory_->AnyDefined(layout,address)) {
+            // Run any pending store of this image before replacing its contents.
+            resolve_memory_->ReleaseDeferredImage(*dest.texture,{});
             auto restored=resolve_memory_->LoadShared(layout,address);
             const RenderRect whole(0,0,layout.width,layout.height);
             transfers_->Resolve(*restored,*dest.texture,whole,whole);
             if(detailed_reports_)report["texture_alias_restores"].push_back({{"event",o.at("event")},{"identity",identity}});
         }
         const unsigned slot=o.at("source_slot");const auto& source=o.at("surfaces").at(std::to_string(6+slot));
+        if(edram_inventory::Enabled()) {
+            edram_inventory::Note("resolve",SurfaceKey(source),key,full?"full":"partial",
+                uint64_t(dst.right-dst.left)*uint64_t(dst.bottom-dst.top));
+            edram_inventory::RecordResolveTarget(address,"fmt "+std::to_string(layout.format)+" "+
+                std::to_string(layout.width)+"x"+std::to_string(layout.height)+(layout.tiled?" tiled":" linear")+
+                " from "+SurfaceKey(source));
+        }
         auto conversion=PassTransfer::Conversion::Color;
         if(identity.at("format")==2)conversion=PassTransfer::Conversion::UNorm8;
         if(identity.at("format")==7)conversion=PassTransfer::Conversion::UNorm10;
@@ -6313,7 +6517,12 @@ public:
             src_image=msaa_average.get();
             ++msaa_fallback_.averaged_resolves;
         }
-        if(fixed_source) {
+        if(fixed_source&&config_.hardware_direct_fixed_resolves&&!direct_fixed_source&&!msaa_average&&
+           conversion==PassTransfer::Conversion::Color) {
+            // The same quantization in the resolve pass; the surface stays dirty
+            // and commits only if another EDRAM interpretation needs it.
+            conversion=PassTransfer::Conversion::Fixed16;++direct_resolve_stats_.fixed_resolves;
+        } else if(fixed_source) {
             // Float working attachments may contain values outside the guest
             // fixed16 range. Resolve must read the encoded EDRAM values before
             // applying its exponent, including signed alpha used by DOF.
@@ -6331,6 +6540,7 @@ public:
         const bool destination_swap=ResolveDestinationSwap(fetch,slot);
         if(o.contains("copy_dest_swap")&&o.at("copy_dest_swap")!=destination_swap)
             throw std::runtime_error("Resolve destination swap disagrees with captured guest resource");
+        resolve_memory_->ReleaseDeferredImage(*dest.texture,ResolveMemory::StoreFootprintKey(layout,dst,address));
         if(!fused_atlas_resolve)transfers_->Resolve(quantized_source?*quantized_source:*src_image,*dest.texture,src,dst,o.at("exponent_bias"),conversion,
             destination_swap?0x60a:0x688);
         if(destination_swap&&detailed_reports_)report["resolve_destination_swaps"].push_back(o.at("event"));
@@ -6354,9 +6564,18 @@ public:
             stats.source_pixels+=kNativeDirectAtlasDepthResolvePixels;
             stats.resolve_pixels+=uint64_t(src.right-src.left)*uint64_t(src.bottom-src.top);
         } else if(slot==4)resolve_memory_->StoreDepth(*dest.texture,layout,dst,address,*src_image,src.left-dst.left,src.top-dst.top);
-        else if(!StoreCanonicalResolve(*dest.texture,layout,dst,address))
+        else if(config_.deferred_resolve_stores&&DirectResolveFormat(layout)&&layout.format!=54&&
+                resolve_memory_->DeferStore(dest.texture,layout,dst,address)) {
+            // The image now stands in for these bytes until something reads them.
+        } else if(!StoreCanonicalResolve(*dest.texture,layout,dst,address))
             resolve_memory_->Store(*dest.texture,layout,dst,address);
         dest.version=resolve_memory_->Version(layout,address);
+        if(config_.direct_resolve_textures) {
+            if(DirectResolveFormat(layout)&&!atlas_rgba_source&&(slot!=4||layout.format==22||layout.format==23)) {
+                direct_resolve_targets_[address]=DirectResolveTarget{key,layout};
+                if(config_.verify_direct_resolve_textures)VerifyDirectResolve(*dest.texture,layout,address,key);
+            } else direct_resolve_targets_.erase(address);
+        }
         if(temporal_&&slot==4&&conversion==PassTransfer::Conversion::DepthFloat24)
             temporal_->ObserveDepthResolve(dest.texture.get());
         if(temporal_&&slot!=4&&temporal_velocity_base_>=0&&
@@ -6390,6 +6609,7 @@ public:
         return ready;
     }
     void Draw(const DrawInput& o) {
+        ++draws_seen_;
         // The guest render thread wrote this draw's device-state copy on
         // another core moments ago. Start pulling the register block that
         // Draw decodes (booleans/loops through the draw-state words) before
@@ -6408,6 +6628,15 @@ public:
             if(invalid_texture_skipped_draws_++<8)
                 REXLOG_WARN("Native renderer: skipped draw {} sampling unbound texture slot {} (fetch word {:08x})",
                     o.Event(),o.typed->invalid_texture_fetch->first,o.typed->invalid_texture_fetch->second);
+            return;
+        }
+        // A viewport the pipeline cannot represent (flipped, or depth outside
+        // [0, 1]) loses that one draw rather than the renderer.
+        if(const auto skipped=UnrepresentableViewport(o)) {
+            if(viewport_skipped_draws_++<8)
+                REXLOG_WARN("Native renderer: skipped draw {} with unsupported viewport (x scale {} offset {}, "
+                    "y scale {} offset {}, z scale {} offset {})",o.Event(),skipped->x_scale,skipped->x_offset,
+                    skipped->y_scale,skipped->y_offset,skipped->z_scale,skipped->z_offset);
             return;
         }
         if(temporal_)TemporalBeforeDraw(o);
@@ -6571,23 +6800,26 @@ public:
             const bool gpu_memory=g.GpuMemory();
             std::vector<uint8_t> native_bytes;
             if(gpu_memory)native_bytes=ReadPhysical(g.Address(),g.Bytes());
-            const auto native_digest=gpu_memory?picosha2::hash256_hex_string(native_bytes):std::string{};
+            const auto native_digest=gpu_memory?ContentHash(native_bytes):std::string{};
             const std::string_view key=gpu_memory?std::string_view(native_digest):g.Payload().Digest();
             auto found_vertex=vertex_buffers_.find(key);
             if(found_vertex==vertex_buffers_.end())found_vertex=vertex_buffers_.emplace(
                 std::piecewise_construct,std::forward_as_tuple(key),std::forward_as_tuple()).first;
             auto& entry=found_vertex->second;
-            vertex_cache_.Access(entry.residency,bool(entry.buffer));
+            vertex_cache_.Access(entry.residency,bool(entry.buffer)||bool(entry.slice));
             auto& b=entry.buffer;
-            if(!b) {
-                if(gpu_memory)b=UploadVertex(native_bytes);
+            if(!b&&!entry.slice) {
+                std::optional<decltype(ReadPayload(g.Payload()))> payload;
+                if(!gpu_memory)payload.emplace(ReadPayload(g.Payload()));
+                const auto bytes=gpu_memory?std::span<const uint8_t>(native_bytes):payload->bytes();
+                if(vertex_arena_)entry.slice=vertex_arena_->Allocate(bytes);
+                if(entry.slice)vertex_cache_.Created(entry.residency,entry.slice.bytes());
                 else {
-                    const auto payload=ReadPayload(g.Payload());
-                    b=UploadVertex(payload.bytes());
+                    b=UploadVertex(bytes);
+                    vertex_cache_.Created(entry.residency,static_cast<const VulkanBuffer&>(*b).allocationInfo.size);
                 }
-                vertex_cache_.Created(entry.residency,static_cast<const VulkanBuffer&>(*b).allocationInfo.size);
             }
-            shared.vertex_streams[slot]={b->getDeviceAddress(),g.Bytes(),up?2:g.Endian()};
+            shared.vertex_streams[slot]={entry.slice?entry.slice.address():b->getDeviceAddress(),g.Bytes(),up?2:g.Endian()};
         });
         IndexGeometryParameters index_parameters;
         index_parameters.count=count;index_parameters.primitive=primitive;
@@ -6763,9 +6995,11 @@ public:
             if(!cpu_snapshot)cpu_image_slots_.ResetSlot(slot,CpuImageSlots::ResetReason::NonCpuTexture);
             if(cpu_snapshot) {
                 const auto version_start=time_cpu_stages_?DrawClock::now():DrawClock::time_point{};
-                const auto version=resolve_memory_->CpuTextureVersion(layout);
-                const CpuImageLookup key{CpuTextureStorageSamplingKey(fetch,config_.share_cpu_texture_sampling_variants),t.BasePayload().OptionalDigest(),
-                    t.MipPayload().OptionalDigest(),version};
+                bool gpu_bytes=true;
+                const auto version=resolve_memory_->CpuTextureVersion(layout,&gpu_bytes);
+                const auto storage_key=CpuTextureStorageSamplingKey(fetch,config_.share_cpu_texture_sampling_variants);
+                const CpuImageLookup key{gpu_bytes?storage_key:CpuTextureContentKey(storage_key),t.BasePayload().OptionalDigest(),
+                    t.MipPayload().OptionalDigest(),gpu_bytes?version:kCpuTextureContentVersion};
                 auto found=cpu_image_slots_.Find(slot,key);
                 if(found==textures_.end()) {
                     found=textures_.emplace(
@@ -6858,8 +7092,16 @@ public:
                     const auto upload_start=time_cpu_stages_?DrawClock::now():DrawClock::time_point{};
                     if(time_cpu_stages_)texture_timing_.decode+=DrawMilliseconds(decode_start,upload_start);
                     if(DrawGroupsEnabled())BeginStandalone();
-                    texture=UploadTexture(*device_,*commands,decoded,anisotropy,config_.max_sampler_anisotropy);
+                    texture=UploadTexture(*device_,*commands,decoded,anisotropy,config_.max_sampler_anisotropy,
+                        [&](uint64_t bytes)->std::unique_ptr<RenderBuffer> {
+                            if(auto reused=staging_pool_.Take(bytes))return reused;
+                            const auto size=StagingBufferPool<RenderBuffer>::SizeClass(bytes);
+                            return size?device_->createBuffer(RenderBufferDesc::UploadBuffer(size)):nullptr;
+                        });
                     texture_cache_.Created(uploaded.residency,TextureAllocationBytes(texture));
+                    // The image keeps its residency charge; the staging copy is
+                    // needed only until this frame's submissions retire.
+                    frame_staging_.push_back(std::move(texture.staging));
                     if(time_cpu_stages_)texture_timing_.upload+=DrawMilliseconds(upload_start,DrawClock::now());
                     if(census_creation)texture_eviction_reload_census_->EndCreation(*census_creation,uploaded.residency.allocation_bytes,
                         {texture_timing_.payload,texture_timing_.overlay,texture_timing_.decode,texture_timing_.upload});
@@ -6911,6 +7153,11 @@ public:
                 frame_sampled_.insert(cached->first);auto& alias=cached->second;
                 const auto version=alias_state?alias_state->version:resolve_memory_->Version(layout,address);
                 if(!alias.current||alias.current->version!=version) {
+                    if(edram_inventory::Enabled())
+                        edram_inventory::Note("alias_load",identity.BaseText()+" fmt "+std::to_string(layout.format)+" "+
+                            std::to_string(layout.width)+"x"+std::to_string(layout.height),
+                            edram_inventory::ResolveTarget(address),
+                            alias.current?"changed":"first",uint64_t(layout.width)*layout.height);
                     const bool queued_2d=gpu_work_queue_&&layout.dimension==1&&layout.layers==1;
                     const bool queued_volume=gpu_work_queue_&&resolve_memory_->CanQueueVolumeLoad(layout,address);
                     // Cache ownership may move while older draws retain exact
@@ -6930,6 +7177,9 @@ public:
                     next->version=version;
                     if(config_.canonical_resolve_stores&&queued_2d)
                         next->texture=TakeCanonicalResolve(layout,address);
+                    if(!next->texture&&config_.direct_resolve_textures&&
+                       (next->texture=DirectResolveTexture(layout,address,version)))
+                        next->native_format=true;
                     if(next->texture) {
                         // The producer packet owns the compute write. This
                         // generation and the draw below own the immutable image;
@@ -6959,7 +7209,7 @@ public:
                 } else ++alias_retention_->reused;
                 draw_slot.KeepAlias(alias.current);
                 binding_cache=&alias.current->bindings;
-                image=alias.current->texture.get();decoded_gpu=true;++gpu_reads;
+                image=alias.current->texture.get();decoded_gpu=!alias.current->native_format;++gpu_reads;
             } else throw std::runtime_error("Texture slot "+std::to_string(slot)+": "+t.SourceText());
             const auto binding_start=time_cpu_stages_?DrawClock::now():DrawClock::time_point{};
             const auto& binding=BindCachedTexture(*binding_cache,*image,layout,decoded_gpu,anisotropy,transient_bindings,uploaded_binding,
@@ -7769,6 +8019,23 @@ public:
                     // disk records canonical; candidate/fallback PSOs are
                     // separately keyed in memory and share exact guest shaders.
                     int32_t(RenderFormat::R8G8B8A8_UNORM),pipeline_key.depth_format};
+                config_.observe_pipeline({std::move(recipe),vertex.typed->owner,pixel.IsNull()?nullptr:pixel.typed->owner});
+            }
+        }catch(...) {/* Optional disk-cache diagnostics never alter draw authority. */}
+        // Hardware render targets: record only pipelines whose descriptor is
+        // exactly what the recorded key rebuilds at startup.
+        if(pipeline_created&&!config_.native_fsi&&config_.observe_pipeline&&!fsi_state&&
+           vertex_variant==NativeShaderVariant::Unmodified&&pixel_variant==NativeShaderVariant::Unmodified&&
+           std::holds_alternative<NativeHardwareRaster>(raster_key)&&p.vertexShader&&!p.geometryShader&&
+           p.multisampling.sampleCount==1&&!p.multisampling.sampleLocationsEnabled&&
+           p.specConstantsCount==1&&p.inputSlotsCount==(rectangle?1u:0u)&&
+           EncodeNativeHardwareRaster(p,p.specConstants[0].value,rectangle)==std::get<NativeHardwareRaster>(raster_key))try {
+            const auto vertex=o.Shader(false),pixel=o.Shader(true);
+            if(vertex.typed&&vertex.typed->owner&&(pixel.IsNull()?!p.pixelShader:(pixel.typed&&pixel.typed->owner&&p.pixelShader))) {
+                const auto& words=std::get<NativeHardwareRaster>(raster_key);
+                NativeFsiPipelineRecipe recipe{std::string(vertex.Digest()),pixel.IsNull()?std::nullopt:
+                    std::optional<std::string>(pixel.Digest()),{},pipeline_key.color_format,pipeline_key.depth_format,
+                    std::vector<uint32_t>(words.begin(),words.end())};
                 config_.observe_pipeline({std::move(recipe),vertex.typed->owner,pixel.IsNull()?nullptr:pixel.typed->owner});
             }
         }catch(...) {/* Optional disk-cache diagnostics never alter draw authority. */}
@@ -8787,6 +9054,21 @@ public:
         return inputs;
     }
     void EndFrame(const Json& o) {
+        if(edram_inventory::Enabled()) {
+            if(config_.direct_resolve_textures) {
+                const auto& direct=direct_resolve_stats_;
+                Json section{{"adopted",direct.adopted},{"copy_on_write",direct.copy_on_write},{"spare_reuses",direct.spare_reuses},{"fixed_resolves",direct.fixed_resolves},
+                    {"missing",direct.missing},{"stale",direct.stale},{"layout_refusals",direct.layout_refusals},
+                    {"format_refusals",direct.format_refusals},{"verified",direct.verified},
+                    {"verify_mismatches",direct.verify_mismatches},{"verify_max_difference",direct.verify_max_difference}};
+                if(report.contains("direct_resolve_verifications"))section["verifications"]=report["direct_resolve_verifications"];
+                const auto deferred=resolve_memory_->deferred_store_statistics();
+                section["deferred_stores"]={{"deferred",deferred.deferred},{"superseded",deferred.superseded},
+                    {"materialized",deferred.materialized},{"pending",deferred.pending},{"peak_pending",deferred.peak_pending}};
+                edram_inventory::SetSection("direct_resolve_textures",section.dump());
+            }
+            edram_inventory::FrameCompleted(o.value("frame",0u));
+        }
         if(config_.diagnose_texture_eviction_reloads)try {SetTextureCensusFrame(o.at("frame").get<uint32_t>());}
         catch(...) {texture_census_frame_valid_=false;texture_eviction_reload_census_->MetadataFailure();}
         FlushCommittedState();FlushPendingDraws();
@@ -8798,7 +9080,12 @@ public:
         // Snapshot the completed GPU image before subsequent frames reuse its
         // physical bytes. Resource/history ownership is deliberately retained.
         const NativeSynchronousGpuTimingContext presentation_timing{presentation_gpu_timings_.get(),o.at("frame").get<uint32_t>()};
-        std::shared_ptr<RenderTexture> output=resolve_memory_->Load(layout,address,&presentation_timing);
+        // The front buffer is usually a resolve whose image still holds these
+        // bytes: convert that instead of a synchronous decode of its memory.
+        std::shared_ptr<RenderTexture> output;
+        const bool direct_output=config_.direct_resolve_textures&&capture_.empty()&&
+            (output=DirectResolveTexture(layout,address,resolve_memory_->Version(layout,address)));
+        if(!output)output=resolve_memory_->Load(layout,address,&presentation_timing);
         const auto reference_path=capture_/("gpu-reference-"+std::to_string(o.at("frame").get<unsigned>())+".json");
         if(!capture_.empty()&&fs::exists(reference_path)) {
             std::ifstream metadata(reference_path);Json reference;metadata>>reference;
@@ -8843,9 +9130,9 @@ public:
         // this already-swizzled image and only applies the display gamma ramp.
         const uint32_t presentation_swizzle=(fetch[3]>>1)&0xfff;
         std::shared_ptr<RenderTexture> presented=output;
-        if(presentation_swizzle!=0x688) {
+        if(presentation_swizzle!=0x688||direct_output) {
             const auto& desc=static_cast<VulkanTexture&>(*output).desc;
-            presented=device_->createTexture(RenderTextureDesc::ColorTarget(desc.width,desc.height,RenderFormat::R32G32B32A32_FLOAT));
+            presented=PresentationTarget(desc.width,desc.height);
             const RenderRect rectangle(0,0,desc.width,desc.height);
             transfers_->Resolve(*output,*presented,rectangle,rectangle,0,PassTransfer::Conversion::Color,presentation_swizzle,&presentation_timing);
         }
@@ -8876,6 +9163,11 @@ public:
         // Each submission has completed. Retire views/uploads not used by this
         // frame so animated vertices, bones and streamed assets do not grow
         // without bound over a campaign. GPU history lives in physical memory.
+        for(auto& staging:frame_staging_) {
+            const auto size=static_cast<const VulkanBuffer&>(*staging).desc.size;
+            staging_pool_.Return(std::move(staging),size);
+        }
+        frame_staging_.clear();
         for(auto& [key,image]:surfaces_)if(!frame_surfaces_.contains(key)&&image.dirty) {
             edram_memory_->StoreSurface(*image.texture,SurfaceStorage(image.identity));
             image.dirty=false;
@@ -9035,6 +9327,7 @@ public:
     }
     void Execute(const TypedLiveDraw& o) {
         transfer_report_dirty_=true;
+        edram_inventory::BeginOperation(o.event,o.frame,"draw");
         Draw(DrawInput(o));
         transfer_report_dirty_=true;diagnostic_counters_.last_accepted_event=o.event;
         if(!HasPendingGpuWork())diagnostic_counters_.last_completed_event=o.event;
@@ -9044,6 +9337,8 @@ public:
         if(RetainedPhaseGpuTimingEnabled())timing_context.emplace(*this,o);
         transfer_report_dirty_=true;
         const auto type=o.at("type").get<std::string>();
+        if(edram_inventory::Enabled())
+            edram_inventory::BeginOperation(o.value("event",uint64_t(0)),o.value("frame",0u),type);
         if(type!="draw")cpu_image_slots_.Reset(CpuImageSlots::ResetReason::NonDraw);
         // Offline/test JSON queries share the typed live query path.
         if(type=="query_begin"||type=="query_end") {ExecuteQuery(QueryControlFrom(o,type=="query_begin"));return;}
@@ -9149,7 +9444,8 @@ public:
             else SealDrawCommandGroup();
         }
         const bool queue_cpu_write=type=="cpu_memory_write"&&QueueCpuWrite(o);
-        const bool queued_transfer=config_.unified_gpu_queue&&(type=="clearrect"||type=="resolve"||queue_cpu_write);
+        const bool queue_cpu_copy=type=="memory_copy"&&QueueCpuMemoryCopy(o);
+        const bool queued_transfer=config_.unified_gpu_queue&&(type=="clearrect"||type=="resolve"||queue_cpu_write||queue_cpu_copy);
         if(type!="draw"&&!deferred_query&&!queued_transfer)FlushPendingDraws();
         if(type=="draw")Draw(DrawInput(o));
         else if(type=="clearrect")Clear(o);
@@ -9158,14 +9454,34 @@ public:
         else if(type=="cpu_memory_write")CpuMemoryWrite(o,queue_cpu_write);
         else if(type=="memory_copy") {
             const uint32_t source=o.at("source"),destination=o.at("destination"),count=o.at("bytes");
-            if(o.at("source_kind")=="cpu_snapshot"||o.at("source_kind")=="mixed_memory") {
+            if(o.at("source_kind")=="cpu_direct") {
+                // Already performed in guest memory at its API point: these
+                // bytes are CPU data now. Only retire their GPU history, as a
+                // CPU write would, in operation order.
+                if(queue_cpu_copy&&!transfer_batch_->in_scope())
+                    RunTransferScope([&]{resolve_memory_->InvalidateCpuWrite(destination,count,true);},o.at("event"));
+                else resolve_memory_->InvalidateCpuWrite(destination,count,queue_cpu_copy);
+            } else if(o.at("source_kind")=="cpu_snapshot"||o.at("source_kind")=="mixed_memory") {
                 const auto bytes=Payload(o.at("payload"));
                 if(bytes.size()!=count)throw std::runtime_error("Native memcpy payload extent mismatch");
                 if(o.at("source_kind")=="mixed_memory") {
                     const auto ranges=o.at("gpu_ranges").get<std::vector<std::pair<uint32_t,uint32_t>>>();
                     resolve_memory_->CopyFromMixed(source,destination,bytes,ranges);
-                } else resolve_memory_->CopyFromCpu(source,destination,bytes);
-            } else if(o.at("source_kind")=="gpu_memory")resolve_memory_->Copy(source,destination,count);
+                } else if(queue_cpu_copy&&!transfer_batch_->in_scope()) {
+                    RunTransferScope([&]{resolve_memory_->CopyFromCpu(source,destination,bytes,true);},o.at("event"));
+                } else resolve_memory_->CopyFromCpu(source,destination,bytes,queue_cpu_copy);
+            } else if(o.at("source_kind")=="gpu_memory") {
+                // The runtime publishes the result to guest memory next: known
+                // bytes when receipts cover the source, otherwise read back in
+                // the copy's own submission.
+                std::vector<uint8_t> published;bool forwarded=false;
+                if(config_.forward_cpu_upload_receipts&&transfer_batch_) {
+                    const auto forward=[&]{forwarded=resolve_memory_->CopyFromReceipts(source,destination,count,published);};
+                    if(transfer_batch_->in_scope())forward();else RunTransferScope(forward,o.at("event"));
+                }
+                if(!forwarded)published=resolve_memory_->CopyAndRead(source,destination,count);
+                copy_publication_.emplace(destination,std::move(published));
+            }
             else throw std::runtime_error("Unknown native memcpy provenance");
             if(detailed_reports_)report["memory_copies"].push_back({{"frame",o.at("frame")},{"event",o.at("event")},
                 {"source",source},{"destination",destination},{"bytes",count},{"published_to_guest",false}});
@@ -9179,7 +9495,7 @@ public:
     // commits, fixed-source resolves, export). An operation boundary alone
     // (query control, clear, resolve, memexport, CPU write) does not read
     // packed EDRAM, so it skips the commit and its GPU drain.
-    void FlushCommittedState(bool operation_boundary=false) {
+    void FlushCommittedState(bool operation_boundary=false,bool force=false) {
         const bool materializing=(retained_opaque_current_&&retained_opaque_current_->authority.dirty())||
             (retained_fp24_depth_current_&&retained_fp24_depth_current_->authority.dirty());
         MaterializeRetainedOpaque();
@@ -9194,6 +9510,9 @@ public:
             throw NativeBatchCompletionError("Native draw command group contains a poisoned preparing tail");
         transfer_report_dirty_=true;
         if(operation_boundary&&!config_.native_fsi)return;
+        // Nothing outside SurfaceAt, frame retirement and diagnostics reads
+        // EDRAM; each of those commits what it needs (diagnostics force).
+        if(config_.hardware_lazy_commits&&!config_.native_fsi&&!force)return;
         if(surfaces_maybe_dirty_)for(auto& [key,image]:surfaces_)if(image.dirty) {
             // A real image commit retains the original close before any store
             // or completion. Surface alias and non-FSI behavior are unchanged.
@@ -9206,13 +9525,13 @@ public:
         surfaces_maybe_dirty_=false;
     }
     NativeRendererState ExportState() {
-        InvalidateEarlyDepth();FlushCommittedState();FlushPendingDraws();
+        InvalidateEarlyDepth();FlushCommittedState(false,true);FlushPendingDraws();
         return {resolve_memory_->ExportState(),edram_memory_->ExportState()};
     }
     std::vector<uint8_t> ReadFullEdram() {
         if(!config_.native_fsi||queries_->active())
             throw std::runtime_error("Full EDRAM diagnostic requires packed Native with no active query");
-        InvalidateEarlyDepth();FlushPendingDraws();FlushCommittedState();
+        InvalidateEarlyDepth();FlushPendingDraws();FlushCommittedState(false,true);
         return edram_memory_->ReadBytes(0,NativeEdramBytes());
     }
     void InitializeEdramFromBuffer(VkBuffer source) {
@@ -9229,6 +9548,32 @@ public:
     }
     uint64_t mutation_serial() const {return mutation_serial_+resolve_memory_->mutation_serial()+edram_memory_->mutation_serial();}
     std::vector<uint8_t> ReadPhysical(uint32_t address,uint32_t bytes) {InvalidateEarlyDepth();FlushPendingDraws();return resolve_memory_->ReadBytes(address,bytes);}
+    std::optional<std::pair<uint32_t,std::vector<uint8_t>>> copy_publication_;
+    void BeginTransferRun(uint64_t event) {
+        if(!transfer_batch_)return;
+        // As RunTransferScope, plus pending draws first: nothing may enqueue
+        // between this scope's recorded stages and their seal.
+        FlushPendingDraws();
+        readonly_query_read_owner_.reset();transfer_report_dirty_=true;SealDrawCommandGroup();
+        try {transfer_batch_->BeginScope(event);}
+        catch(const NativeTransferBatchError& error) {throw NativeBatchCompletionError(error.what());}
+    }
+    void EndTransferRun() {
+        if(!transfer_batch_||!transfer_batch_->in_scope())return;
+        try {transfer_batch_->EndScope();}
+        catch(const NativeTransferBatchError& error) {throw NativeBatchCompletionError(error.what());}
+    }
+    void AbortTransferRun() noexcept {
+        if(!transfer_batch_)return;
+        try {transfer_batch_->AbortScope();} catch(...) {}
+    }
+    std::optional<std::vector<uint8_t>> TakeCopyPublication(uint32_t address,uint32_t bytes) {
+        auto publication=std::exchange(copy_publication_,std::nullopt);
+        if(!publication||publication->first!=address||publication->second.size()!=bytes)return std::nullopt;
+        // As ReadPhysical, minus the readback the copy already made.
+        InvalidateEarlyDepth();FlushPendingDraws();
+        return std::move(publication->second);
+    }
     void InitializeMemory(uint32_t address,std::span<const uint8_t> bytes) {InvalidateEarlyDepth();FlushPendingDraws();resolve_memory_->Initialize(address,bytes);}
     void InitializeEdram(std::span<const uint8_t> bytes) {
         InvalidateEarlyDepth();MaterializeRetainedOpaque();FlushPendingDraws();
@@ -9485,6 +9830,7 @@ public:
         uint64_t sync_fsi_state=0,sync_variant=0,sync_recorded=0,sync_resident_fsi=0,sync_other=0,skipped_recorded=0;
         void Start(unsigned count) {
             for(unsigned i=0;i<count;++i)workers.emplace_back([this] {
+                LowerCurrentThreadPriority();
                 for(;;) {
                     std::function<void()> task;
                     {
@@ -9571,6 +9917,7 @@ public:
             };
             async_pipelines_.Post([job] {
                 {std::lock_guard lock(job->mutex);if(job->claimed)return;job->claimed=true;}
+                CompileSlot slot(false);  // A draw is waiting for it.
                 job->build();
             });
             return false;
@@ -9689,6 +10036,8 @@ bool SceneExecutor::PrewarmForwardPixelCatalogPipeline(const NativeFsiPipelineRe
     std::span<const uint32_t> vertex) {return state_->PrewarmForwardPixelCatalogPipeline(recipe,vertex);}
 bool SceneExecutor::PrewarmStencilMaterialPipeline(const NativeFsiPipelineRecipe& recipe,std::span<const uint32_t> vertex,
     std::span<const uint32_t> pixel) {return state_->PrewarmStencilMaterialPipeline(recipe,vertex,pixel);}
+void SceneExecutor::PrewarmHardwarePipeline(const NativeFsiPipelineRecipe& recipe,std::span<const uint32_t> vertex,
+    std::span<const uint32_t> pixel) {state_->PrewarmHardwarePipeline(recipe,vertex,pixel);}
 void SceneExecutor::PrewarmFsiPipeline(const NativeFsiPipelineRecipe& recipe,std::span<const uint32_t> vertex,
     std::span<const uint32_t> pixel) {state_->PrewarmFsiPipeline(recipe,vertex,pixel);}
 NativeOverflowPrewarmResult SceneExecutor::PrewarmFsiOverflowPipeline(const NativeFsiPipelineRecipe& recipe,std::span<const uint32_t> vertex,std::span<const uint32_t> pixel) {return state_->PrewarmFsiOverflowPipeline(recipe,vertex,pixel);}
@@ -9919,6 +10268,9 @@ SceneExecutor::AcceptedWorkSnapshot SceneExecutor::ObserveAcceptedWork() const n
     return {diagnostic_generation_,observed.draws,observed.transfers,
         observed.accepted,observed.completed,observed.available};
 }
+SceneExecutor::CompileSkipCounts SceneExecutor::ObserveCompileSkips() const noexcept {
+    return {state_->draws_seen_,state_->async_shader_skipped_draws_+state_->async_pipelines_.skipped_draws};
+}
 SceneExecutor::MarkerQueryReadiness SceneExecutor::ObserveMarkerQueryReadiness() const noexcept {
     const auto work=ObserveAcceptedWork();
     if(!work.available||state_->deferred_queries_.size()>128||
@@ -9962,6 +10314,12 @@ NativeRendererState SceneExecutor::ExportState() {return state_->ExportState();}
 std::vector<uint8_t> SceneExecutor::ReadFullEdram() {return state_->ReadFullEdram();}
 uint64_t SceneExecutor::mutation_serial() const {return state_->mutation_serial();}
 std::vector<uint8_t> SceneExecutor::ReadPhysical(uint32_t address,uint32_t bytes) {state_->FlushCommittedState();return state_->ReadPhysical(address,bytes);}
+void SceneExecutor::BeginTransferRun(uint64_t event) {state_->FlushCommittedState();state_->BeginTransferRun(event);}
+void SceneExecutor::EndTransferRun() {state_->EndTransferRun();}
+void SceneExecutor::AbortTransferRun() noexcept {state_->AbortTransferRun();}
+std::optional<std::vector<uint8_t>> SceneExecutor::TakeCopyPublication(uint32_t address,uint32_t bytes) {
+    state_->FlushCommittedState();return state_->TakeCopyPublication(address,bytes);
+}
 std::optional<NativeQueryTracker::Result> SceneExecutor::ActiveQuery() const {state_->FlushPendingDraws();return state_->queries_->Snapshot();}
 std::optional<NativeQueryTracker::Metadata> SceneExecutor::ActiveQueryMetadata() const {return state_->queries_->MetadataSnapshot();}
 const Json& SceneExecutor::report() const {state_->SealDrawCommandGroup();state_->ReportQueries();state_->ReportTransfers();return state_->report;}

@@ -15,6 +15,18 @@ inline std::array<uint32_t,6> CpuTextureStorageSamplingKey(
     }
     return fetch;
 }
+// A texture with no GPU-defined bytes decodes from its payloads and layout
+// fields alone; decoding uses offsets within each payload, never the guest
+// address. Keep only whether each address is present, which selects levels, so
+// a texture the game moves unchanged reuses its decoded image.
+inline std::array<uint32_t,6> CpuTextureContentKey(std::array<uint32_t,6> fetch) noexcept {
+    for(const unsigned word:{1u,5u})
+        if(fetch[word]&0x1FFFF000u)fetch[word]=(fetch[word]&~0x1FFFF000u)|0x1000u;
+    return fetch;
+}
+// Content keys never collide with a real version, so they cannot share an
+// entry whose image includes GPU-defined bytes.
+inline constexpr uint64_t kCpuTextureContentVersion=~uint64_t{0};
 // Reserve four of the existing sixteen bindings for the observed zero-bias
 // final states. Nonzero animated biases still use the original fence-retained
 // transient fallback at this bound. Never erase or mutate an in-flight view.

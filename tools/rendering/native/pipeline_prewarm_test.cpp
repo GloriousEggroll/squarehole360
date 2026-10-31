@@ -152,6 +152,55 @@ int main() try {
         cache.Drain();
         Require(cache.statistics().admitted == previous + 1, "Cache admission did not settle");
     };
+    // Hardware render target recipes: the stored key rebuilds the exact draw
+    // descriptor and survives the manifest round trip.
+    {
+        RenderGraphicsPipelineDesc draw;
+        draw.primitiveTopology = RenderPrimitiveTopology::TRIANGLE_STRIP;
+        draw.cullMode = RenderCullMode::BACK;
+        draw.depthEnabled = draw.depthWriteEnabled = true;
+        draw.depthFunction = RenderComparisonFunction::GREATER_EQUAL;
+        draw.depthBias = -4;
+        draw.slopeScaledDepthBias = 1.5f;
+        draw.stencilEnabled = true;
+        draw.stencilReadMask = 0x7f;
+        draw.stencilFrontFace.passOp = RenderStencilOp::REPLACE;
+        draw.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+        draw.renderTargetBlend[0].renderTargetWriteMask = 7;
+        const auto raster = EncodeNativeHardwareRaster(draw, 0x1234, true);
+        NativeFsiPipelineRecipe hardware{recipe.vertex, recipe.pixel, {}, int32_t(RenderFormat::R16G16B16A16_FLOAT),
+                                         int32_t(RenderFormat::D32_FLOAT_S8_UINT),
+                                         std::vector<uint32_t>(raster.begin(), raster.end())};
+        Require(ValidNativeHardwarePipelineRecipe(hardware) && !ValidNativeFsiPipelineRecipe(hardware),
+                "Hardware recipe validation");
+        NativeHardwarePipelineDescriptor rebuilt(raster, hardware.color_format, hardware.depth_format, nullptr,
+                                                 nullptr, nullptr);
+        const auto& p = rebuilt.descriptor;
+        Require(EncodeNativeHardwareRaster(p, rebuilt.specialization.value, true) == raster &&
+                    p.inputSlotsCount == 1 && p.renderTargetCount == 1 &&
+                    p.renderTargetFormat[0] == RenderFormat::R16G16B16A16_FLOAT &&
+                    p.depthTargetFormat == RenderFormat::D32_FLOAT_S8_UINT && p.specConstantsCount == 1 &&
+                    rebuilt.specialization.value == 0x1234 && p.depthBias == -4 && p.stencilReadMask == 0x7f,
+                "Hardware descriptor did not rebuild the draw state");
+        auto invalid = hardware;
+        invalid.hardware[0] = 99;
+        Require(!ValidNativeHardwarePipelineRecipe(invalid), "Out of range hardware topology accepted");
+        invalid = hardware;
+        invalid.hardware[3] = 2;
+        Require(!ValidNativeHardwarePipelineRecipe(invalid), "Non-boolean hardware flag accepted");
+        invalid = hardware;
+        invalid.hardware.pop_back();
+        Require(!ValidNativeHardwarePipelineRecipe(invalid), "Short hardware key accepted");
+        NativePipelineRecipeCache cache(directory / "hardware", std::string(64, 'a'));
+        observe(cache, {hardware, vs, ps});
+        auto depth_only = hardware;
+        depth_only.pixel.reset();
+        observe(cache, {depth_only, vs, nullptr});
+        const auto loaded = cache.Load();
+        Require(loaded.size() == 2 && loaded[0].recipe == hardware && loaded[1].recipe == depth_only &&
+                    !loaded[1].pixel,
+                "Hardware recipe manifest round trip changed the key");
+    }
     {
         NativePipelineRecipeCache cache(directory, std::string(64, 'a'));
         Require(cache.Load().empty(), "Absent observed cache was not a miss");

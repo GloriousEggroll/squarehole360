@@ -6,7 +6,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     file(SHA256 "${_gow3_robust_before}" _gow3_robust_before_sha)
     file(SHA256 "${_gow3_robust_after}" _gow3_robust_after_sha)
     if(NOT _gow3_robust_before_sha STREQUAL "6ac219ac6af4d17d8b5c01e90a28dbf4620f5e1127c582869ae284ffdb02d9e5" OR
-       NOT _gow3_robust_after_sha STREQUAL "e68298050042d8e008260080053e5a814ae27f9ee0bc493fbbed6d70c2b919f8")
+       NOT _gow3_robust_after_sha STREQUAL "3d9cf49c06611a2528ccb38589d2e77da50b75f15d22b2c57ea116a7d3a217de")
         message(FATAL_ERROR "Robust-condition fixture requires exact authenticated before/after SDK source")
     endif()
     foreach(_gow3_robust_mode before after)

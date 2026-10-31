@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
+if(APPLE)
+    # Fibers use the ucontext routines, which need X/Open; it also sets the size
+    # of ucontext_t, so every C++ file must agree. Darwin's extensions stay.
+    add_compile_definitions($<$<COMPILE_LANGUAGE:CXX>:_XOPEN_SOURCE=700>
+                            $<$<COMPILE_LANGUAGE:CXX>:_DARWIN_C_SOURCE>)
+endif()
 set(REXSDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/rexglue-sdk" CACHE PATH "ReXGlue source snapshot")
 set(REXGLUE_REGISTER_PACKAGE OFF CACHE BOOL "Do not alter user package registry")
 set(REXGLUE_ENABLE_TRACY OFF CACHE BOOL "Disable optional profiler")
@@ -100,6 +106,14 @@ if(GOW3_ENABLE_NATIVE_RENDERER)
     target_link_libraries(gow3-temporal-inputs-test PRIVATE gow3-native-renderer rex::runtime)
     add_executable(gow3-native-host-device-test tools/rendering/native/live_device_test.cpp)
     target_link_libraries(gow3-native-host-device-test PRIVATE gow3-native-renderer)
+    # Times the native shader compiler on extracted containers (platform comparisons).
+    add_executable(gow3-native-compiler-timing tools/rendering/native/native_compiler_timing_bench.cpp)
+    target_include_directories(gow3-native-compiler-timing PRIVATE src)
+    target_link_libraries(gow3-native-compiler-timing PRIVATE gow3-native-renderer)
+    # Setup step: compiles every pixel shader in the user's game files into the cache.
+    add_executable(gow3-shader-precompile tools/rendering/native/shader_precompile.cpp)
+    target_include_directories(gow3-shader-precompile PRIVATE src)
+    target_link_libraries(gow3-shader-precompile PRIVATE gow3-native-renderer gow3-native-shader-compiler)
 endif()
 
 add_executable(gow3-texture-layout-test tests/native_texture_test.cpp src/renderer/native/texture_data.cpp)
@@ -107,6 +121,8 @@ add_executable(gow3-texture-footprint-test tests/texture_footprint_test.cpp src/
 target_include_directories(gow3-texture-footprint-test PRIVATE src)
 add_executable(gow3-index-geometry-test tests/index_geometry_test.cpp)
 target_include_directories(gow3-index-geometry-test PRIVATE src)
+add_executable(gow3-tmap-find-test tests/tmap_find_test.cpp)
+target_include_directories(gow3-tmap-find-test PRIVATE src)
 add_executable(gow3-certified-snapshot-test tools/rendering/native/certified_snapshot_test.cpp)
 target_include_directories(gow3-certified-snapshot-test PRIVATE src)
 target_link_libraries(gow3-certified-snapshot-test PRIVATE rex::runtime)
@@ -133,6 +149,8 @@ target_link_libraries(gow3-coherence-snapshot-memory-test PRIVATE rex::runtime)
 add_executable(gow3-external-write-completion-test tools/rendering/native/external_write_completion_test.cpp)
 target_include_directories(gow3-external-write-completion-test PRIVATE src)
 target_link_libraries(gow3-external-write-completion-test PRIVATE rex::runtime)
+# Its allocation probe replaces operator new/delete (cmake/host_allocator.cmake).
+target_compile_definitions(gow3-external-write-completion-test PRIVATE GOW3_OWN_NEW_DELETE=1)
 target_include_directories(gow3-texture-layout-test PRIVATE src)
 target_link_libraries(gow3-texture-layout-test PRIVATE rex::runtime)
 add_executable(gow3-trace-residency-test tests/trace_residency_test.cpp)
@@ -177,10 +195,6 @@ if(TARGET amd_fidelityfx_vk AND NOT WIN32)
     endif()
 endif()
 
-if(TARGET rex_adaptive_sync)
-    add_executable(gow3-vrr-probe tools/vrr_probe.cpp)
-    target_link_libraries(gow3-vrr-probe PRIVATE rex_adaptive_sync)
-endif()
 
 if(TARGET unit_tests)
     target_sources(unit_tests PRIVATE tests/branch_context_test.cpp tests/menu_guide_test.cpp tests/menu_navigation_test.cpp)
@@ -221,12 +235,43 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     if(WIN32)
         target_link_libraries(squarehole-lobby PRIVATE ws2_32)
     endif()
-    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_input_prompts.cpp src/gow3_content.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_vrr.cpp src/gow3_host.cpp
+    if(WIN32)
+        # Package-root launchers: squarehole360.exe (game) and Settings.exe.
+        add_executable(squarehole360-launcher WIN32 tools/launcher/windows_launcher.cpp)
+        add_executable(squarehole360-settings WIN32 tools/launcher/windows_launcher.cpp)
+        target_compile_definitions(squarehole360-settings PRIVATE SQUAREHOLE_SETTINGS_LAUNCHER)
+        foreach(launcher squarehole360-launcher squarehole360-settings)
+            target_compile_features(${launcher} PRIVATE cxx_std_20)
+            target_compile_definitions(${launcher} PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+            target_link_libraries(${launcher} PRIVATE shell32 user32)
+        endforeach()
+    endif()
+    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_input_prompts.cpp src/gow3_content.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_host.cpp
         src/renderer/gears_bridge.cpp src/renderer/native/getdata_inline_leaf.cpp
         ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
     rexglue_setup_target(gow3)
     gow3_windows_compat(gow3)
+    # Release packages offer only the native renderer; dev and test builds keep
+    # the Xenia renderer for reference comparisons (tools/rendering harnesses).
+    option(GOW3_XENIA_RENDERER "Allow selecting the Xenia renderer (dev and test builds)" ON)
+    target_compile_definitions(gow3 PRIVATE GOW3_XENIA_RENDERER=$<BOOL:${GOW3_XENIA_RENDERER}>)
     include(cmake/host_allocator.cmake)
+    # Profiling builds: frame pointers in the bridge, native renderer and runtime
+    # so perf can walk their stacks; the recompiled game code is unchanged.
+    option(GOW3_FRAME_POINTERS "Keep frame pointers in bridge, renderer and runtime code (profiling)" OFF)
+    if(GOW3_FRAME_POINTERS)
+        if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+            set(gow3_frame_pointers /clang:-fno-omit-frame-pointer)
+        else()
+            set(gow3_frame_pointers -fno-omit-frame-pointer)
+        endif()
+        foreach(target rexruntime gow3-native-renderer)
+            if(TARGET ${target})
+                target_compile_options(${target} PRIVATE ${gow3_frame_pointers})
+            endif()
+        endforeach()
+        set_source_files_properties(src/renderer/gears_bridge.cpp PROPERTIES COMPILE_OPTIONS "${gow3_frame_pointers}")
+    endif()
     add_custom_command(OUTPUT ${CMAKE_BINARY_DIR}/gow3_getdata_inline_source_auth.json
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/rendering/getdata_inline_source_guard.py
             --root ${CMAKE_CURRENT_SOURCE_DIR}
@@ -242,9 +287,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     if(TARGET gow3-hdr-probe)
         add_dependencies(gow3 gow3-hdr-probe)
     endif()
-    if(TARGET gow3-vrr-probe)
-        add_dependencies(gow3 gow3-vrr-probe)
-    endif()
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(GOW3_GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
@@ -252,10 +294,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
         target_link_libraries(gow3-window-size-test PRIVATE rex::runtime PkgConfig::GOW3_GTK)
     endif()
     target_link_libraries(gow3 PRIVATE tomlplusplus xxHash::xxhash)
-    if(TARGET rex_adaptive_sync)
-        # Static, not exported from rexruntime.dll on Windows; gow3_vrr.cpp calls it.
-        target_link_libraries(gow3 PRIVATE rex_adaptive_sync)
-    endif()
     if(WIN32)
         # The SDK's Windows entry point is wWinMain.
         set_target_properties(gow3 PROPERTIES WIN32_EXECUTABLE ON)
@@ -279,6 +317,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
     if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
         target_compile_options(gow3 PRIVATE -fno-strict-aliasing /fp:strict /Zc:char8_t-
             "/FI${CMAKE_CURRENT_SOURCE_DIR}/src/gameplay_hooks.h")
+        # The recompiled code's ~30,000 std::fma calls (fmadd and friends, and
+        # vmaddfp per lane) otherwise call the C runtime, which Wine computes in
+        # software. Hardware FMA rounds identically; /fp:strict keeps the
+        # compiler from fusing anything else. Needs FMA3 (Haswell / Piledriver
+        # or newer); the launcher checks before starting the game.
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+            target_compile_options(gow3 PRIVATE -mfma)
+        endif()
     else()
         target_compile_options(gow3 PRIVATE -fno-strict-aliasing -ffp-model=strict -fno-char8_t)
         target_compile_options(gow3 PRIVATE -include "${CMAKE_CURRENT_SOURCE_DIR}/src/gameplay_hooks.h")

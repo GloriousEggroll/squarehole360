@@ -25,8 +25,21 @@ float unpack7e3(float value) {
     uint e = bits >> 7, m = bits & 127u;
     return e == 0 ? float(m) / 512.0 : float(m + 128u) * exp2(float(int(e) - 10));
 }
+// EDRAM fixed16 (signed, range +-32) store and load, as resolve_memory.comp
+// fixed16/unfixed16: halfway rounds away from zero, NaN stores zero.
+float fixed16RoundTrip(float value) {
+    if (isnan(value)) return 0.0;
+    precise float scaled = clamp(value, -32.0, 32.0) * (32767.0 / 32.0);
+    int stored = int(scaled + (scaled < 0.0 ? -.5 : .5));
+    return max(float(stored) / 32767.0, -1.0) * 32.0;
+}
 void main() {
-    if (pc.conversion == 9) {
+    if (pc.conversion == 10) {
+        // A fixed16 surface resolves the values its EDRAM holds, then scales.
+        vec4 v = texelFetch(source_image, ivec2(gl_FragCoord.xy) + pc.offset, 0);
+        result = vec4(fixed16RoundTrip(v.x), fixed16RoundTrip(v.y), fixed16RoundTrip(v.z),
+                      fixed16RoundTrip(v.w)) * pc.scale;
+    } else if (pc.conversion == 9) {
         ivec2 p = (ivec2(gl_FragCoord.xy) + pc.offset) * 2;
         result = (texelFetch(source_image, p, 0) + texelFetch(source_image, p + ivec2(1, 0), 0) +
                   texelFetch(source_image, p + ivec2(0, 1), 0) + texelFetch(source_image, p + ivec2(1, 1), 0)) * (0.25 * pc.scale);

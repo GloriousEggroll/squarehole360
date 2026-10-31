@@ -178,6 +178,17 @@ void Run(bool genuine_fault,bool early,bool batch=false){
   {auto lock=rex::thread::global_critical_region::AcquireDirect();m.tracker->EndExternalWrite(reinterpret_cast<uintptr_t>(m.Pointer(0)),8192);}
   auto after=m.Capture(previous);Check(after->bytes()->front()==0x6B&&after->bytes()->at(216)==0x6B,"real partial IO missed");
   input.reset();std::filesystem::remove(temporary);
+  // Memory::PrepareHostWrite: a host store through the raw alias after the
+  // mutation guard retires the snapshot without taking a write fault.
+  previous=m.Capture();
+  const auto faults_before_prepared=m.tracker->stats().faults;
+  {auto lock=rex::thread::global_critical_region::AcquireDirect();
+   Check(m.tracker->BeforeHostMutation(reinterpret_cast<uintptr_t>(m.Pointer(0)),8192),"prepared host write guard");}
+  std::memset(m.Pointer(0),0x5D,8192);
+  Check(m.tracker->stats().faults==faults_before_prepared,"prepared host write still faulted");
+  auto prepared=m.Capture(previous);
+  Check(prepared&&prepared!=previous&&prepared->bytes()->front()==0x5D&&prepared->bytes()->back()==0x5D,
+        "prepared host write was not observed by the next capture");
   const auto stats=m.tracker->stats();
   for(auto count:stats.alias_faults)Check(count>=2,"an alias lacked actual fault coverage");
   Check(stats.owned_fault_dispatches==(early?stats.faults:0),"actual MMIO early path did not match own fault handling");

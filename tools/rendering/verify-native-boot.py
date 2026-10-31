@@ -380,12 +380,12 @@ def copy_pipeline_cache(source, destination):
         if path.is_symlink() or not path.is_file():
             continue
         size = path.stat().st_size
-        if size > (2 if manifest else 16) * 1024 * 1024:
+        if size > (16 if manifest else 16) * 1024 * 1024:
             raise ValueError("Pipeline cache file exceeds its runtime bound")
         if not manifest:
             source_bytes += size
             source_count += 1
-            if source_bytes > 64 * 1024 * 1024 or source_count > 1024:
+            if source_bytes > 256 * 1024 * 1024 or source_count > 4096:
                 raise ValueError("Pipeline source cache exceeds its runtime budget")
         data = path.read_bytes()
         target = destination / relative / path.name
@@ -405,7 +405,8 @@ def copy_native_cache(source, destination):
     version = re.search(r'kNativeShaderVersion\[\] = "([0-9a-f]{64})"', embedded)[1]
     records = []
     skipped = 0
-    for path in sorted((source / version).glob("*.g3spv")):
+    # Entries sit in two-digit subfolders; older caches kept them flat.
+    for path in sorted([*(source / version).glob("*.g3spv"), *(source / version).glob("??/*.g3spv")]):
         if path.is_symlink() or not path.is_file() or not 152 < path.stat().st_size <= 152 + 16 * 1024 * 1024:
             skipped += 1
             continue
@@ -423,10 +424,11 @@ def copy_native_cache(source, destination):
         if not valid:
             skipped += 1
             continue
-        target = destination / version / path.name
+        relative = Path(version) / path.name[:2] / path.name
+        target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        records.append({"file": str(Path(version) / path.name), "bytes": len(data),
+        records.append({"file": str(relative), "bytes": len(data),
                         "sha256": hashlib.sha256(data).hexdigest()})
     return {"source": str(source), "destination": str(destination), "compiler_version": version,
             "files": len(records), "bytes": sum(item["bytes"] for item in records),
@@ -1129,7 +1131,10 @@ def main():
         if args.pipeline_cache_source:
             if not args.pipeline_cache_source.is_dir():
                 raise ValueError("Pipeline cache source must be an existing directory")
-            pipeline_cache_seed = copy_pipeline_cache(args.pipeline_cache_source, temporary / "cache/native-pipeline-recipes")
+            # Hardware render target recipes live in their own directory.
+            name = ("native-hardware-pipeline-recipes" if args.pipeline_cache_source.name == "native-hardware-pipeline-recipes"
+                    else "native-pipeline-recipes")
+            pipeline_cache_seed = copy_pipeline_cache(args.pipeline_cache_source, temporary / "cache" / name)
         for source, name, shaders, forward_cfg in (
                 (args.fsi_state_recipe_cache_source, "native-fsi-state-recipes", False, False),
                 (args.fsi_state_shader_cache_source, "native-fsi-state-shaders", True, False),
@@ -1172,6 +1177,9 @@ def main():
         overrides["gow3_renderer_history"] = ""
         overrides["gow3_native_live"] = not args.reference_only
         overrides["gow3_native_present"] = not args.reference_only
+        # The private cache starts empty, so the startup precompile would spend
+        # the whole run compiling; --config gow3_native_shader_precompile=true runs it.
+        overrides["gow3_native_shader_precompile"] = False
         overrides.update(gow3_renderer_capture="", gow3_renderer_history="", gow3_renderer_capture_trigger="")
         if args.reference_only:
             overrides["gow3_native_ownership"] = False
@@ -1432,7 +1440,10 @@ def main():
                     temporary / "cache/native-fsi-state-forward-shaders", args.output / "native-fsi-state-forward-shaders",
                     shaders=True, forward_cfg=True)
         if args.preserve_pipeline_cache:
-            pipeline_cache_preserved = copy_pipeline_cache(temporary / "cache/native-pipeline-recipes", args.output / "native-pipeline-recipes")
+            pipeline_cache_preserved = {
+                name: copy_pipeline_cache(temporary / "cache" / name, args.output / name)
+                for name in ("native-pipeline-recipes", "native-hardware-pipeline-recipes")
+                if (temporary / "cache" / name).is_dir()}
         if args.preserve_mesa_cache and (temporary / "desktop-cache/mesa_shader_cache").is_dir():
             mesa_cache_preserved = copy_mesa_cache(temporary / "desktop-cache/mesa_shader_cache", args.output / "mesa-cache")
     log_path = args.output / "game.full.log"

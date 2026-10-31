@@ -123,141 +123,13 @@ class SettingsTest(unittest.TestCase):
         self.assertFalse(load(self.path)['present_hdr'])
         window.close()
 
-    def test_vrr_is_shared_read_only_status(self):
-        screen = SimpleNamespace(name=lambda: 'DP-1')
-        with patch('app.QApplication.primaryScreen', return_value=screen):
-            window = SettingsWindow(self.path, hdr_probe=False)
-            self.addCleanup(window.close)
-            self.assertNotIn('gow3_vrr', load(self.path))
-            self.assertNotIn('gow3_vrr', LIVE_SETTINGS)
-            self.assertNotIn('gow3_vrr', BY_KEY)
-            self.assertNotIn('gow3_vrr', window.widgets)
-            self.assertFalse(window.hdr_timer.isActive())
-            self.assertFalse(window.vrr_timer.isActive())
-            before = window.read_values()
-            window.update_vrr_status({'available': True, 'displays': [
-                {'name': 'DP-1', 'description': 'Game display', 'enabled': False, 'available': True, 'reason': ''}]})
-            self.assertIn('Display VRR: Disabled on Game display', window.vrr_status.text())
-            self.assertIn('compositor controls VRR automatically', window.vrr_status.text())
-            self.assertIn('does not confirm variable scanout on every frame', window.vrr_status.text())
-            self.assertEqual(window.read_values(), before)
-            for mode in ('native', 'xenia', 'native'):
-                picker = window.widgets['gow3_renderer']
-                picker.setCurrentIndex(picker.findData(mode))
-                self.assertFalse(window.vrr_status.isHidden())
-                self.assertTrue(window.tabs.isTabVisible(window.tabs.indexOf(window.section_pages['Display'])))
-                self.assertNotIn('gow3_vrr', {s.key for s in visible_settings(window.read_values())})
-            self.assertTrue(window.save_settings())
-            self.assertNotIn('gow3_vrr', load(self.path))
-
-    def test_vrr_status_updates_do_not_modify_settings(self):
-        screen = SimpleNamespace(name=lambda: 'DP-1')
-        with patch('app.QApplication.primaryScreen', return_value=screen):
-            window = SettingsWindow(self.path, hdr_probe=False)
-            self.addCleanup(window.close)
-            self.assertTrue(window.save_settings())
-            before = self.path.read_bytes()
-            values = window.read_values()
-            for available, enabled, label in ((True, True, 'Enabled'), (True, False, 'Disabled'), (False, False, 'Unavailable')):
-                window.update_vrr_status({'available': True, 'displays': [
-                    {'name': 'DP-1', 'enabled': enabled, 'available': available, 'reason': 'Unsupported monitor.' if not available else ''}]})
-                self.assertIn('Display VRR: ' + label, window.vrr_status.text())
-                self.assertEqual(window.read_values(), values)
-                self.assertEqual(self.path.read_bytes(), before)
-            window.update_vrr_status({'available': False, 'reason': 'Desktop status unavailable.'})
-            self.assertIn('Desktop status unavailable', window.vrr_status.text())
-            self.assertEqual(window.read_values(), values)
-            self.assertEqual(self.path.read_bytes(), before)
-
-    def test_vrr_tracks_selected_monitor_and_actual_running_output(self):
-        screens = [SimpleNamespace(name=lambda: 'DP-1', refreshRate=lambda: 60.0),
-                   SimpleNamespace(name=lambda: 'HDMI-A-1', refreshRate=lambda: 60.0)]
-        with patch('app.QApplication.screens', return_value=screens), \
-                patch('app.QApplication.primaryScreen', return_value=screens[0]):
-            window = SettingsWindow(self.path, hdr_probe=False)
-            self.addCleanup(window.close)
-            window.update_vrr_status({'available': True, 'displays': [
-                {'name': 'DP-1', 'enabled': True, 'available': True},
-                {'name': 'HDMI-A-1', 'enabled': False, 'available': True}]})
-            self.assertIn('Enabled on DP-1', window.vrr_status.text())
-            self.assertIn('preview', window.vrr_status.text())
-            window.widgets['monitor'].setValue(2)
-            self.assertIn('Disabled on HDMI-A-1', window.vrr_status.text())
-            window.widgets['monitor'].setValue(1)
-            self.assertIn('Enabled on DP-1', window.vrr_status.text())
-            window.widgets['monitor'].setValue(3)
-            self.assertIn('Unavailable', window.vrr_status.text())
-            self.assertIn('not connected', window.vrr_status.text())
-            window.widgets['monitor'].setValue(0)
-            with patch('app.running_states', return_value=[{'vrr_output': 'HDMI-A-1'}]):
-                window.refresh_runtime_status()
-                self.assertIn('Disabled on HDMI-A-1', window.vrr_status.text())
-                self.assertNotIn('preview', window.vrr_status.text())
-            with patch('app.running_states', return_value=[{'vrr_output': 'HDMI-A-1'}, {'vrr_output': 'DP-1'}]):
-                window.refresh_runtime_status()
-                self.assertIn('Unavailable', window.vrr_status.text())
-                self.assertIn('different outputs', window.vrr_status.text())
-            window.refresh_runtime_status()
-            self.assertIn('Enabled on DP-1', window.vrr_status.text())
-
-    def test_vrr_rejects_malformed_probe_without_editing_settings(self):
-        window = SettingsWindow(self.path, hdr_probe=False)
-        self.addCleanup(window.close)
-        before = window.read_values()
-        for malformed in ([], {'available': 'yes'}, {'available': True, 'displays': [
-                {'name': 'DP-1', 'enabled': 'yes', 'available': True}]},
-                {'available': True, 'displays': [{'name': 'DP-1', 'enabled': True, 'controllable': True}]}):
-            window.update_vrr_status(malformed)
-            self.assertIn('invalid display data', window.vrr_status.text())
-            self.assertEqual(window.read_values(), before)
-
-    def test_read_only_vrr_probe_does_not_delay_apply(self):
-        window = SettingsWindow(self.path, hdr_probe=False)
-        self.addCleanup(window.close)
-        self.assertTrue(window.save_settings())
-        state = {'digest': window.digest, 'pending': True, 'vrr_pending': True, 'restart': [], 'error': ''}
-        with patch('app.running_states', return_value=[state]):
-            window.awaiting_apply = True
-            window.refresh_runtime_status()
-            self.assertTrue(window.awaiting_apply)
-            self.assertIn('finish applying', window.status.text())
-            state['pending'] = False
-            window.refresh_runtime_status()
-            self.assertFalse(window.awaiting_apply)  # Read-only VRR detection remains pending.
-            self.assertIn('Applied to the running game', window.status.text())
-
-    def test_vrr_probe_runs_asynchronously_and_updates_status(self):
-        # Private read-only stub exercises QProcess delivery, never the actual
-        # desktop helper or game. No display policy is changed by this test.
-        root = Path(self.directory.name) / 'probe-root'
-        probe = root / 'build/bin/gow3-vrr-probe'
-        probe.parent.mkdir(parents=True)
-        probe.write_text('#!' + sys.executable + '\nprint(\'{"available": true, "displays": '
-                         '[{"name": "DP-1", "enabled": true, "available": true}]}\')\n')
-        probe.chmod(0o700)
-        screen = SimpleNamespace(name=lambda: 'DP-1')
-        with patch('app.ROOT', root), patch('app.QApplication.primaryScreen', return_value=screen):
-            window = SettingsWindow(self.path, hdr_probe=False)
-            self.addCleanup(window.close)
-            before = window.read_values()
-            window.check_vrr()
-            self.assertIsNotNone(window.vrr_process)
-            deadline = time.monotonic() + 3
-            while window.vrr_process is not None and time.monotonic() < deadline:
-                QTest.qWait(10)
-            self.assertIsNone(window.vrr_process)
-            self.assertIn('Display VRR: Enabled', window.vrr_status.text())
-            self.assertEqual(window.read_values(), before)
-
     def test_display_probe_schedules_share_existing_test_switch(self):
         with patch('app.QTimer.singleShot') as schedule:
             window = SettingsWindow(self.path, hdr_probe=True)
             self.addCleanup(window.close)
-            self.assertEqual(schedule.call_count, 2)
+            self.assertEqual(schedule.call_count, 1)
             self.assertTrue(window.hdr_timer.isActive())
-            self.assertTrue(window.vrr_timer.isActive())
             self.assertEqual(window.hdr_timer.interval(), 10000)
-            self.assertEqual(window.vrr_timer.interval(), 10000)
 
 
     def test_apply_waits_for_game_and_restart_notice_clears(self):
@@ -329,23 +201,20 @@ class SettingsTest(unittest.TestCase):
         self.assertTrue(window.save_settings())
         self.assertEqual(load(self.path)['anisotropic_override'], -1)
 
-    def test_only_selected_renderer_options_are_visible(self):
+    def test_only_native_renderer_options_are_visible(self):
+        # The renderer selection and Xenia-only options are for dev/test configs.
         window = SettingsWindow(self.path, hdr_probe=False)
-        picker = window.widgets['gow3_renderer']
-        self.assertEqual([picker.itemText(i) for i in range(picker.count())], ['Native', 'Emulated (Xenia)'])
-        shared = ['gow3_renderer', 'present_hdr', 'fullscreen', 'mnk_mode', 'present_dither', 'present_effect']
-        native = ['gow3_native_pipeline_prewarm', 'gow3_native_shader_prewarm_threads']
+        self.assertTrue(window.widgets['gow3_renderer'].isHidden())
+        shown = ['present_hdr', 'fullscreen', 'mnk_mode', 'present_dither', 'present_effect',
+                 'gow3_native_pipeline_prewarm', 'gow3_native_shader_prewarm_threads',
+                 'controller1_gyro_mode', 'controller4_gyro_activation', 'controller2_buttons']
         xenia = ['resolution_scale', 'swap_post_effect', 'texture_cache_memory_limit_soft', 'async_shader_compilation']
-        for mode in ('native', 'xenia', 'native'):
-            picker.setCurrentIndex(picker.findData(mode))
-            for key in shared:
-                self.assertFalse(window.widgets[key].isHidden(), (mode, key))
-            for key in native:
-                self.assertEqual(window.widgets[key].isHidden(), mode != 'native', key)
-            for key in xenia:
-                self.assertEqual(window.widgets[key].isHidden(), mode != 'xenia', key)
-            self.assertEqual({s.key for s in visible_settings(window.read_values())},
-                             {key for key, widget in window.widgets.items() if not widget.isHidden()})
+        for key in shown:
+            self.assertFalse(window.widgets[key].isHidden(), key)
+        for key in xenia:
+            self.assertTrue(window.widgets[key].isHidden(), key)
+        self.assertEqual({s.key for s in visible_settings(window.read_values())},
+                         {key for key, widget in window.widgets.items() if not widget.isHidden()})
         self.assertTrue(window.save_settings())
         window.close()
 
@@ -387,11 +256,10 @@ class SettingsTest(unittest.TestCase):
         for section, tab in window.section_pages.items():
             index = window.tabs.indexOf(tab)
             self.assertGreaterEqual(index, 0, section)
-            self.assertTrue(window.tabs.isTabVisible(index), section)
+            # Only the renderer selection lived on the Renderer tab.
+            self.assertEqual(window.tabs.isTabVisible(index), section != 'Renderer', section)
         self.assertIn('bilinear', window.image_note.text())
         self.assertNotIn('FSR', window.image_note.text())
-        window.widgets['gow3_renderer'].setCurrentIndex(1)
-        self.assertIn('FSR 1', window.image_note.text())
         self.assertTrue(window.save_settings())
         window.close()
 
@@ -435,6 +303,46 @@ class SettingsTest(unittest.TestCase):
                   'vendor/rexglue-sdk/src/input/mnk/mnk_input_driver.cpp').read_text()
         defaults = dict(re.findall(r'REXCVAR_DEFINE_STRING\((keybind_\w+), "([^"]*)"', driver))
         self.assertEqual(defaults, {s.key: s.default for s in SETTINGS if s.key.startswith('keybind_')})
+
+    def test_controller_mapping_round_trip_and_validation(self):
+        from model import parse_mapping, format_mapping, MAPPING_DEFAULTS
+        mapping = parse_mapping('a=b, rpaddle1=gyro,lt=lt')
+        self.assertEqual(mapping['a'], 'b')
+        self.assertEqual(mapping['rpaddle1'], 'gyro')
+        self.assertEqual(format_mapping(mapping), 'a=b,rpaddle1=gyro')
+        self.assertEqual(format_mapping(MAPPING_DEFAULTS), '')
+        values = load(self.path)
+        values['controller2_buttons'] = 'a=jump'
+        with self.assertRaisesRegex(ValueError, 'Controller 2 button mapping'):
+            validate(values)
+        # The driver's default map and names agree with the editor's.
+        driver = (Path(__file__).resolve().parents[1] /
+                  'vendor/rexglue-sdk/src/input/sdl/sdl_input_driver.cpp').read_text()
+        names = re.findall(r'"(\w+)"', driver.split('kSourceNames[] = {', 1)[1].split('};', 1)[0])
+        self.assertEqual(set(names), set(MAPPING_DEFAULTS))
+
+    def test_legacy_gyro_settings_move_to_player_one(self):
+        self.path.write_text('gyro_mode = "mouse"\ngyro_sensitivity = 2.0\n')
+        values = load(self.path)
+        self.assertEqual(values['controller1_gyro_mode'], 'mouse')
+        self.assertEqual(values['controller1_gyro_sensitivity'], 2.0)
+        self.assertNotIn('gyro_mode', values)
+        self.assertEqual(values['controller2_gyro_mode'], 'off')
+
+    def test_button_mapping_editor(self):
+        window = SettingsWindow(self.path, hdr_probe=False)
+        edit = window.widgets['controller1_buttons']
+        self.assertEqual(edit.summary.text(), 'Default buttons')
+        edit.setText('lpaddle1=gyro')
+        self.assertIn('Hold for gyro', edit.summary.text())
+        self.assertTrue(window.save_settings())
+        self.assertEqual(load(self.path)['controller1_buttons'], 'lpaddle1=gyro')
+        from app import ButtonMappingDialog
+        dialog = ButtonMappingDialog(window, 'test', 'a=b')
+        self.assertEqual(dialog.text(), 'a=b')
+        dialog.restore_defaults()
+        self.assertEqual(dialog.text(), '')
+        window.close()
 
     def test_key_capture_sets_and_adds_keys(self):
         from app import KeyBindEdit, KeyCaptureDialog, Qt

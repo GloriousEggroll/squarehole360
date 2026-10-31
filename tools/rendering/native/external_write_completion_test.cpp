@@ -19,6 +19,15 @@
 #include <stdexcept>
 #include <thread>
 #include <vector>
+#if GOW3_HOST_MIMALLOC
+// rexruntime frees through mimalloc, so this probe allocates from it too.
+#include <mimalloc.h>
+#define GOW3_FIXTURE_MALLOC mi_malloc
+#define GOW3_FIXTURE_FREE mi_free
+#else
+#define GOW3_FIXTURE_MALLOC std::malloc
+#define GOW3_FIXTURE_FREE std::free
+#endif
 #if REX_PLATFORM_LINUX
 #include <unistd.h>
 #endif
@@ -29,14 +38,14 @@ thread_local size_t count = 0;
 }
 void* operator new(size_t bytes) {
   if (allocation_probe::active) ++allocation_probe::count;
-  if (void* value = std::malloc(bytes ? bytes : 1)) return value;
+  if (void* value = GOW3_FIXTURE_MALLOC(bytes ? bytes : 1)) return value;
   throw std::bad_alloc();
 }
 void* operator new[](size_t bytes) { return ::operator new(bytes); }
-void operator delete(void* value) noexcept { std::free(value); }
-void operator delete(void* value, size_t) noexcept { std::free(value); }
-void operator delete[](void* value) noexcept { std::free(value); }
-void operator delete[](void* value, size_t) noexcept { std::free(value); }
+void operator delete(void* value) noexcept { GOW3_FIXTURE_FREE(value); }
+void operator delete(void* value, size_t) noexcept { GOW3_FIXTURE_FREE(value); }
+void operator delete[](void* value) noexcept { GOW3_FIXTURE_FREE(value); }
+void operator delete[](void* value, size_t) noexcept { GOW3_FIXTURE_FREE(value); }
 
 using namespace rex::memory;
 using gow3::renderer::NativeMemoryCoherence;

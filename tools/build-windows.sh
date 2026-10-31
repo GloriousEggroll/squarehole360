@@ -23,6 +23,6 @@ mkdir -p logs
 cmake -S . -B build-windows -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE=vendor/rexglue-sdk/cmake/toolchains/xwin-clang-cl.cmake \
-  -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON 2>&1 | tee logs/configure-windows.log
-cmake --build build-windows --target gow3 squarehole-lobby --parallel "$jobs" 2>&1 | tee logs/build-windows.log
+  -DREXGLUE_USE_D3D12=OFF -DREXGLUE_USE_VULKAN=ON -DGOW3_XENIA_RENDERER=OFF 2>&1 | tee logs/configure-windows.log
+cmake --build build-windows --target gow3 gow3-shader-precompile squarehole-lobby squarehole360-launcher squarehole360-settings --parallel "$jobs" 2>&1 | tee logs/build-windows.log
 echo "Built build-windows/bin/gow3.exe; on Windows run tools\\run-windows.bat"
