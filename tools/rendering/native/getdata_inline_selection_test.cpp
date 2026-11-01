@@ -81,7 +81,7 @@ void Trace(uint32_t pc) {current_memory->EventOf({Event::Trace,pc,0,0});}
 // Model actual external callees as opaque, state-changing calls. They execute
 // once and at the same point; a helper-inline change may not reorder or omit them.
 void Kick(PPCContext& ctx,uint8_t*) {
-    current_memory->EventOf({Event::Kick,0x82AF58B8,0,ctx.lr});
+    current_memory->EventOf({Event::Kick,0x82B09058,0,ctx.lr});
     ctx.r0.u64^=0xFEDCBA9876543210ull;ctx.cr7.set_raw(13);
     current_memory->Put<uint32_t>(current_memory->counter,0xABCDEF01u);
     if(current_memory->throw_kick)throw std::runtime_error("Injected original kick failure");
@@ -105,8 +105,8 @@ void Memzero(PPCContext& ctx,uint8_t*) {
 #define REX_STORE_U16(a,v) current_memory->Store<uint16_t>(uint32_t(a),uint16_t(v))
 #define REX_STORE_U32(a,v) current_memory->Store<uint32_t>(uint32_t(a),uint32_t(v))
 #define REX_STORE_U64(a,v) current_memory->Store<uint64_t>(uint32_t(a),uint64_t(v))
-#define sub_82AF58B8 Kick
-#define sub_82CC9EA0 Memzero
+#define sub_82B09058 Kick
+#define sub_82CDD610 Memzero
 #if defined(_MSC_VER)
 #define GOW3_GETDATA_HELPER_LINKAGE static __declspec(noinline)
 #else
@@ -163,7 +163,7 @@ PPCContext Initial(uint32_t seed) {
     for(auto& b:bytes) {state=state*1664525u+1013904223u;b=std::byte(state>>24);}
     auto ctx=std::bit_cast<PPCContext>(bytes);
     ctx.r1.u64=kStack;ctx.r3.u64=kQuery;ctx.r4.u64=0x4000;
-    ctx.lr=0x829619A0;ctx.xer={1,0,1};
+    ctx.lr=0x82972988;ctx.xer={1,0,1};
     // Safe host state uses actual SDK FPSCR; retain all unused registers/padding
     // to compare the complete original context rather than only return value.
     ctx.fpscr.InitHost();ctx.fpscr.enableFlushMode();
@@ -243,7 +243,7 @@ void Pair(const Scenario& s,uint32_t expected_status=UINT32_MAX) {
     Require(a.host_fpscr==b.host_fpscr,"Host FPSCR changed");
     Require(a.memory.Same(b.memory),"Ordered guest reads/writes/external calls changed");
     Require(a.memory.bytes.size()<=Memory::kMaxBytes&&a.memory.events.size()<=Memory::kMaxEvents,"Fixture bound violated");
-    Require(!a.memory.events.empty()&&a.memory.events.front()==Event{Event::Trace,0x82AFA708,0,0},"Original entry trace missing");
+    Require(!a.memory.events.empty()&&a.memory.events.front()==Event{Event::Trace,0x82B0DEA8,0,0},"Original entry trace missing");
     if(expected_status!=UINT32_MAX)Require(!a.threw&&a.context.r3.u32==expected_status,"Independent expected status mismatch");
 }
 void Capability() {

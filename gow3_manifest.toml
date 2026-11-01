@@ -5,5 +5,7 @@ game_root = "game"
 
 [entrypoint]
 file_path = "game/default.xex"
+# Title Update 6, unpacked from the user's own package by the setup wizard.
+patch_file_path = "user/update/default.xexp"
 out_directory_path = "generated/default"
 includes = ["config/function-boundaries.toml", "config/gameplay-hooks.toml", "config/renderer-hooks.toml"]

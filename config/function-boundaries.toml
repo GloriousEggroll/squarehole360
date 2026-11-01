@@ -1,154 +1,198 @@
 # Gears of War 3 function boundaries not present in the XEX PDATA.
 # XenonRecomp independently identifies the same entries and boundaries.
 
-[functions.0x822CDF50]
+[functions.0x822DE2B0]
 size = 0x18
 
-[functions.0x822DC840]
+[functions.0x822ECBA0]
 size = 0x2C
 
-[functions.0x823565B0]
+[functions.0x82367220]
 size = 0xC
 
-[functions.0x823D4F78]
+[functions.0x823E5DF0]
 size = 0x18
 
 # Called indirectly while loading SP_Nightmare_P. Ten instructions ending
-# in blr at 0x8265B284; independently present in the XenonRecomp export.
-[functions.0x8265B260]
+# in blr at 0x8266C234; independently present in the XenonRecomp export.
+[functions.0x8266C210]
 size = 0x28
 
-[functions.0x8271C710]
+[functions.0x82DC0280]
 size = 0x10
 
-# Virtual call from 0x82A4B5E8 after the prison sequence; pointer at 0x821DFA00.
-# Leaf function ends in blr at 0x829ADA60, before padding at 0x829ADA64.
+# Virtual call from 0x82A5DCA8 after the prison sequence; pointer at 0x821DFE88.
+# Leaf function ends in blr at 0x829BF230, before padding at 0x829BF234.
 # Independently present in the XenonRecomp export.
-[functions.0x829AD8B8]
+[functions.0x829BF088]
 size = 0x1AC
 
-[functions.0x82B1BAA0]
+[functions.0x82B2EDD0]
 size = 0x8
 
-[functions.0x82B1BAB0]
+[functions.0x82B2EDE0]
 size = 0x8
 
-[functions.0x82B1BAB8]
+[functions.0x82B2EDE8]
 size = 0x8
 
-[functions.0x82B1BAC0]
+[functions.0x82B2EDF8]
 size = 0x58
 
-[functions.0x82B21F30]
+[functions.0x82B35540]
 size = 0xD8
 
-[functions.0x82B222D8]
+[functions.0x82B358D0]
 size = 0xFC
 
-[functions.0x82B22EC8]
+[functions.0x82B36490]
 size = 0x8
 
-[functions.0x82B26D60]
+[functions.0x82B3A330]
 size = 0x18
 
-[functions.0x82B82BA8]
+[functions.0x82B96418]
 size = 0x20
 
-[functions.0x82B8C670]
+[functions.0x82B9FEE8]
 size = 0x10
 
-[functions.0x82B8C680]
+[functions.0x82B9FEF8]
 size = 0x10
 
-[functions.0x82BA6268]
+[functions.0x82BB97A8]
 size = 0x18
 
-[functions.0x82BA6280]
+[functions.0x82BB97C0]
 size = 0x18
 
-[functions.0x82BA6298]
+[functions.0x82BB97D8]
 size = 0x18
 
-[functions.0x82BA62B0]
+[functions.0x82BB97F0]
 size = 0x18
 
-[functions.0x82BA62C8]
+[functions.0x82BB9808]
 size = 0x18
 
-[functions.0x82BA62E0]
+[functions.0x82BB9820]
 size = 0x18
 
-[functions.0x82BA62F8]
+[functions.0x82BB9838]
 size = 0x18
 
-[functions.0x82BA6310]
+[functions.0x82BB9850]
 size = 0x18
 
-[functions.0x82BC9D98]
+[functions.0x82BDD3D0]
 size = 0x18
 
-[functions.0x82C0AD80]
+[functions.0x82C1E660]
 size = 0x14
 
-[functions.0x82C0AE40]
+[functions.0x82C1E720]
 size = 0x18
 
-[functions.0x82C0AE58]
+[functions.0x82C1E738]
 size = 0x1C
 
-[functions.0x82C690A0]
+[functions.0x82C7C8A8]
 size = 0x14
 
-[functions.0x82C79B60]
+[functions.0x82C8D600]
 size = 0x20
 
-[functions.0x82D057A8]
+[functions.0x82D18D60]
 size = 0x160
 
-[functions.0x82D37198]
+[functions.0x82D4A968]
 size = 0x64
 
-[functions.0x82D68090]
+[functions.0x82D7B478]
 size = 0x10
 
-[functions.0x82D680C0]
+[functions.0x82D7B4A8]
 size = 0x30
 
-[functions.0x82D680F0]
+[functions.0x82D7B4D8]
 size = 0x24
 
-[functions.0x82D68114]
+[functions.0x82D7B4FC]
 size = 0x4
 
-[functions.0x82D6813C]
+[functions.0x82D7B524]
 size = 0x4
 
-[functions.0x82DB80F0]
+[functions.0x82DCB448]
 size = 0xE4
 
-[functions.0x82DCE010]
+[functions.0x82DE11F0]
 size = 0x7C
 
-[functions.0x82DF5C28]
+[functions.0x82E08D30]
 size = 0xC
 
-[functions.0x82E10418]
+[functions.0x82E234B0]
 size = 0x8
 
-[functions.0x82E10420]
+[functions.0x82E234B8]
 size = 0x10
 
-[functions.0x82E1044C]
+[functions.0x82E234E4]
 size = 0x4
 
-[functions.0x82E10A60]
+[functions.0x82E23AF8]
 size = 0xC
 
-[functions.0x82EDD390]
+[functions.0x82EF0B20]
 size = 0x8
 
-[functions.0x82EDD398]
+[functions.0x82EF0B28]
 size = 0x8
 
-[functions.0x82EDD3A0]
+[functions.0x82EF0B30]
+size = 0x8
+
+# Title Update 6: this-adjusting thunks (addi r3,r3,N; b/blr) that vtables
+# reference but .pdata does not describe. 0x8256BF28 is new in the update and
+# is called when a campaign checkpoint loads; the rest are found the same way
+# (code pointers in data, not yet functions, of this two-instruction shape).
+
+[functions.0x82454E60]
+size = 0x8
+
+[functions.0x82454E78]
+size = 0x8
+
+[functions.0x8256BF28]
+size = 0x8
+
+[functions.0x82A4C5B8]
+size = 0x8
+
+[functions.0x82B27A60]
+size = 0x8
+
+[functions.0x82B2EDD8]
+size = 0x8
+
+[functions.0x82B2EDF0]
+size = 0x8
+
+[functions.0x82B35510]
+size = 0x8
+
+[functions.0x82B35538]
+size = 0x8
+
+[functions.0x82B358B0]
+size = 0x8
+
+[functions.0x82B358C8]
+size = 0x8
+
+[functions.0x82B3AFE8]
+size = 0x8
+
+[functions.0x82BD9EB0]
 size = 0x8

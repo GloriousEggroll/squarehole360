@@ -5,7 +5,7 @@
 
 namespace gow3 {
 
-// The game's TMap<int32,...> element lookup (0x822AC700, r4 = map, r5 = key):
+// The game's TMap<int32,...> element lookup (0x82A3F238, r4 = map, r5 = key):
 // walk the key's hash chain and return the first element with the key, or
 // UINT32_MAX. With max_steps, a chain longer than that returns kTMapUndecided
 // instead. raw(address) returns the big-endian guest word at address
@@ -30,7 +30,7 @@ uint64_t TMapIntFind(RawWord raw, uint32_t map, uint32_t key, uint64_t max_steps
 }
 
 // The same lookup without the chain: a set's live elements (allocation bit
-// set; the game's add, 0x827A90F0) are exactly the elements linked in its
+// set; the game's add, 0x823065D8) are exactly the elements linked in its
 // hash, and a map's keys are unique, so the walk returns the one live element
 // whose key matches, or none. A freed element's first word is a free-list
 // index, which its clear allocation bit excludes. The scan reads keys at a

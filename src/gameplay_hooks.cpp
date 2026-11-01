@@ -36,9 +36,9 @@ bool movie_pacing_enabled = false;
 bool mouse_look_enabled = false;
 
 // The engine's MouseX and MouseY key names (FName, index and number), set up
-// at startup from the UTF-16 names at 0x82146AA8 and 0x82146AB8.
-constexpr uint32_t kKeyMouseX = 0x834440C8;
-constexpr uint32_t kKeyMouseY = 0x834440D0;
+// at startup from the UTF-16 names at 0x821471D0 and 0x821471E0.
+constexpr uint32_t kKeyMouseX = 0x83454898;
+constexpr uint32_t kKeyMouseY = 0x834548A0;
 
 bool HasUtf16Name(const uint8_t* base, uint32_t address, const char* name) {
   for (;; ++name, address += 2) {
@@ -54,7 +54,8 @@ uint32_t ReadInstruction(const uint8_t* base, uint32_t address) {
 }  // namespace
 
 // Native equivalent of the Unlock FPS patch by illusion and boma, for module
-// EF4AD5E9DD1982ED. Guest instruction writes alone cannot patch static C++ code.
+// EF4AD5E9DD1982ED (the disc executable; the sites are moved to Title Update 6).
+// Guest instruction writes alone cannot patch static C++ code.
 // https://github.com/xenia-canary/game-patches/blob/main/patches/4D5308AB%20-%20Gears%20of%20War%203.patch.toml
 void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   // lwz r11,0(r30) loads the stored screen width into CreateDevice's
@@ -62,19 +63,19 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   // Only the native renderer models EDRAM beyond the console's 10 MB.
   if (REXCVAR_GET(gow3_render_height) != 720 &&
       ParseGow3RendererMode(REXCVAR_QUERY(std::string, gow3_renderer)) == Gow3RendererMode::Native &&
-      ReadInstruction(guest_base, 0x82960D04) == 0x817E0000)
+      ReadInstruction(guest_base, 0x82971CDC) == 0x817E0000)
     screen_size_base = const_cast<uint8_t*>(guest_base);
   movie_pacing_enabled = REXCVAR_GET(gow3_movie_pacing) &&
-      ReadInstruction(guest_base, 0x823F4148) == 0xC00A06EC &&
-      ReadInstruction(guest_base, 0x823F414C) == 0xFF1F0000 &&
-      ReadInstruction(guest_base, 0x820CDB5C) == 0x3CCCCCCD;
+      ReadInstruction(guest_base, 0x824042E0) == 0xC00A06EC &&
+      ReadInstruction(guest_base, 0x824042E4) == 0xFF1F0000 &&
+      ReadInstruction(guest_base, 0x820CDBCC) == 0x3CCCCCCD;
   REXLOG_INFO("Gears movie pacing: {}", movie_pacing_enabled ? "1 ms polling" : "original polling");
-  mouse_look_enabled = ReadInstruction(guest_base, 0x8296DCB8) == 0x7D8802A6 &&
-      HasUtf16Name(guest_base, 0x82146AA8, "MouseX") && HasUtf16Name(guest_base, 0x82146AB8, "MouseY");
+  mouse_look_enabled = ReadInstruction(guest_base, 0x8297EE10) == 0x7D8802A6 &&
+      HasUtf16Name(guest_base, 0x821471D0, "MouseX") && HasUtf16Name(guest_base, 0x821471E0, "MouseY");
   if (!mouse_look_enabled) REXLOG_WARN("Gears mouse look disabled: executable does not match");
   Gow3ConfigureInputPrompts(guest_base);
-  supported_image = ReadInstruction(guest_base, 0x8253D9B0) == 0xC02304C8 &&
-                    ReadInstruction(guest_base, 0x82AF66BC) == 0x39600002;
+  supported_image = ReadInstruction(guest_base, 0x8254E4A8) == 0xC02304C8 &&
+                    ReadInstruction(guest_base, 0x82B09E5C) == 0x39600002;
   enabled = supported_image && REXCVAR_GET(gow3_60fps);
   if (!supported_image) {
     REXLOG_ERROR("Gears frame-rate patch disabled: executable instructions do not match");
@@ -101,7 +102,7 @@ void Gow3MoviePollInterval(rex::ppc::Register& interval) {
 }
 
 // The engine stores its screen size (height fixed at 720, width from the
-// aspect ratio) at 0x83392428/0x8339242C before CreateDevice; every later
+// aspect ratio) at 0x833A2BD4/0x833A2BD8 before CreateDevice; every later
 // reader, including the back buffer parameters, takes it from there.
 namespace {
 // A multiple of 8, the GPU's resolve block size.
@@ -137,11 +138,11 @@ void Gow3OverrideScreenSize() {
     auto* p = screen_size_base + address;
     p[0] = uint8_t(value >> 24); p[1] = uint8_t(value >> 16); p[2] = uint8_t(value >> 8); p[3] = uint8_t(value);
   };
-  write(0x83392428, width);
-  write(0x8339242C, height);
+  write(0x833A2BD4, width);
+  write(0x833A2BD8, height);
   // The system settings' ResX/ResY and the client's display size, which the
   // UI lays out in; written only while they still hold the original 1280x720.
-  for (const uint32_t address : {0x8343FC24u, 0x83416C60u}) {
+  for (const uint32_t address : {0x834503F4u, 0x83427420u}) {
     if (ReadInstruction(screen_size_base, address) == 1280 &&
         ReadInstruction(screen_size_base, address + 4) == 720) {
       write(address, width);
@@ -153,17 +154,17 @@ void Gow3OverrideScreenSize() {
   REXLOG_INFO("Gears render size: {}x{}", width, height);
 }
 
-// FXenonViewport::ProcessInput (0x8296DCB8, r3 = viewport, f1 = DeltaTime)
+// FXenonViewport::ProcessInput (0x8297EE10, r3 = viewport, f1 = DeltaTime)
 // passes each controller's sticks and triggers to the viewport client's
 // InputAxis. Afterwards pass mouse motion as the MouseX and MouseY keys, as the
 // engine's PC viewports do; the game binds them to its PlayerInput mouse look.
 void Gow3RefreshInputPrompts(PPCContext& ctx, uint8_t* base);
 
-REX_EXTERN(__imp__sub_8296DCB8);
-REX_EXTERN(sub_8296DCB8) {
+REX_EXTERN(__imp__sub_8297EE10);
+REX_EXTERN(sub_8297EE10) {
   const uint32_t viewport = ctx.r3.u32;
   const double delta_time = ctx.f1.f64;
-  __imp__sub_8296DCB8(ctx, base);
+  __imp__sub_8297EE10(ctx, base);
   Gow3RefreshInputPrompts(ctx, base);
   if (!mouse_look_enabled) return;
   for (uint32_t controller = 0; controller < 4; ++controller) {
@@ -197,7 +198,7 @@ REX_EXTERN(sub_8296DCB8) {
   }
 }
 
-// TMap<int32,...> element lookup (0x822AC700, r3 = result, r4 = map, r5 =
+// TMap<int32,...> element lookup (0x82A3F238, r3 = result, r4 = map, r5 =
 // key). The texture pool's chunk map hashes aligned addresses into one bucket,
 // so texture streaming walks chains of 2000 elements thousands of times a
 // frame. A chain longer than kTMapWalkSteps is answered by TMapIntFindByScan
@@ -212,7 +213,7 @@ std::atomic<bool> tmap_scan_enabled{true};
 std::atomic<uint32_t> tmap_scan_lookups{0};
 }  // namespace
 
-REX_EXTERN(sub_822AC700) {
+REX_EXTERN(sub_82A3F238) {
   const auto raw = [base](uint32_t address) {
     uint32_t value;
     std::memcpy(&value, REX_RAW_ADDR(address), sizeof(value));

@@ -277,7 +277,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
             --root ${CMAKE_CURRENT_SOURCE_DIR}
             --stamp ${CMAKE_BINARY_DIR}/gow3_getdata_inline_source_auth.json
         DEPENDS tools/rendering/getdata_inline_source_guard.py
-            generated/default/gow3_recomp.71.cpp generated/default/gow3_recomp.85.cpp
+            generated/default/gow3_recomp.71.cpp generated/default/gow3_recomp.86.cpp
             generated/native-getdata/getdata_leaf_body.inc generated/native-getdata/getdata_register_helpers.inc
             generated/native-getdata/getdata_published_body.inc
         VERBATIM)

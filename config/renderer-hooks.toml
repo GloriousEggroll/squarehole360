@@ -2,258 +2,258 @@
 # Instruction words are checked against the loaded supported XEX before capture.
 
 [[midasm_hook]]
-address = 0x82360500
+address = 0x82370B38
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r9"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x823F6478
+address = 0x82406540
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82491464
+address = 0x824A164C
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82766058
+address = 0x827778B8
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r10"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x827663C4
+address = 0x82777C24
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r10"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82768730
+address = 0x82779F90
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r6"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x827687D8
+address = 0x8277A038
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r6"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x827B33A8
+address = 0x827C5758
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r7"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8287B324
+address = 0x8288CFD4
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r5"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8287B3D8
+address = 0x8288D088
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r7"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8287B430
+address = 0x8288D0E0
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82931D54
+address = 0x829428A4
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82937880
+address = 0x829483C8
 name = "Gow3CaptureUpEnd"
 registers = ["r30", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8293864C
+address = 0x82949194
 name = "Gow3CaptureUpEnd"
 registers = ["r29", "r10"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x829395B8
+address = 0x8294A100
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8293A28C
+address = 0x8294ADD4
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8295F480
+address = 0x82970458
 name = "Gow3CaptureUpEnd"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x8295F8DC
+address = 0x829708B4
 name = "Gow3CaptureUpEnd"
 registers = ["r30", "r6"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82960880
+address = 0x82971858
 name = "Gow3CaptureUpEnd"
 registers = ["r11", "r3"]
 after_instruction = false
 
 # Validated append commits; retain immutable packet ownership before publication.
 # Allocation/reset stores are deliberately excluded: they change pointer ownership
-# without appending PM4 (82AEF11C, 82AEF7DC, 82AEFEE8, 82AF2D6C,
-# 82AF47A8, 82AF47CC, 82AF4DC8).
+# without appending PM4 (82B028BC, 82B02F7C, 82B03688, 82B0650C,
+# 82B07F48, 82B07F6C, 82B08568).
 
 [[midasm_hook]]
-address = 0x82AEEA60
+address = 0x82B02200
 name = "Gow3CaptureOwnedCommands"
 registers = ["r11", "r10"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AEEBC4
+address = 0x82B02364
 name = "Gow3CaptureOwnedCommands"
 registers = ["r11", "r10"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF02E8
+address = 0x82B03A88
 name = "Gow3CapturePrimitiveChunk"
 registers = ["r31", "r25", "r23", "r29", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF0760
+address = 0x82B03F00
 name = "Gow3CaptureIndexedChunk"
 registers = ["r31", "r18", "r21", "r27", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF0C08
+address = 0x82B043A8
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF1254
+address = 0x82B049F4
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF13DC
+address = 0x82B04B7C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r30"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF1584
+address = 0x82B04D24
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF168C
+address = 0x82B04E2C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF1A58
+address = 0x82B051F8
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF1AC8
+address = 0x82B05268
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF1BF4
+address = 0x82B05394
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF1C80
+address = 0x82B05420
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF2E7C
+address = 0x82B0661C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF3CFC
+address = 0x82B0749C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r10"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF3D50
+address = 0x82B074F0
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF3E9C
+address = 0x82B0763C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF3F70
+address = 0x82B07710
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF409C
+address = 0x82B0783C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF40D4
+address = 0x82B07874
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r30"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF4208
+address = 0x82B079A8
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF4254
+address = 0x82B079F4
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF4480
+address = 0x82B07C20
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r10"]
 after_instruction = false
@@ -262,7 +262,7 @@ after_instruction = false
 # Clear helper stores through an alias of device+48 (r23), rather than a direct
 # displacement. r31 retains the device and r11 is the finalized cursor.
 [[midasm_hook]]
-address = 0x82AF0E8C
+address = 0x82B0462C
 name = "Gow3CaptureOwnedCommands"
 registers = ["r31", "r11"]
 after_instruction = false

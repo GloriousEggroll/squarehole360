@@ -146,11 +146,11 @@ constexpr uint32_t kDeviceBytes = profile::device::kCaptureBytes;
 constexpr size_t kCaptureLimit = 256 * 1024 * 1024;
 constexpr uint32_t kPresent = profile::d3d::kPresent;
 constexpr std::array<std::array<uint32_t,2>,9> kShaderBlockDiscoverySites{{
-    {{0x823F7010,0x80FF0008}},{{0x823F7014,0x80DF0004}},
-    {{0x823F701C,0x80BF0000}},{{0x823F7020,0x83E10050}},
-    {{0x823F7024,0x7FE4FB78}},{{0x823F7028,0x4BF0B649}},
-    {{0x823F702C,0xA09D0002}},{{0x82302670,0x7D8802A6}},
-    {{0x82302724,0x38600001}},
+    {{0x824070D8,0x80FF0008}},{{0x824070DC,0x80DF0004}},
+    {{0x824070E4,0x80BF0000}},{{0x824070E8,0x83E10050}},
+    {{0x824070EC,0x7FE4FB78}},{{0x824070F0,0x4BF0BC09}},
+    {{0x824070F4,0xA09D0002}},{{0x82312CF8,0x7D8802A6}},
+    {{0x82312DAC,0x38600001}},
 }};
 std::atomic<bool> enabled{false};
 std::atomic<bool> live_enabled{false};
@@ -400,7 +400,7 @@ bool Readable(uint32_t address, uint32_t size) {
 }
 
 // Chunks the direct path copied during a probed GPU memmove (see
-// sub_82968948 below). Guest thread only.
+// sub_82979990 below). Guest thread only.
 struct MoveProbe {
   bool active = false;
   uint32_t source_first = UINT32_MAX, source_end = 0, destination_first = UINT32_MAX, destination_end = 0;
@@ -690,8 +690,8 @@ void ShaderBlocks(uint8_t* base, uint32_t address, bool pixel) {
   if (Readable(address, offset + 36)) {
     const auto* container = base + address + offset;
     const uint32_t flags = BigWord(container);
-    // 82AF9688 marks linked vertex containers with bit 6; bit 5 denotes
-    // the additional vertex program variant handled by 82AF2910.
+    // 82B0CE28 marks linked vertex containers with bit 6; bit 5 denotes
+    // the additional vertex program variant handled by 82B060B0.
     // Bit 4 occurs on the startup vertex-only point draw. Preserve its bytes
     // for the native planner to validate rather than disguising this program
     // as a missing shader; its execution mode is validated separately.
@@ -910,8 +910,21 @@ void Observe(uint32_t function, PPCContext& ctx, uint8_t* base, uint32_t phase =
           const bool up = phase == 2 && (function == profile::d3d::kBeginVertices || function == profile::d3d::kBeginIndexedVertices);
           const uint32_t vertices = up ? BigWord(device + profile::device::kUpVertexWords) : 0;
           const uint32_t indices = up && function == profile::d3d::kBeginIndexedVertices ? BigWord(device + profile::device::kUpIndexWords) : 0;
-          Block(base, 96, BigWord(device + profile::device::kUpVertexPointer), vertices <= 2 * 1024 * 1024 ? vertices * 4 : 0);
-          Block(base, 97, BigWord(device + profile::device::kUpIndexPointer), indices <= 2 * 1024 * 1024 ? indices * 4 : 0);
+          const uint32_t vertex_pointer = BigWord(device + profile::device::kUpVertexPointer);
+          const uint32_t index_pointer = BigWord(device + profile::device::kUpIndexPointer);
+          constexpr uint32_t kUpWordLimit = 2 * 1024 * 1024;
+          if (up && (!vertices || vertices > kUpWordLimit || !Readable(vertex_pointer, vertices * 4) ||
+                     (function == profile::d3d::kBeginIndexedVertices &&
+                      (!indices || indices > kUpWordLimit || !Readable(index_pointer, indices * 4))))) {
+            static std::atomic<uint32_t> reported{0};
+            if (reported.fetch_add(1, std::memory_order_relaxed) < 8)
+              REXLOG_WARN("Native capture: UP draw without capturable geometry ({}, primitive {}, args {:08X} {:08X} "
+                          "{:08X}, vertices {:08X}+{} words, indices {:08X}+{} words, caller {:08X})",
+                          function == profile::d3d::kBeginVertices ? "BeginVertices" : "BeginIndexedVertices",
+                          args[1], args[2], args[3], args[4], vertex_pointer, vertices, index_pointer, indices, original_lr);
+          }
+          Block(base, 96, vertex_pointer, vertices <= kUpWordLimit ? vertices * 4 : 0);
+          Block(base, 97, index_pointer, indices <= kUpWordLimit ? indices * 4 : 0);
           const bool clear = function == profile::d3d::kClearRect && phase == 0;
           const bool resolve = function == profile::d3d::kResolve && phase == 0;
           Block(base, 98, args[2], clear || resolve ? 16 : 0); // Source/clear rectangle.
@@ -992,9 +1005,9 @@ void Gow3StartGraphicsBridge(rex::memory::Memory* memory,rex::graphics::CommandP
     if(memory&&((REXCVAR_GET(gpu_command_summary)&&REXCVAR_GET(gpu_native_marker_operands))||
                REXCVAR_GET(gpu_native_submit_completion_markers))) {
       constexpr std::array<std::array<uint32_t,2>,7> sites{{
-        {0x82B03C64,0x3C809580},{0x82B03E48,0x7D8802A6},{0x82AF5F10,0x7D8802A6},
-        {0x82AF6180,0x916A0004},{0x82B08120,0x7D8802A6},{0x82AF55BC,0x90CA0000},
-        {0x82AF559C,0x94C30004}}};
+        {0x82B17404,0x3C809580},{0x82B175E8,0x7D8802A6},{0x82B096B0,0x7D8802A6},
+        {0x82B09920,0x916A0004},{0x82B1B8C0,0x7D8802A6},{0x82B08D5C,0x90CA0000},
+        {0x82B08D3C,0x94C30004}}};
       bool matched=true;for(const auto& site:sites)matched&=BigWord(memory->virtual_membase()+site[0])==site[1];
       marker_observation_enabled.store(matched,std::memory_order_release);
       marker_submission_enabled.store(matched&&REXCVAR_GET(gpu_native_submit_completion_markers),std::memory_order_release);
@@ -1574,8 +1587,8 @@ void Gow3RememberUp(uint32_t function, const std::array<uint32_t, 8>& args, uint
 // Invalidate before any new Issue, then bind the actual post-Issue header to the
 // newly captured End. An exception cannot bind an old generation. The original
 // routine remains solely responsible for all guest writes and command emission.
-REX_EXTERN(__imp__sub_82AFA458);
-REX_EXTERN(sub_82AFA458) {
+REX_EXTERN(__imp__sub_82B0DBF8);
+REX_EXTERN(sub_82B0DBF8) {
   std::shared_ptr<gow3::renderer::PublishedQueryResults> results;
   const auto query=ctx.r3.u32;
   const bool end=(ctx.r4.u32&3)==1;
@@ -1584,7 +1597,7 @@ REX_EXTERN(sub_82AFA458) {
     results=published_queries;
     if(results)results->Invalidate(query);
   }
-  __imp__sub_82AFA458(ctx,base);
+  __imp__sub_82B0DBF8(ctx,base);
   if(results&&end) {
     std::lock_guard lock(capture_mutex);
     if(results==published_queries)if(const auto header=PublishedHeader(query,base))
@@ -1617,7 +1630,7 @@ struct QueryWaitScope {
 };
 
 
-// The game's GPU memmove (0x82968948, r3 = destination, r4 = source, r5 =
+// The game's GPU memmove (0x82979990, r3 = destination, r4 = source, r5 =
 // bytes, r6 = units per draw): it binds the source as vertex stream 0 and
 // issues one memexport draw per chunk of 64-byte units, backward when the
 // ranges overlap that way, then unbinds the stream; no fence or other state
@@ -1626,7 +1639,7 @@ struct QueryWaitScope {
 // at its API point, so such a move is copied at once instead of ~3500 draws.
 // The first kMoveProbes moves run the draws and must cover exactly the ranges
 // computed here, or the routine stays on the draws for the session.
-REX_EXTERN(__imp__sub_82968948);
+REX_EXTERN(__imp__sub_82979990);
 namespace {
 constexpr uint32_t kMoveProbes = 8;
 std::atomic<uint32_t> verified_moves{0};
@@ -1636,13 +1649,13 @@ uint32_t XenosPhysical(uint32_t address) {
   return (address & 0x1FFFFFFFu) + (((address >> 20) + 0x200) & 0x1000);
 }
 }  // namespace
-REX_EXTERN(sub_82968948) {
+REX_EXTERN(sub_82979990) {
   const int32_t size = ctx.r5.s32;
   // The draws copy whole 64-byte units.
   const uint32_t bytes = size > 0 ? uint32_t(size >> 6) << 6 : 0;
   if (!bytes || !native_moves.load(std::memory_order_relaxed) || !live_enabled.load(std::memory_order_relaxed) ||
       enabled.load(std::memory_order_relaxed)) {
-    __imp__sub_82968948(ctx, base);
+    __imp__sub_82979990(ctx, base);
     return;
   }
   gow3::renderer::MemoryExportCopy copy;
@@ -1662,12 +1675,12 @@ REX_EXTERN(sub_82968948) {
       }
     }
     if (copied) return;
-    __imp__sub_82968948(ctx, base);
+    __imp__sub_82979990(ctx, base);
     return;
   }
   move_probe = {};
   move_probe.active = true;
-  __imp__sub_82968948(ctx, base);
+  __imp__sub_82979990(ctx, base);
   const MoveProbe probe = move_probe;
   move_probe = {};
   // Only a move whose every chunk took the direct path is a complete check.
@@ -1685,7 +1698,7 @@ REX_EXTERN(sub_82968948) {
                copy.destination, copy.destination + bytes);
 }
 
-REX_EXTERN(__imp__sub_82AFA708);
+REX_EXTERN(__imp__sub_82B0DEA8);
 
 // Direct-execution occlusion results, keyed by guest query object.
 namespace {
@@ -1814,7 +1827,7 @@ Gow3QueryWaitStats Gow3GetQueryWaitStats() {
           direct_results.load(std::memory_order_relaxed),direct_latency_ns.load(std::memory_order_relaxed),
           direct_waits.load(std::memory_order_relaxed),direct_backlog.load(std::memory_order_relaxed)};
 }
-REX_EXTERN(sub_82AFA708) {
+REX_EXTERN(sub_82B0DEA8) {
   const QueryWaitScope wait_scope(ctx);
   if(direct_queries_enabled.load(std::memory_order_acquire)&&DirectGetData(ctx,base))return;
   const bool selected=getdata_inline_selection.enabled();
@@ -1833,7 +1846,7 @@ REX_EXTERN(sub_82AFA708) {
         else if(context.r3.u32==1)published_query_pending.fetch_add(1,std::memory_order_relaxed);
         else published_query_errors.fetch_add(1,std::memory_order_relaxed);
       }
-    } else gow3::renderer::InvokeGetDataSelected(context,memory,selected,__imp__sub_82AFA708,Gow3GetDataExactInlineLeaf);
+    } else gow3::renderer::InvokeGetDataSelected(context,memory,selected,__imp__sub_82B0DEA8,Gow3GetDataExactInlineLeaf);
     if(sample) {
       readiness_samples.fetch_add(1,std::memory_order_relaxed);
       if(before)readiness_tracked.fetch_add(1,std::memory_order_relaxed);
@@ -1867,8 +1880,8 @@ REX_EXTERN(sub_82AFA708) {
 // stays unchanged. The simple path emits physical(query[0x1c] + record*32).
 // Record one begins an occlusion query; record zero ends it. Multi-tile reports
 // are retained in the header and rejected explicitly by the native planner.
-REX_EXTERN(__imp__sub_82AFF740);
-REX_EXTERN(sub_82AFF740) {
+REX_EXTERN(__imp__sub_82B12EE0);
+REX_EXTERN(sub_82B12EE0) {
   if (live_enabled.load(std::memory_order_relaxed)) {
     std::lock_guard lock(capture_mutex);
     if (live_sink && guest_memory) {
@@ -1892,7 +1905,7 @@ REX_EXTERN(sub_82AFF740) {
       }
     }
   }
-  __imp__sub_82AFF740(ctx,base);
+  __imp__sub_82B12EE0(ctx,base);
 }
 
 // Strong symbols replace only the generated weak aliases. All guest side
@@ -1900,10 +1913,10 @@ REX_EXTERN(sub_82AFF740) {
 #define GOW3_OBSERVE(name, address) \
   REX_EXTERN(__imp__##name); \
   REX_EXTERN(name) { Observe(address, ctx, base); __imp__##name(ctx, base); }
-GOW3_OBSERVE(sub_82AF0790, profile::d3d::kSpecializedDraw) // Specialized draw (ABI under investigation)
-GOW3_OBSERVE(sub_82AF99B0, profile::d3d::kInitAuxiliaryCommandBuffer) // Initialize auxiliary draw command buffer
-GOW3_OBSERVE(sub_82AECC98, profile::d3d::kSetRenderTarget) // SetRenderTarget
-GOW3_OBSERVE(sub_82AED028, profile::d3d::kSetDepthStencilSurface) // SetDepthStencilSurface
+GOW3_OBSERVE(sub_82B03F30, profile::d3d::kSpecializedDraw) // Specialized draw (ABI under investigation)
+GOW3_OBSERVE(sub_82B0D150, profile::d3d::kInitAuxiliaryCommandBuffer) // Initialize auxiliary draw command buffer
+GOW3_OBSERVE(sub_82B00438, profile::d3d::kSetRenderTarget) // SetRenderTarget
+GOW3_OBSERVE(sub_82B007C8, profile::d3d::kSetDepthStencilSurface) // SetDepthStencilSurface
 #undef GOW3_OBSERVE
 #define GOW3_OBSERVE_OWNED(name,address) \
   REX_EXTERN(__imp__##name); \
@@ -1914,10 +1927,10 @@ GOW3_OBSERVE(sub_82AED028, profile::d3d::kSetDepthStencilSurface) // SetDepthSte
     command_owner={last_observed_sequence,device}; \
     __imp__##name(ctx,base); \
   }
-GOW3_OBSERVE_OWNED(sub_82AF34A8,profile::d3d::kResolve)
-GOW3_OBSERVE_OWNED(sub_82AF16D8,profile::d3d::kClearRect)
+GOW3_OBSERVE_OWNED(sub_82B06C48,profile::d3d::kResolve)
+GOW3_OBSERVE_OWNED(sub_82B04E78,profile::d3d::kClearRect)
 #undef GOW3_OBSERVE_OWNED
-REX_EXTERN(__imp__sub_82AF6B10);
+REX_EXTERN(__imp__sub_82B0A2B0);
 namespace {
 // Runs on the game's render thread right after Present(frame) returns, which is
 // just before the game simulates the next frame and reads its input.
@@ -1942,15 +1955,15 @@ void PaceAfterPresent(uint32_t frame) {
 }
 }  // namespace
 
-REX_EXTERN(sub_82AF6B10) {
-  if(!Observing()){__imp__sub_82AF6B10(ctx,base);return;}
+REX_EXTERN(sub_82B0A2B0) {
+  if(!Observing()){__imp__sub_82B0A2B0(ctx,base);return;}
   uint32_t marker;
   {std::lock_guard lock(capture_mutex);marker=frame;}
   struct Scope {
     uint32_t previous;
     ~Scope(){rex::graphics::ExchangeApiFrameMarker(previous);}
   } scope{rex::graphics::ExchangeApiFrameMarker(marker)};
-  Observe(kPresent,ctx,base);__imp__sub_82AF6B10(ctx,base);
+  Observe(kPresent,ctx,base);__imp__sub_82B0A2B0(ctx,base);
   PaceAfterPresent(marker);
 }
 
@@ -1966,8 +1979,8 @@ REX_EXTERN(sub_82AF6B10) {
     __imp__##name(ctx, base); \
     Observe(address, ctx, base, 1, &args, lr); \
   }
-GOW3_OBSERVE_DRAW(sub_82AEFF00, profile::d3d::kDrawVertices)
-GOW3_OBSERVE_DRAW(sub_82AF0318, profile::d3d::kDrawIndexedVertices)
+GOW3_OBSERVE_DRAW(sub_82B036A0, profile::d3d::kDrawVertices)
+GOW3_OBSERVE_DRAW(sub_82B03AB8, profile::d3d::kDrawIndexedVertices)
 #undef GOW3_OBSERVE_DRAW
 
 // UP allocations precede the caller filling their memory. After-call records
@@ -1984,8 +1997,8 @@ GOW3_OBSERVE_DRAW(sub_82AF0318, profile::d3d::kDrawIndexedVertices)
     Observe(address, ctx, base, 1, &args, lr); \
     Gow3RememberUp(address, args, lr, ctx.r3.u32); \
   }
-GOW3_OBSERVE_UP(sub_82AEF500, profile::d3d::kBeginVertices)
-GOW3_OBSERVE_UP(sub_82AEF9C0, profile::d3d::kBeginIndexedVertices)
+GOW3_OBSERVE_UP(sub_82B02CA0, profile::d3d::kBeginVertices)
+GOW3_OBSERVE_UP(sub_82B03160, profile::d3d::kBeginIndexedVertices)
 #undef GOW3_OBSERVE_UP
 
 // These functions initialize/link existing shader objects. Save the original
@@ -1998,19 +2011,19 @@ GOW3_OBSERVE_UP(sub_82AEF9C0, profile::d3d::kBeginIndexedVertices)
     __imp__##name(ctx,base); \
     DiscoverShader(base,object,pixel); \
   }
-GOW3_DISCOVER_SHADER(sub_82AF2628,true)
-GOW3_DISCOVER_SHADER(sub_82AF2910,false)
-GOW3_DISCOVER_SHADER(sub_82AF9688,false)
+GOW3_DISCOVER_SHADER(sub_82B05DC8,true)
+GOW3_DISCOVER_SHADER(sub_82B060B0,false)
+GOW3_DISCOVER_SHADER(sub_82B0CE28,false)
 #undef GOW3_DISCOVER_SHADER
 
 // Only the shader-cache decoder caller owns this ABI. The original decoder
 // runs exactly once with unmodified arguments; inspect successful output while
 // its caller still owns the buffer, before it copies one shader and frees it.
-REX_EXTERN(__imp__sub_82302670);
-REX_EXTERN(sub_82302670) {
+REX_EXTERN(__imp__sub_82312CF8);
+REX_EXTERN(sub_82312CF8) {
   const bool inspect=ctx.lr==profile::game::kShaderCacheDecoderReturn&&ctx.r3.u32==20&&shader_block_discovery_enabled.load(std::memory_order_relaxed);
   const uint32_t output=ctx.r4.u32,bytes=ctx.r5.u32,selected=ctx.r29.u32;
-  __imp__sub_82302670(ctx,base);
+  __imp__sub_82312CF8(ctx,base);
   if(inspect&&ctx.r3.u32==1)DiscoverShaderBlock(base,output,bytes,selected);
 }
 

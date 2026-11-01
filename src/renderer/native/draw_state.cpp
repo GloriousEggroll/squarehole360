@@ -132,7 +132,7 @@ DrawState DecodeDrawState(std::span<const uint32_t, kDrawStateWords> words,
         throw std::runtime_error("Distinct front/back stencil masks require a native pipeline variant");
     p.stencilReference = front & 255; p.stencilReadMask = (front >> 8) & 255; p.stencilWriteMask = (front >> 16) & 255;
     constexpr uint32_t blend_offsets[]{0x2938, 0x2958, 0x295c, 0x2960};
-    // D3D blend-factor setter 0x82AEABB8 expands ARGB into RGBA floats here.
+    // D3D blend-factor setter 0x82AFE358 expands ARGB into RGBA floats here.
     // Preserve float bit patterns; the raster epilogue applies format-specific
     // clamping and NaN handling just like the source/destination blend terms.
     for(uint32_t i=0;i<4;++i)state.blend_constant[i]=std::bit_cast<float>(reg(0x28e0+i*4));

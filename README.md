@@ -61,8 +61,11 @@ The GPU's command processor, not its shaders, is now the limit.
   PySide6 and tomli-w for the standalone settings editor; the NVIDIA DLSS and
   Intel XeSS SDKs, downloaded from their official releases by
   `tools/fetch-vendor-sdks.sh --accept-licenses` (not redistributed here)
-- Your own Gears of War 3 disc image. The supported executable is
-  `default.xex` with SHA-256 `4e5d00b8…f8f790`; the importer checks it.
+- Your own Gears of War 3 disc image and its Title Update 6 package. The
+  supported executable is `default.xex` with SHA-256 `4e5d00b8…f8f790`
+  (disc media ID 58122AD6), recompiled with Title Update 6
+  (`TU_16L625B_000001C000000.00000000001GB`) applied; the importer and the
+  setup wizard check both. RAAM's Shadow needs the update.
 
 ## Build and run
 
@@ -72,6 +75,7 @@ cd squarehole360
 tools/setup-dependencies.sh            # pinned submodules (our forks), recursive
 
 python3 tools/import-assets.py import "/path/to/Gears of War 3.iso"
+python3 tools/import-assets.py update ~/Downloads   # Title Update 6 (file, folder or archive)
 tools/build-linux.sh                   # recompiles the game, then builds it
 tools/run-linux.sh
 ```
@@ -80,7 +84,8 @@ The first start compiles every pixel shader in the game into `user/cache`
 behind a progress bar (about 20 minutes, 7.4 GB), so new areas don't stall on
 their first visit; see `docs/gears3.md`.
 
-`tools/build-linux.sh` runs `rexglue codegen` on your executable. It then
+`tools/build-linux.sh` runs `rexglue codegen` on your executable with the
+title update's patch (`user/update/default.xexp`) applied. It then
 generates the XDK-derived inputs (`tools/porting/generate_getdata.py`) and
 builds `build/bin/gow3`. Saves and caches live in `user/`, and logs in
 `logs/`.

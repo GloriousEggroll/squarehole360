@@ -135,12 +135,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   if (check_assets && Exists(python)) {
     const std::vector<std::wstring> check{root + L"\\tools\\import-assets.py", L"check", L"--output", game_data};
     if (Run(python, check, root, true) != 0) {
-      // First run or damaged files: the setup wizard imports your own copy of
-      // the game, then optionally its DLC.
+      // First run, damaged files or no title update: the setup wizard imports
+      // your own copy of the game and Title Update 6, then optionally its DLC.
       Run(Exists(pythonw) ? pythonw : python, {root + L"\\tools\\setup-wizard.py", L"--output", game_data}, root,
           false);
       if (Run(python, check, root, true) != 0) {
-        return Fail(L"The game files are not set up.\n\nStart squarehole360 again to run the setup wizard, or "
+        return Fail(L"The game files or Title Update 6 are not set up.\n\nStart squarehole360 again to run the setup wizard, or "
                     L"import your own ISO:\n  python\\python.exe tools\\import-assets.py import \"C:\\path\\to\\gow3.iso\"");
       }
     }

@@ -14,13 +14,13 @@ from pathlib import Path
 import struct
 
 FUNCTIONS = {
-    0x82AEFF00: "DrawPrimitive", 0x82AF0318: "DrawIndexedPrimitive",
-    0x82AF0790: "SpecializedDraw", 0x82AF99B0: "InitializeDrawCommandBuffer",
-    0x82AECC98: "SetRenderTarget", 0x82AED028: "SetDepthStencilSurface",
-    0x82AF34A8: "Resolve", 0x82AF6B10: "Present",
+    0x82B036A0: "DrawPrimitive", 0x82B03AB8: "DrawIndexedPrimitive",
+    0x82B03F30: "SpecializedDraw", 0x82B0D150: "InitializeDrawCommandBuffer",
+    0x82B00438: "SetRenderTarget", 0x82B007C8: "SetDepthStencilSurface",
+    0x82B06C48: "Resolve", 0x82B0A2B0: "Present",
     0x82AF1D50: "Clear",
-    0x82AF16D8: "ClearRect",
-    0x82AEF500: "BeginVertices", 0x82AEF9C0: "BeginIndexedVertices",
+    0x82B04E78: "ClearRect",
+    0x82B02CA0: "BeginVertices", 0x82B03160: "BeginIndexedVertices",
 }
 
 
@@ -57,7 +57,7 @@ def inspect(data, payloads=None):
         args, result, block_count = rest[:8], rest[8], rest[9]
         if phase > (2 if version >= 4 else 1) or block_count not in {1: (10, 13), 2: (31,), 3: (95,), 4: (97,), 5: (102,), 6: (103,)}[version]:
             raise ValueError("Invalid event phase/block count")
-        if phase == 2 and function not in (0x82AEF500, 0x82AEF9C0):
+        if phase == 2 and function not in (0x82B02CA0, 0x82B03160):
             raise ValueError("Finalized UP phase used by a non-UP function")
         cursor, blocks = offset + 60, {}
         for _ in range(block_count):

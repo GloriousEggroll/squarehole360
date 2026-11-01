@@ -2,8 +2,10 @@
 // relocation) and write its loaded image for offline analysis:
 //   OUT.bin   bytes of [base, base+image_size), zero where no section is mapped
 //   OUT.json  {"base","image_size","entry","sections":[{name,address,size,executable}]}
-// Usage: gow3-xex-image-dump GAME_ROOT XEX_RELATIVE_PATH OUT_PREFIX
+// Usage: gow3-xex-image-dump GAME_ROOT XEX_RELATIVE_PATH OUT_PREFIX [--patch XEXP]
+// --patch applies a title update's executable patch (default.xexp), as the game does.
 #include <rex/kernel/init.h>
+#include <rex/system/flags.h>
 #include <rex/runtime.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
@@ -21,15 +23,21 @@
 
 int main(int argc, char** argv) {
   using rex::X_STATUS;
-  if (argc != 4) {
-    std::cerr << "usage: gow3-xex-image-dump GAME_ROOT XEX_RELATIVE_PATH OUT_PREFIX\n";
+  if (argc != 4 && !(argc == 6 && std::string(argv[4]) == "--patch")) {
+    std::cerr << "usage: gow3-xex-image-dump GAME_ROOT XEX_RELATIVE_PATH OUT_PREFIX [--patch XEXP]\n";
     return 2;
+  }
+  // The patch is found as update:\<executable>p, so mount its folder as update:.
+  std::filesystem::path update_root;
+  if (argc == 6) {
+    update_root = std::filesystem::canonical(argv[5]).parent_path();
+    REXCVAR_SET(xex_apply_patches, true);
   }
   const std::filesystem::path root = std::filesystem::canonical(argv[1]);
   std::string relative = argv[2];
   std::replace(relative.begin(), relative.end(), '/', '\\');
 
-  rex::Runtime runtime(root.string());
+  rex::Runtime runtime(root.string(), {}, update_root);
   if (runtime.Setup(rex::RuntimeConfig{.kernel_init = rex::kernel::InitializeKernel, .tool_mode = true}) !=
       X_STATUS_SUCCESS) {
     std::cerr << "runtime setup failed\n";

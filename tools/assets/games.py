@@ -1,4 +1,4 @@
-"""Per-game asset definitions: the files a game's disc must provide and its known DLC.
+"""Per-game asset definitions: the files a game's disc must provide, its title update and known DLC.
 
 Each supported game has tools/assets/games/<id>.json, created from a verified
 import of the user's own disc and DLC. It lists names, sizes and SHA-256
@@ -32,6 +32,15 @@ class Dlc:
 
 
 @dataclass(frozen=True)
+class TitleUpdate:
+    name: str
+    file: str
+    size: int
+    sha256: str
+    xexp_sha256: str
+
+
+@dataclass(frozen=True)
 class Game:
     id: str
     title: str
@@ -42,6 +51,7 @@ class Game:
     directories: tuple
     files: tuple
     dlc: tuple
+    title_update: object = None  # TitleUpdate the executable is built with, if any
 
     def base_file(self, path):
         """The listed base-game file for a relative path, matched case-insensitively."""
@@ -79,9 +89,15 @@ def load_game(game_id=DEFAULT_GAME, path=None):
             if "/" in entry["file"] or "\\" in entry["file"] or not entry["file"] or entry["size"] <= 0:
                 raise AssetError("Invalid DLC package in game definition")
             dlc.append(Dlc(entry["name"], entry["file"], entry["size"], _digest(entry["sha256"]), entry["content_type"]))
+        update = value.get("title_update")
+        if update is not None:
+            if "/" in update["file"] or "\\" in update["file"] or not update["file"] or update["size"] <= 0:
+                raise AssetError("Invalid title update in game definition")
+            update = TitleUpdate(update["name"], update["file"], update["size"], _digest(update["sha256"]),
+                                 _digest(update["xexp_sha256"]))
         if not any(entry["path"] == value["executable"] for entry in files):
             raise AssetError("The game definition does not list its executable")
         return Game(value["id"], value["title"], value["title_id"], value["executable"], _digest(value["xex_sha256"]),
-                    value["global_shaders"], tuple(value["base"]["directories"]), tuple(files), tuple(dlc))
+                    value["global_shaders"], tuple(value["base"]["directories"]), tuple(files), tuple(dlc), update)
     except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
         raise AssetError(f"Cannot read game definition {path}: {exc}") from exc

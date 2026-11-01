@@ -1,7 +1,8 @@
-"""First-run setup: import the user's own copy of the game, then optionally its DLC.
+"""First-run setup: import the user's own copy of the game and its title update, then optionally its DLC.
 
 The wizard is driven by the game definition (tools/assets/games/<id>.json):
-its title, the files its disc provides and its known DLC packages. A Qt
+its title, the files its disc provides, the title update the executable is
+built with and its known DLC packages. A Qt
 window is used when PySide6 and a display are available, otherwise prompts
 on the terminal.
 """
@@ -10,7 +11,7 @@ from pathlib import Path
 import sys
 import threading
 
-from . import dlc
+from . import dlc, update
 from .importer import Progress, check_ready, import_source
 from .xdvdfs import AssetError
 
@@ -21,6 +22,10 @@ def base_ready(game_root):
         return True
     except (AssetError, OSError):
         return False
+
+
+def update_ready(game, user_root):
+    return update.installed(game, user_root)
 
 
 def _console_progress():
@@ -52,6 +57,22 @@ def run_console(game, game_root, user_root, dlc_only=False):
     if not base_ready(game_root):
         print(f"{game.title} is not imported yet; import the base game first.")
         return 1
+    if not update_ready(game, user_root):
+        name = game.title_update.name
+        print(f"\nsquarehole360 is built for {game.title} {name}. Choose your {name} package\n"
+              f"({game.title_update.file}), or a folder or archive that contains it.")
+        while not update_ready(game, user_root):
+            source = _ask(f"Path to {name} (empty to cancel): ")
+            if not source:
+                return 1
+            try:
+                found = update.find([Path(source)], game)
+                if not found:
+                    print(f"No {game.title} {name} found there.")
+                    continue
+                update.install(found, game, user_root, _console_progress())
+            except (AssetError, OSError) as exc:
+                print(f"\nCould not add {name}: {exc}\n")
     answer = _ask("\nAdd downloadable content (DLC)? [y/N] ").lower()
     while answer.startswith("y"):
         source = _ask("Folder or archive (.zip, .tar.gz, .tar.xz) with the DLC (empty to finish): ")
@@ -101,7 +122,8 @@ def run_gui(game, game_root, user_root, dlc_only=False):
     def phase_text(phase):
         return {"inspect": "Checking", "hash-iso": "Reading the disc", "extract": "Extracting",
                 "copy": "Copying", "verify": "Verifying", "verify-game": "Verifying", "verify-native": "Verifying",
-                "prepare": "Preparing", "adopt": "Verifying", "dlc": "Installing DLC"}.get(phase, phase.capitalize())
+                "prepare": "Preparing", "adopt": "Verifying", "dlc": "Installing DLC",
+                "update": "Installing"}.get(phase, phase.capitalize())
 
     class WorkPage(QWizardPage):
         """Runs one job with a progress bar; Next is enabled once it succeeds."""
@@ -177,6 +199,49 @@ def run_gui(game, game_root, user_root, dlc_only=False):
     import_page = WorkPage(f"Importing {game.title}", "This copies and verifies the game files; it can take a few minutes.",
                            lambda progress: import_source(Path(source_edit.text().strip()).expanduser(), game_root,
                                                           progress, game))
+
+    # Title update (required: the executable is built with it).
+    name = game.title_update.name
+    update_state = dict(found=None)
+    update_page = QWizardPage()
+    update_page.setTitle(name)
+    update_page.setSubTitle(f"squarehole360 is built for {game.title} {name}, which RAAM's Shadow also needs. "
+                            f"Choose your {name} package, or a folder or archive that contains it.")
+    update_status = QLabel()
+    update_status.setWordWrap(True)
+
+    def find_update(path):
+        if not path:
+            return
+        try:
+            update_state["found"] = update.find([Path(path)], game)
+            update_status.setText(f"Found {name}: {update_state['found'].source}" if update_state["found"]
+                                  else f"No {name} found in {Path(path).name}.")
+        except (AssetError, OSError) as exc:
+            update_state["found"] = None
+            update_status.setText(f"Could not read {Path(path).name}: {exc}")
+        update_page.completeChanged.emit()
+
+    update_file, update_folder = QPushButton("Choose file or archive..."), QPushButton("Choose folder...")
+    update_file.clicked.connect(lambda: find_update(QFileDialog.getOpenFileName(
+        wizard, name, str(Path.home()),
+        "Update packages and archives (TU_* *.zip *.tar *.tar.gz *.tgz *.tar.xz *.txz *.tar.bz2);;All files (*)")[0]))
+    update_folder.clicked.connect(lambda: find_update(QFileDialog.getExistingDirectory(wizard, name, str(Path.home()))))
+    buttons = QHBoxLayout()
+    buttons.addWidget(update_file)
+    buttons.addWidget(update_folder)
+    buttons.addStretch()
+    layout = QVBoxLayout(update_page)
+    layout.addLayout(buttons)
+    expected = QLabel(f"Expected package: {game.title_update.file}")
+    expected.setWordWrap(True)
+    layout.addWidget(expected)
+    layout.addWidget(update_status)
+    layout.addStretch()
+    update_page.isComplete = lambda: update_state["found"] is not None
+
+    update_install_page = WorkPage(f"Installing {name}", "This checks and unpacks the update.",
+                                   lambda progress: update.install(update_state["found"], game, user_root, progress))
 
     # DLC question and sources.
     ask_page = QWizardPage()
@@ -254,22 +319,27 @@ def run_gui(game, game_root, user_root, dlc_only=False):
         f"{game.title} is ready." + (f" Added DLC: {', '.join(state['installed'])}." if state["installed"] else ""))
 
     pages = {}
-    for page in (source_page, import_page, ask_page, dlc_page, install_page, done_page):
+    order = [source_page, import_page, update_page, update_install_page, ask_page, dlc_page, install_page, done_page]
+    for page in order:
         pages[page] = wizard.addPage(page)
     ids = {page: pages[page] for page in pages}
-    start = ids[ask_page] if dlc_only or base_ready(game_root) else ids[source_page]
+    if not (dlc_only or base_ready(game_root)):
+        start = ids[source_page]
+    else:
+        start = ids[ask_page] if update_ready(game, user_root) else ids[update_page]
     wizard.setStartId(start)
 
     def next_id(page):
         if page is ask_page:
             return ids[dlc_page] if yes.isChecked() else ids[done_page]
-        order = [source_page, import_page, ask_page, dlc_page, install_page, done_page]
+        if page is import_page and update_ready(game, user_root):
+            return ids[ask_page]
         index = order.index(page)
         return ids[order[index + 1]] if index + 1 < len(order) else -1
     for page in pages:
         page.nextId = (lambda page=page: next_id(page))
     wizard.exec()
-    return 0 if base_ready(game_root) else 1
+    return 0 if base_ready(game_root) and update_ready(game, user_root) else 1
 
 
 def run(game, game_root, user_root, console=False, dlc_only=False):

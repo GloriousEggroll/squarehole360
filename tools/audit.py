@@ -11,6 +11,8 @@ import struct
 
 ROOT = Path(__file__).resolve().parent.parent
 EXPECTED_XEX = "4e5d00b8f584f42951344b26a2ae8292bb30c7634b1a75cec0c70a80b3f8f790"
+# Title Update 6, applied by the recompiler and the game (gow3_manifest.toml).
+EXPECTED_XEXP = "307b2aede15b2697d059939dfd458b8d2fb2c0afd635bd7924714dbf2f31295e"
 
 
 def audit():
@@ -18,11 +20,15 @@ def audit():
     digest = hashlib.sha256(binary).hexdigest()
     if digest != EXPECTED_XEX:
         raise ValueError("default.xex differs from the executable these function hints target")
+    patch = ROOT / "user/update/default.xexp"
+    if not patch.is_file() or hashlib.sha256(patch.read_bytes()).hexdigest() != EXPECTED_XEXP:
+        raise ValueError("Title Update 6 (user/update/default.xexp) is missing or differs; run tools/setup-wizard.py")
     u32 = lambda offset: struct.unpack_from(">I", binary, offset)[0]
     headers = {u32(24 + i * 8): u32(28 + i * 8) for i in range(u32(20))}
     execution = headers[0x40006]
     result = {
         "xex_sha256": digest,
+        "xexp_sha256": EXPECTED_XEXP,
         "entry_point": hex(headers[0x10100]),
         "image_base": hex(headers[0x10201]),
         "title_id": hex(u32(execution + 12)),

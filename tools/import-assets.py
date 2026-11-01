@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Import your own Gears of War 3 (an Xbox 360 ISO or extracted folder) and its DLC."""
+"""Import your own Gears of War 3 (an Xbox 360 ISO or extracted folder), its title update and its DLC."""
 import argparse
 from pathlib import Path
 import sys
 
-from assets import dlc
+from assets import dlc, update as title_update
 from assets.games import load_game
 from assets.importer import ROOT, Progress, check_ready, import_iso, import_source, prepare, verify
 from assets.xdvdfs import AssetError
@@ -21,8 +21,13 @@ def main():
     add_dlc.add_argument("sources", type=Path, nargs="+", help="Folders or .zip/.tar.gz/.tar.xz archives")
     add_dlc.add_argument("--user", type=Path, default=ROOT / "user", help="User data directory (default: user/)")
     add_dlc.add_argument("--json-progress", action="store_true", help="Emit JSON lines for a setup frontend")
+    add_update = sub.add_parser("update", help="Install the title update found in a file, folder or archive")
+    add_update.add_argument("sources", type=Path, nargs="+", help="Update package, folders or archives")
+    add_update.add_argument("--user", type=Path, default=ROOT / "user", help="User data directory (default: user/)")
+    add_update.add_argument("--json-progress", action="store_true", help="Emit JSON lines for a setup frontend")
     validate = sub.add_parser("verify", help="Verify installed game assets and prepared renderer data")
-    check = sub.add_parser("check", help="Fast launch check: file inventory/sizes and executable hash")
+    check = sub.add_parser("check", help="Fast launch check: file inventory/sizes, executable hash and title update")
+    check.add_argument("--user", type=Path, default=ROOT / "user", help="User data directory (default: user/)")
     update = sub.add_parser("prepare", help="Rebuild native data from previously imported game assets")
     for command in (extract, validate, check, update):
         command.add_argument("--output", type=Path, default=ROOT / "game", help="Game asset directory (default: game/)")
@@ -44,10 +49,17 @@ def main():
             if not found:
                 raise AssetError(f"No {game.title} DLC packages found")
             dlc.install(found, game, args.user, progress)
+        elif args.command == "update":
+            game = load_game()
+            found = title_update.find(args.sources, game)
+            if not found:
+                raise AssetError(f"No {game.title} {game.title_update.name} package found")
+            title_update.install(found, game, args.user, progress)
         elif args.command == "verify":
             verify(args.output, progress)
             progress("complete", 1, 1, "All imported and prepared assets verified")
         elif args.command == "check":
+            title_update.check(load_game(), args.user)
             check_ready(args.output, progress)
         else:
             prepare(args.output, progress, args.compile_shaders)

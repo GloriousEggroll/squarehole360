@@ -58,7 +58,7 @@ int main(int argc,char** argv) {
         auto cpu_update=payload;for(auto& b:cpu_update)b^=0xa7;
         planner.InvalidateMemory(copy.destination,copy.bytes,cpu_update);
         reused.blocks.at(13).bytes=cpu_update;planner.Push(std::move(reused));
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;present.frame=boundary.frame;
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;present.frame=boundary.frame;
         present.blocks={{1,0x83000000,std::vector<uint8_t>(0x3600)},
             {103,0x83020000,std::vector<uint8_t>(64)}};
         auto& header=present.blocks[1].bytes;
@@ -79,7 +79,7 @@ int main(int argc,char** argv) {
         mixed_boundary.blocks.at(13).address=copy.destination;
         mixed_boundary.blocks.at(13).bytes=cpu_update;
         mixed_planner.Push(std::move(mixed_boundary));
-        GraphicsBoundaryEvent mixed_present;mixed_present.function=0x82AF6B10;mixed_present.frame=boundary.frame;
+        GraphicsBoundaryEvent mixed_present;mixed_present.function=0x82B0A2B0;mixed_present.frame=boundary.frame;
         mixed_present.blocks={{1,0x83000000,std::vector<uint8_t>(0x3600)},
             {103,0x83020000,std::vector<uint8_t>(64)}};
         auto& mixed_header=mixed_present.blocks[1].bytes;

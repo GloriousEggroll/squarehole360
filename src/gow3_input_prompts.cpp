@@ -24,16 +24,16 @@
 #include <utility>
 #include <vector>
 
-REX_EXTERN(__imp__sub_82736CE0);
-REX_EXTERN(__imp__sub_822FC8D0);
-REX_EXTERN(__imp__sub_8292D488);
-REX_EXTERN(__imp__sub_8292D5C0);
-REX_EXTERN(__imp__sub_82942C38);
-REX_EXTERN(__imp__sub_82941BB0);
-REX_EXTERN(__imp__sub_82B6B5A8);
-REX_EXTERN(sub_82B6A348);
-REX_EXTERN(sub_822B4FF8);
-REX_EXTERN(sub_82737010);
+REX_EXTERN(__imp__sub_82748460);
+REX_EXTERN(__imp__sub_8230CF58);
+REX_EXTERN(__imp__sub_8293DF68);
+REX_EXTERN(__imp__sub_8293E0A0);
+REX_EXTERN(__imp__sub_82953D10);
+REX_EXTERN(__imp__sub_82952C88);
+REX_EXTERN(__imp__sub_82B7ED10);
+REX_EXTERN(sub_82B7DAA8);
+REX_EXTERN(sub_822C55A8);
+REX_EXTERN(sub_82748790);
 
 namespace {
 bool prompts_enabled = false;
@@ -59,7 +59,7 @@ void StoreFloat(uint8_t* base, uint32_t address, float value) {
 
 // The engine's name table (FNameEntry pointers); an entry holds its index
 // shifted left by one, the low bit set for UTF-16 text, then the text at +8.
-constexpr uint32_t kNames = 0x8343D148;
+constexpr uint32_t kNames = 0x8344D918;
 // UObject::Name (FName index) and the UCanvas fields used here.
 constexpr uint32_t kObjectName = 44;
 constexpr uint32_t kCanvasFont = 0x3C, kCanvasOrgX = 0x40, kCanvasOrgY = 0x44;
@@ -181,7 +181,7 @@ std::pair<int, int> Print(PPCContext& ctx, uint8_t* base, const GuestFrame& fram
   ctx.f1.f64 = scale;
   ctx.f2.f64 = scale;
   ctx.r10.u64 = frame.text();
-  sub_82737010(ctx, base);
+  sub_82748790(ctx, base);
   return {int(Load32(base, frame.sizes())), int(Load32(base, frame.sizes() + 4))};
 }
 
@@ -203,7 +203,7 @@ void FillRect(PPCContext& ctx, uint8_t* base, const GuestFrame& frame, uint32_t 
   ctx.f7.f64 = 0;
   ctx.f8.f64 = 1;
   ctx.f9.f64 = 1;
-  __imp__sub_82736CE0(ctx, base);
+  __imp__sub_82748460(ctx, base);
 }
 
 std::string JoinLabels(std::initializer_list<const char*> binds) {
@@ -307,7 +307,7 @@ bool DrawKeyPrompt(PPCContext& ctx, uint8_t* base) {
   const float scale_x = float(ctx.f4.f64) / ul, scale_y = float(ctx.f5.f64) / vl;
 
   // The tile itself, for the arrows and dots around the glyph.
-  __imp__sub_82736CE0(ctx, base);
+  __imp__sub_82748460(ctx, base);
   ctx = saved;
   for (int i = 0; i < count; ++i) {
     const Glyph& g = *caps[i].first;
@@ -373,29 +373,29 @@ std::string ControllerFontKeys(const uint8_t* base, uint32_t key) {
 
 void Gow3ConfigureInputPrompts(const uint8_t* guest_base) {
   // The native table names UCanvas::execDrawTile and execDrawText; DrawTile
-  // calls 0x82736CE0 and DrawText 0x82737010 (WrappedPrint).
-  prompts_enabled = Load32(guest_base, 0x83396358) == 0x8213ED64 &&
-                    Load32(guest_base, 0x8339635C) == 0x82737240 &&
-                    Load32(guest_base, 0x83396310) == 0x8213EE50 &&
-                    Load32(guest_base, 0x83396314) == 0x82737C80 &&
-                    Load32(guest_base, 0x82736CE0) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x82737010) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x822FC8D0) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x8292D488) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x8292D5C0) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x82942C38) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x82941BB0) == 0x7D8802A6 &&
-                    Load32(guest_base, 0x82B6B5A8) == 0x7D8802A6 &&
-                    Utf16Equals(guest_base, 0x8223EA2C, "ControllerFont") &&
-                    Utf16Equals(guest_base, 0x8223EA14, "GearGameUI");
+  // calls 0x82748460 and DrawText 0x82748790 (WrappedPrint).
+  prompts_enabled = Load32(guest_base, 0x833A6B10) == 0x8213F478 &&
+                    Load32(guest_base, 0x833A6B14) == 0x827489C0 &&
+                    Load32(guest_base, 0x833A6AC8) == 0x8213F564 &&
+                    Load32(guest_base, 0x833A6ACC) == 0x82749400 &&
+                    Load32(guest_base, 0x82748460) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x82748790) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x8230CF58) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x8293DF68) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x8293E0A0) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x82953D10) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x82952C88) == 0x7D8802A6 &&
+                    Load32(guest_base, 0x82B7ED10) == 0x7D8802A6 &&
+                    Utf16Equals(guest_base, 0x8224006C, "ControllerFont") &&
+                    Utf16Equals(guest_base, 0x821B0E10, "GearGameUI");
   if (!prompts_enabled) REXLOG_WARN("Gears keyboard prompts disabled: executable does not match");
 }
 
 // UCanvas::DrawTile(Texture, X, Y, Z, XL, YL, U, V, UL, VL, Color, Blend).
-REX_EXTERN(sub_82736CE0) {
+REX_EXTERN(sub_82748460) {
   if (prompts_enabled && ctx.r4.u32 && rex::input::mnk::ShowKeyboardPrompts() && DrawKeyPrompt(ctx, base))
     return;
-  __imp__sub_82736CE0(ctx, base);
+  __imp__sub_82748460(ctx, base);
 }
 
 // Localize(Result, Section, Key, Package, LangExt, bOptional) returns Result.
@@ -423,9 +423,9 @@ void StoreText(uint8_t* base, uint32_t address, std::u16string_view text) {
 }
 }  // namespace
 
-REX_EXTERN(sub_822FC8D0) {
+REX_EXTERN(sub_8230CF58) {
   const uint32_t section = ctx.r4.u32, key = ctx.r5.u32, package = ctx.r6.u32;
-  __imp__sub_822FC8D0(ctx, base);
+  __imp__sub_8230CF58(ctx, base);
   if (!prompts_enabled || !Utf16Equals(base, section, "ControllerFont") || !Utf16Equals(base, package, "GearGameUI"))
     return;
   const std::string keys = ControllerFontKeys(base, key);
@@ -466,7 +466,7 @@ REX_EXTERN(sub_822FC8D0) {
 // switches between the controller and the keyboard and mouse, so open menus
 // follow the device too.
 namespace {
-constexpr uint32_t kSetString = 0x8292D488, kSetText = 0x8292D5C0;
+constexpr uint32_t kSetString = 0x8293DF68, kSetText = 0x8293E0A0;
 
 struct MenuText {
   uint32_t setter;
@@ -587,10 +587,10 @@ void NoteMenuText(const uint8_t* base, uint32_t setter, uint32_t object, std::u1
 }  // namespace
 
 // TranslateString(Context, Text, Result); Result holds the text at +8.
-REX_EXTERN(sub_82942C38) {
+REX_EXTERN(sub_82953D10) {
   const uint32_t context = ctx.r3.u32, source = ctx.r4.u32, result = ctx.r5.u32;
   std::u16string text = prompts_enabled ? LoadFString(base, source) : std::u16string();
-  __imp__sub_82942C38(ctx, base);
+  __imp__sub_82953D10(ctx, base);
   if (!NamesControllerButtons(text) || text.size() >= 1000) return;
   Translation translation{LoadFString(base, result + 8), std::move(text), context};
   std::lock_guard lock(menu_mutex);
@@ -598,28 +598,28 @@ REX_EXTERN(sub_82942C38) {
   translations.push_back(std::move(translation));
 }
 
-REX_EXTERN(sub_8292D488) {
+REX_EXTERN(sub_8293DF68) {
   if (prompts_enabled)
     NoteMenuText(base, kSetString, ctx.r3.u32, LoadFString(base, ctx.r4.u32), LoadFString(base, ctx.r5.u32),
                  ctx.r6.u32);
-  __imp__sub_8292D488(ctx, base);
+  __imp__sub_8293DF68(ctx, base);
 }
 
-REX_EXTERN(sub_8292D5C0) {
+REX_EXTERN(sub_8293E0A0) {
   if (prompts_enabled) NoteMenuText(base, kSetText, ctx.r3.u32, {}, LoadFString(base, ctx.r4.u32), ctx.r5.u32);
-  __imp__sub_8292D5C0(ctx, base);
+  __imp__sub_8293E0A0(ctx, base);
 }
 
 // UGFxObject's ActionScript natives call this with the object's value.
-REX_EXTERN(sub_82941BB0) {
+REX_EXTERN(sub_82952C88) {
   const uint32_t previous = invoking_object;
   invoking_object = ctx.r3.u32 - 0x3C;
-  __imp__sub_82941BB0(ctx, base);
+  __imp__sub_82952C88(ctx, base);
   invoking_object = previous;
 }
 
 // Scaleform Invoke(Interface, Object, Result, Method, Args, ArgCount, IsDisplayObject).
-REX_EXTERN(sub_82B6B5A8) {
+REX_EXTERN(sub_82B7ED10) {
   const uint32_t object = invoking_object;
   if (prompts_enabled && object && ctx.r6.u32 && ctx.r8.u32 <= 16) {
     MenuCall call{object, {}, {}, {}, {}, {}, {}};
@@ -671,7 +671,7 @@ REX_EXTERN(sub_82B6B5A8) {
       menu_calls.push_back(std::move(call));
     }
   }
-  __imp__sub_82B6B5A8(ctx, base);
+  __imp__sub_82B7ED10(ctx, base);
 }
 
 void Gow3RefreshInputPrompts(PPCContext& ctx, uint8_t* base) {
@@ -705,11 +705,11 @@ void Gow3RefreshInputPrompts(PPCContext& ctx, uint8_t* base) {
       ctx.r4.u64 = member;
       ctx.r5.u64 = text;
       ctx.r6.u64 = t.context;
-      __imp__sub_8292D488(ctx, base);
+      __imp__sub_8293DF68(ctx, base);
     } else {
       ctx.r4.u64 = text;
       ctx.r5.u64 = t.context;
-      __imp__sub_8292D5C0(ctx, base);
+      __imp__sub_8293E0A0(ctx, base);
     }
   }
   for (const auto& c : calls) {
@@ -732,12 +732,12 @@ void Gow3RefreshInputPrompts(PPCContext& ctx, uint8_t* base) {
         ctx.r3.u64 = c.contexts[i];
         ctx.r4.u64 = source;
         ctx.r5.u64 = translation;
-        __imp__sub_82942C38(ctx, base);
+        __imp__sub_82953D10(ctx, base);
         text = LoadFString(base, translation + 8);
         if (const uint32_t data = Load32(base, translation + 8)) {
           ctx.r1.u64 = sp;
           ctx.r3.u64 = data;
-          sub_822B4FF8(ctx, base);
+          sub_822C55A8(ctx, base);
         }
       }
       const uint32_t data = free_space;
@@ -760,13 +760,13 @@ void Gow3RefreshInputPrompts(PPCContext& ctx, uint8_t* base) {
     ctx.r8.u64 = c.args.size();
     ctx.r9.u64 = (Load32(base, c.object + 0x40) & 0x8F) == 8;
     if (!ctx.r3.u32 || !ctx.r4.u32) continue;
-    __imp__sub_82B6B5A8(ctx, base);
+    __imp__sub_82B7ED10(ctx, base);
     if (Load32(base, result + 4) >> 6 & 1) {  // release a managed result
       ctx.r1.u64 = sp;
       ctx.r3.u64 = Load32(base, result);
       ctx.r4.u64 = result;
       ctx.r5.u64 = Load32(base, result + 8);
-      sub_82B6A348(ctx, base);
+      sub_82B7DAA8(ctx, base);
     }
   }
   ctx = saved;

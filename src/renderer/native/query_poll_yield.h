@@ -6,16 +6,16 @@
 namespace gow3::renderer {
 // Only the existing blocking retry call is eligible. The initial GetData call
 // and every nonblocking caller preserve their original scheduling.
-inline constexpr uint32_t kQueryPollRetryCaller=0x829619A0;
+inline constexpr uint32_t kQueryPollRetryCaller=0x82972988;
 inline constexpr uint32_t kQueryPollYieldInterval=128;
 inline constexpr std::array<std::array<uint32_t,2>,7> kQueryPollYieldSites{{
-    {{0x82AFA708,0x7D8802A6}}, // GetData: mflr r12
-    {{0x82AFA714,0x8BC30014}}, // lbz r30,20(r3): query status flags
-    {{0x82AFA738,0x81660004}}, // lwz r11,4(r6): query type
-    {{0x82961994,0x7FC4F378}}, // mr r4,r30: original output pointer
-    {{0x82961998,0x807D0004}}, // lwz r3,4(r29): current query object
-    {{0x8296199C,0x48198D6D}}, // bl 0x82AFA708: retry, LR=0x829619A0
-    {{0x829619A8,0x409AFFEC}}, // bne cr6,0x82961994
+    {{0x82B0DEA8,0x7D8802A6}}, // GetData: mflr r12
+    {{0x82B0DEB4,0x8BC30014}}, // lbz r30,20(r3): query status flags
+    {{0x82B0DED8,0x81660004}}, // lwz r11,4(r6): query type
+    {{0x8297297C,0x7FC4F378}}, // mr r4,r30: original output pointer
+    {{0x82972980,0x807D0004}}, // lwz r3,4(r29): current query object
+    {{0x82972984,0x4819B525}}, // bl 0x82B0DEA8: retry, LR=0x82972988
+    {{0x82972990,0x409AFFEC}}, // bne cr6,0x8297297C
 }};
 
 enum class QueryPollDecision { Ignore, Pending, Yield, Completed };

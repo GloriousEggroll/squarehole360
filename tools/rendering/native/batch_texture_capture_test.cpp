@@ -148,7 +148,7 @@ Json Run(std::span<const uint8_t> data,bool lazy,bool direct,const std::string& 
         a.command_span=span;b.command_span=span;
         auto first=scalar.planner->Push(std::move(a)),second=batch.planner->Push(std::move(b));
         auto ap=scalar.planner->TakePacketPrefix(),bp=batch.planner->TakePacketPrefix();Require(bool(ap)==bool(bp),"Immutable prefix admission differs");
-        if(ap){++prefixes;Require(ap->span.bytes==bp->span.bytes&&ap->span.generation==bp->span.generation&&ap->first_operation==bp->first_operation&&ap->operation_end==bp->operation_end,"Immutable command prefix identity/frontier differs");Equal(*ap->batch,*bp->batch,false);if(retained.empty()||input.event.function==0x82AF6B10)retained.emplace_back(ap->batch,bp->batch);}
+        if(ap){++prefixes;Require(ap->span.bytes==bp->span.bytes&&ap->span.generation==bp->span.generation&&ap->first_operation==bp->first_operation&&ap->operation_end==bp->operation_end,"Immutable command prefix identity/frontier differs");Equal(*ap->batch,*bp->batch,false);if(retained.empty()||input.event.function==0x82B0A2B0)retained.emplace_back(ap->batch,bp->batch);}
         Require(bool(first)==bool(second),"Complete frame admission differs");
         if(first){++frames;Equal(*first,*second,true);const auto x=Snapshot(*first,false),y=Snapshot(*second,false);const auto off_line=x.dump(),on_line=y.dump();Require(off_line==on_line,"Exact JSONL serialization differs");off<<off_line<<'\n';on<<on_line<<'\n';Require(bool(off)&&bool(on),"Exact JSONL write failed");operations+=first->operations.size();for(const auto& op:first->operations)if(op.Draw())++draws;retained.emplace_back(first,second);}
     }

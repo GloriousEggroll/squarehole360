@@ -480,17 +480,17 @@ Both modes must preserve packet order, not just API call order:
   Queuing native work there and waiting on it can deadlock behind a guest wait
   that needs the native result. Native completion must be connected to ordered
   packet callbacks on the command-processor thread.
-* Query issue function `0x82AFA458` calls emitter `0x82AFF740` with record 1 for
+* Query issue function `0x82B0DBF8` calls emitter `0x82B12EE0` with record 1 for
   begin and record 0 for end. Its end path can first emit `MEM_WRITE` packets
   setting ZPass words to -275, followed by `WAIT_REG_MEM` for those sentinel
   values. A native result written from the CPU emitter hook would be overwritten
   by the later packet execution. Publish only at the corresponding CP
   `EVENT_WRITE_ZPD` end, after the preceding sentinel packets have executed.
-  Preserve the guest GetData implementation at `0x82AFA708` and its report ABI.
-* DrawPrimitive `0x82AEFF00` and DrawIndexedPrimitive `0x82AF0318` split large
+  Preserve the guest GetData implementation at `0x82B0DEA8` and its report ABI.
+* DrawPrimitive `0x82B036A0` and DrawIndexedPrimitive `0x82B03AB8` split large
   counts into chunks of at most 65,535 indices, adjusted for topology. Their
-  per-chunk command-pointer commits are `0x82AF02E8` and `0x82AF0760`.
-  Between chunks they may call flush function `0x82AF58B8`, which can wait for a
+  per-chunk command-pointer commits are `0x82B03A88` and `0x82B03F00`.
+  Between chunks they may call flush function `0x82B09058`, which can wait for a
   prior GPU fence. A CP callback must not block for the current after-call
   snapshot: the CPU may need CP progress before it can finish that call.
   Capture immutable chunk metadata at the commit sites, before a later flush
@@ -501,7 +501,7 @@ Both modes must preserve packet order, not just API call order:
   indexed values are r31, r18, r21, r27 and r11. These instruction-validated
   commit hooks now supply the packet ownership mapping; allocator/reset stores
   are excluded.
-* Memory-copy helper `0x82968948` brackets its point draw with `0x82AE9AB0` and
+* Memory-copy helper `0x82979990` brackets its point draw with `0x82AE9AB0` and
   `0x82AE9BD8`. The latter records resource fences and emits completion/coherence
   packets. Native copied bytes must be available to guest reads before those
   fences become visible. Execute the matching draw prefix, await its native

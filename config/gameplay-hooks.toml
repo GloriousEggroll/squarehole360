@@ -1,14 +1,15 @@
-# Native hooks for module EF4AD5E9DD1982ED. Both original instructions are
-# checked before launch; tools/audit.py additionally pins the full XEX hash.
+# Native hooks for module EF4AD5E9DD1982ED (the disc executable), at their
+# addresses with Title Update 6 applied. Both original instructions are
+# checked before launch; tools/audit.py additionally pins the XEX and patch.
 # Unlock FPS patch provenance: xenia-canary/game-patches, illusion and boma.
 
 [[midasm_hook]]
-address = 0x8253D9B0
+address = 0x8254E4A8
 name = "Gow3UncapFrameRate"
 return_on_true = true
 
 [[midasm_hook]]
-address = 0x82AF66BC
+address = 0x82B09E5C
 name = "Gow3SetPresentInterval"
 registers = ["r11"]
 after_instruction = true
@@ -16,7 +17,7 @@ after_instruction = true
 # Poll idle render tickables (including Bink) with millisecond precision.
 # The original 25 ms threshold produces a 25/25/50 ms cadence for 30 FPS movies.
 [[midasm_hook]]
-address = 0x823F4148
+address = 0x824042E0
 name = "Gow3MoviePollInterval"
 registers = ["f0"]
 after_instruction = true
@@ -24,78 +25,78 @@ after_instruction = true
 # Experimental render size (gow3_render_height): rewrite the engine's stored
 # screen size just before CreateDevice reads it.
 [[midasm_hook]]
-address = 0x82960D04
+address = 0x82971CDC
 name = "Gow3OverrideScreenSize"
 after_instruction = false
 # Literal 1280x720 viewport rectangles (li r,1280 / li r,720).
 [[midasm_hook]]
-address = 0x8287AA94
+address = 0x8288C744
 name = "Gow3ScreenWidthConstant"
 registers = ["r7"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AA9C
+address = 0x8288C74C
 name = "Gow3ScreenHeightConstant"
 registers = ["r6"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AB50
+address = 0x8288C800
 name = "Gow3ScreenWidthConstant"
 registers = ["r7"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AB58
+address = 0x8288C808
 name = "Gow3ScreenHeightConstant"
 registers = ["r6"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82F9E968
+address = 0x82FB2258
 name = "Gow3ScreenWidthConstant"
 registers = ["r7"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82F9E980
+address = 0x82FB2270
 name = "Gow3ScreenHeightConstant"
 registers = ["r8"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AABC
+address = 0x8288C76C
 name = "Gow3ScreenWidthFloat"
 registers = ["f11"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AAC0
+address = 0x8288C770
 name = "Gow3ScreenHeightFloat"
 registers = ["f10"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AB80
+address = 0x8288C830
 name = "Gow3ScreenWidthFloat"
 registers = ["f11"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8287AB88
+address = 0x8288C838
 name = "Gow3ScreenHeightFloat"
 registers = ["f10"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82F9E984
+address = 0x82FB2274
 name = "Gow3ScreenHeightFloat"
 registers = ["f12"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82F9E98C
+address = 0x82FB227C
 name = "Gow3ScreenWidthFloat"
 registers = ["f10"]
 after_instruction = true
@@ -103,56 +104,56 @@ after_instruction = true
 # Scaleform movie viewports default to 1280x720 without an attached viewport.
 
 [[midasm_hook]]
-address = 0x82923684
+address = 0x829341D4
 name = "Gow3ScreenWidthConstant"
 registers = ["r31"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x8292368C
+address = 0x829341DC
 name = "Gow3ScreenWidthConstant"
 registers = ["r29"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82923690
+address = 0x829341E0
 name = "Gow3ScreenHeightConstant"
 registers = ["r3"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82923694
+address = 0x829341E4
 name = "Gow3ScreenHeightConstant"
 registers = ["r10"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x829238A8
+address = 0x829343F8
 name = "Gow3ScreenWidthConstant"
 registers = ["r30"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x829238AC
+address = 0x829343FC
 name = "Gow3ScreenWidthConstant"
 registers = ["r29"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x829238B0
+address = 0x82934400
 name = "Gow3ScreenHeightConstant"
 registers = ["r9"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x829238B4
+address = 0x82934404
 name = "Gow3ScreenHeightConstant"
 registers = ["r5"]
 after_instruction = true
 
 # Scaleform Stage.scaleMode setter, after mr r4,r31 (the mode argument).
 [[midasm_hook]]
-address = 0x82C3FB2C
+address = 0x82C5333C
 name = "Gow3ScaleformScaleMode"
 registers = ["r4"]
 after_instruction = true
@@ -161,44 +162,44 @@ after_instruction = true
 # remain authoritative; these observations are not allocation lifetime pins.
 
 [[midasm_hook]]
-address = 0x82B03C64
+address = 0x82B17404
 name = "Gow3ObserveMarkerCounterInitialized"
 registers = ["r31", "r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82B03E48
+address = 0x82B175E8
 name = "Gow3ObserveMarkerCounterDestroyed"
 registers = ["r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF5F10
+address = 0x82B096B0
 name = "Gow3ObserveMarkerCounterRingReset"
 registers = ["r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF6180
+address = 0x82B09920
 name = "Gow3ObserveMarkerCounterRingReady"
 registers = ["r31", "r10"]
 after_instruction = true
 
 [[midasm_hook]]
-address = 0x82B08120
+address = 0x82B1B8C0
 name = "Gow3ObserveMarkerCounterRecovery"
 registers = ["r3"]
 after_instruction = false
 
 [[midasm_hook]]
-address = 0x82AF55BC
+address = 0x82B08D5C
 name = "Gow3ObserveMarkerCounterCpuDirect"
 registers = ["r11"]
 after_instruction = false
 
 # Exact original pair completed; capture identity before command publication.
 [[midasm_hook]]
-address = 0x82AF559C
+address = 0x82B08D3C
 name = "Gow3ObserveMarkerPairEmitted"
 registers = ["r11", "r3", "r8", "r5", "r6"]
 after_instruction = true

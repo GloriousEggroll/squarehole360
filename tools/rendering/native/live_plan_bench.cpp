@@ -28,8 +28,8 @@ std::vector<uint8_t> Read(const char* path) {
     return {std::istreambuf_iterator<char>(f),{}};
 }
 bool IsDraw(const GraphicsBoundaryEvent& e) {
-    return (e.phase==1&&(e.function==0x82AEFF00||e.function==0x82AF0318))||
-           (e.phase==2&&(e.function==0x82AEF500||e.function==0x82AEF9C0));
+    return (e.phase==1&&(e.function==0x82B036A0||e.function==0x82B03AB8))||
+           (e.phase==2&&(e.function==0x82B02CA0||e.function==0x82B03160));
 }
 // Same parsing and selective block clearing as live_plan_test.cpp.
 std::vector<GraphicsBoundaryEvent> Parse(const std::vector<uint8_t>& bytes) {
@@ -72,7 +72,7 @@ int main(int argc,char** argv) {
         const int passes=argc>=3?std::max(2,std::atoi(argv[2])):6;
         const auto parsed=Parse(Read(argv[1]));
         size_t draws=0,frames_in_capture=0;
-        for(const auto& e:parsed){draws+=IsDraw(e);frames_in_capture+=e.function==0x82AF6B10&&e.phase==0;}
+        for(const auto& e:parsed){draws+=IsDraw(e);frames_in_capture+=e.function==0x82B0A2B0&&e.phase==0;}
         uint32_t first_frame=UINT32_MAX,last_frame=0;
         for(const auto& e:parsed){first_frame=std::min(first_frame,e.frame);last_frame=std::max(last_frame,e.frame);}
         const uint32_t frame_span=last_frame-first_frame+1;

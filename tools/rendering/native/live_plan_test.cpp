@@ -249,7 +249,7 @@ void CheckThinLiveMetadata() {
         throw std::runtime_error("Thin metadata counted unreadable/empty/unrelated copies as avoided");
     // Exercise the real planner's missing-VS diagnostic, including the retained
     // 0x600-byte object header. The candidate must leave the exact error intact.
-    GraphicsBoundaryEvent bad;bad.function=0x82AEFF00;bad.phase=1;bad.args[0]=0x83000000;
+    GraphicsBoundaryEvent bad;bad.function=0x82B036A0;bad.phase=1;bad.args[0]=0x83000000;
     bad.blocks={{1,bad.args[0],std::vector<uint8_t>(0x3600)},
         {2,0x83100368,{}},{3,0x1000,{}},{11,0x83100000,std::vector<uint8_t>(0x600,0x32)},
         {12,0x83110000,std::vector<uint8_t>(0x100,0x43)},
@@ -287,7 +287,7 @@ void CheckQueryABI() {
         for(unsigned i=0;i<4;++i)bytes.at(offset+i)=uint8_t(value>>(24-i*8));
     };
     auto query=[&](uint32_t virtual_base,uint32_t record,uint32_t allocations=1) {
-        GraphicsBoundaryEvent event;event.function=0x82AFF740;
+        GraphicsBoundaryEvent event;event.function=0x82B12EE0;
         event.args[0]=0x83000000;event.args[1]=0x83010000;event.args[2]=record;
         event.blocks={{1,event.args[0],std::vector<uint8_t>(0x3600)},
                       {104,event.args[1],std::vector<uint8_t>(0x98)}};
@@ -295,7 +295,7 @@ void CheckQueryABI() {
         return event;
     };
     auto present=[&] {
-        GraphicsBoundaryEvent event;event.function=0x82AF6B10;
+        GraphicsBoundaryEvent event;event.function=0x82B0A2B0;
         event.blocks={{1,0x83000000,std::vector<uint8_t>(0x3600)},
                       {103,0x83020000,std::vector<uint8_t>(64)}};
         auto& header=event.blocks[1].bytes;
@@ -971,18 +971,18 @@ void CheckTextureLifetime() {
         return std::pair{v,p};
     };
     constexpr std::array<uint32_t,6> fetch{2|(1u<<22),0x10006,3|(3<<13),0,0,1<<9};
-    GraphicsBoundaryEvent draw;draw.function=0x82AEFF00;draw.phase=1;draw.args={0x83000000,4,0,3,0,0,0,0};
+    GraphicsBoundaryEvent draw;draw.function=0x82B036A0;draw.phase=1;draw.args={0x83000000,4,0,3,0,0,0,0};
     const auto [vs_v,vs_p]=shader(false);const auto [ps_v,ps_p]=shader(true);
     draw.blocks={{1,draw.args[0],std::vector<uint8_t>(0x3600)},{2,0x83004000,vs_v},{3,0x11000,vs_p},
         {4,0x83005000,ps_v},{5,0x12000,ps_p},{32,0x10000,std::vector<uint8_t>(512,0x22)}};
     for(unsigned i=0;i<6;++i)put(draw.blocks[0].bytes,0x480+i*4,fetch[i]);
-    GraphicsBoundaryEvent resolve;resolve.function=0x82AF34A8;resolve.args[0]=draw.args[0];
+    GraphicsBoundaryEvent resolve;resolve.function=0x82B06C48;resolve.args[0]=draw.args[0];
     resolve.blocks={{1,draw.args[0],draw.blocks[0].bytes},{6,0x83006000,std::vector<uint8_t>(64)},
         {100,0x83007000,std::vector<uint8_t>(64)}};
     put(resolve.blocks[1].bytes,24,32);put(resolve.blocks[1].bytes,36,(3<<18)|(3<<3));
     for(unsigned i=0;i<6;++i)put(resolve.blocks[2].bytes,28+i*4,fetch[i]);
     {
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;
         present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
         CheckDirectResourceHandoff(draw,present);
         CheckBoundaryBlockRecycling(draw,present);
@@ -1016,7 +1016,7 @@ void CheckTextureLifetime() {
                 const auto digest=picosha2::hash256_hex_string(expected);
                 operation.sequence=frame*3;shader_reuse.Push(GraphicsBoundaryEvent(operation));
                 ++operation.sequence;shader_reuse.Push(std::move(operation)); // Same-frame hit.
-                GraphicsBoundaryEvent present;present.function=0x82AF6B10;present.frame=frame;present.sequence=frame*3+2;
+                GraphicsBoundaryEvent present;present.function=0x82B0A2B0;present.frame=frame;present.sequence=frame*3+2;
                 present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
                 frames[frame]=shader_reuse.Push(std::move(present));
                 if(frames[frame]->MaterializeResources(true).size()!=2||*frames[frame]->MaterializeResources(true).at(digest)!=expected||
@@ -1074,7 +1074,7 @@ void CheckTextureLifetime() {
             if(!empty||!empty->batch->operations.empty()||(empty->batch->ResourceCount(false)!=0)||
                (empty->batch->ResourceCount(true)!=0)||empty->batch->retained_bytes)
                 throw std::runtime_error("Empty packet prefix retained operation dependencies");
-            GraphicsBoundaryEvent present;present.function=0x82AF6B10;present.sequence=102;
+            GraphicsBoundaryEvent present;present.function=0x82B0A2B0;present.sequence=102;
             present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
             aliases.Push(std::move(present));
         }
@@ -1137,7 +1137,7 @@ void CheckTextureLifetime() {
         put(mip_draw.blocks[0].bytes,0x480+20,0x20000|(1<<9));
         mip_draw.blocks.push_back({33,0x20000,cpu_mips});lazy.Push(defer(std::move(mip_draw)));
         if(captures!=5)throw std::runtime_error("Deferred mip chain lost CPU base/mip ownership");
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;
         present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
         const auto frame=lazy.Push(std::move(present));
         if(frame->operations[2].ToJson()["textures"][0]["source"]!="gpu_alias_or_previous_frame"||
@@ -1174,7 +1174,7 @@ void CheckTextureLifetime() {
         bytes.InvalidateMemory(owned,1,{0x66},102);
         byte_draw.blocks.back().bytes.at(swaps[endian])=0x66;
         bytes.Push(std::move(byte_draw));
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;
         present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
         const auto frame=bytes.Push(std::move(present));
         const auto before=frame->operations.at(1).ToJson().at("textures").at(0);
@@ -1241,7 +1241,7 @@ void CheckTextureLifetime() {
         mixed.InvalidateMemory(0x10000,4,std::vector<uint8_t>(4,0x55),77);
         auto changed=draw;std::fill_n(changed.blocks.back().bytes.begin(),4,0x55);
         mixed.Push(std::move(changed));
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;
         present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
         const auto frame=mixed.Push(std::move(present));
         const auto before=frame->operations.at(1).ToJson().at("textures").at(0);
@@ -1270,7 +1270,7 @@ void CheckTextureLifetime() {
         mixed.Push(GraphicsBoundaryEvent(resolve));mixed.Push(GraphicsBoundaryEvent(mip_draw));
         mixed.InvalidateMemory(0x20000,4096,std::vector<uint8_t>(4096,0x77),88);
         mip_draw.blocks.back().bytes.assign(512,0x77);mixed.Push(std::move(mip_draw));
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;
         present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
         const auto frame=mixed.Push(std::move(present));
         for(unsigned index:{1u,3u,5u}) {
@@ -1293,7 +1293,7 @@ void CheckTextureLifetime() {
     draw.blocks.back().bytes.assign(512,0x33);planner.Push(std::move(draw));
     put(resolve.blocks[2].bytes,40,0x60a<<1);
     planner.Push(GraphicsBoundaryEvent(resolve));
-    GraphicsBoundaryEvent present;present.function=0x82AF6B10;
+    GraphicsBoundaryEvent present;present.function=0x82B0A2B0;
     present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;
     const auto frame=planner.Push(std::move(present));
     if(!frame||frame->operations.size()!=7||
@@ -1391,10 +1391,10 @@ int main(int argc,char** argv) {
                     if(block.kind==2)header=!block.data().empty();
                     if(block.kind==3)code=!block.data().empty();
                 }
-                const bool draw=(event.phase==1&&(event.function==0x82AEFF00||event.function==0x82AF0318))||
-                    (event.phase==2&&(event.function==0x82AEF500||event.function==0x82AEF9C0));
-                const bool live=draw||(event.phase==0&&(event.function==0x82AF6B10||
-                    event.function==0x82AF16D8||event.function==0x82AF34A8||event.function==0x82AF0790));
+                const bool draw=(event.phase==1&&(event.function==0x82B036A0||event.function==0x82B03AB8))||
+                    (event.phase==2&&(event.function==0x82B02CA0||event.function==0x82B03160));
+                const bool live=draw||(event.phase==0&&(event.function==0x82B0A2B0||
+                    event.function==0x82B04E78||event.function==0x82B06C48||event.function==0x82B03F30));
                 const LiveMetadataCapturePolicy policy{true,live,false,draw&&required.has_value()&&header&&code};
                 for(auto& block:event.blocks)if(policy.Omit(block.kind)) {
                     thin_stats.Record(block.kind,uint32_t(block.bytes.size()),!block.bytes.empty());

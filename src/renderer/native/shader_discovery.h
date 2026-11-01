@@ -11,17 +11,17 @@ namespace gow3::renderer {
 // two initializers already have copied virtual headers; the link hook is after
 // its physical program rewrite and linked-header update, never before them.
 inline constexpr std::array<std::array<uint32_t,2>,11> kShaderDiscoverySites{{
-    {{0x82AF2628,0x39600000}}, // li r11,0
-    {{0x82AF262C,0x39400007}}, // li r10,7 (pixel object)
-    {{0x82AF2658,0x90830018}}, // stw r4,24(r3) (physical code)
-    {{0x82AF265C,0x4E800020}}, // blr
-    {{0x82AF2910,0x7D8802A6}}, // mflr r12
-    {{0x82AF2920,0x38A00368}}, // li r5,872 (vertex object prefix)
-    {{0x82AF2938,0x93DF0020}}, // stw r30,32(r31) (physical code)
-    {{0x82AF9688,0x7D8802A6}}, // mflr r12
-    {{0x82AF97F8,0x817F0368}}, // lwz r11,872(r31)
-    {{0x82AF97FC,0x616B0040}}, // ori r11,r11,64 (linked container)
-    {{0x82AF9800,0x917F0368}}, // stw r11,872(r31)
+    {{0x82B05DC8,0x39600000}}, // li r11,0
+    {{0x82B05DCC,0x39400007}}, // li r10,7 (pixel object)
+    {{0x82B05DF8,0x90830018}}, // stw r4,24(r3) (physical code)
+    {{0x82B05DFC,0x4E800020}}, // blr
+    {{0x82B060B0,0x7D8802A6}}, // mflr r12
+    {{0x82B060C0,0x38A00368}}, // li r5,872 (vertex object prefix)
+    {{0x82B060D8,0x93DF0020}}, // stw r30,32(r31) (physical code)
+    {{0x82B0CE28,0x7D8802A6}}, // mflr r12
+    {{0x82B0CF98,0x817F0368}}, // lwz r11,872(r31)
+    {{0x82B0CF9C,0x616B0040}}, // ori r11,r11,64 (linked container)
+    {{0x82B0CFA0,0x917F0368}}, // stw r11,872(r31)
 }};
 
 inline uint32_t ShaderDiscoveryWord(std::span<const uint8_t> bytes,size_t at) {

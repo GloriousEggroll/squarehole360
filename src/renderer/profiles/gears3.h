@@ -1,6 +1,9 @@
 #pragma once
 // Gears of War 3 (title 4D5308AB), default.xex SHA-256
-// 4e5d00b8f584f42951344b26a2ae8292bb30c7634b1a75cec0c70a80b3f8f790.
+// 4e5d00b8f584f42951344b26a2ae8292bb30c7634b1a75cec0c70a80b3f8f790 with
+// Title Update 6 applied (version 11.0.6.0; default.xexp SHA-256
+// 307b2aede15b2697d059939dfd458b8d2fb2c0afd635bd7924714dbf2f31295e).
+// tools/porting/xex_address_map.py maps addresses from the disc build.
 //
 // Every executable-specific address and Direct3D device offset the native
 // renderer reads is named here, so another game needs a new profile rather
@@ -23,18 +26,18 @@ inline constexpr char kName[] = "Gears of War 3";
 
 // XDK Direct3D library entry points (findable by signature in other titles).
 namespace d3d {
-inline constexpr uint32_t kDrawVertices = 0x82AEFF00;         // DrawPrimitive
-inline constexpr uint32_t kDrawIndexedVertices = 0x82AF0318;  // DrawIndexedPrimitive
-inline constexpr uint32_t kBeginVertices = 0x82AEF500;        // DrawPrimitiveUP begin
-inline constexpr uint32_t kBeginIndexedVertices = 0x82AEF9C0; // DrawIndexedPrimitiveUP begin
-inline constexpr uint32_t kSpecializedDraw = 0x82AF0790;      // ABI under investigation
-inline constexpr uint32_t kClearRect = 0x82AF16D8;
-inline constexpr uint32_t kResolve = 0x82AF34A8;
-inline constexpr uint32_t kPresent = 0x82AF6B10;              // Swap
-inline constexpr uint32_t kOcclusionQueryReport = 0x82AFF740; // record 1 begins, 0 ends
-inline constexpr uint32_t kSetRenderTarget = 0x82AECC98;
-inline constexpr uint32_t kSetDepthStencilSurface = 0x82AED028;
-inline constexpr uint32_t kInitAuxiliaryCommandBuffer = 0x82AF99B0;
+inline constexpr uint32_t kDrawVertices = 0x82B036A0;         // DrawPrimitive
+inline constexpr uint32_t kDrawIndexedVertices = 0x82B03AB8;  // DrawIndexedPrimitive
+inline constexpr uint32_t kBeginVertices = 0x82B02CA0;        // DrawPrimitiveUP begin
+inline constexpr uint32_t kBeginIndexedVertices = 0x82B03160; // DrawIndexedPrimitiveUP begin
+inline constexpr uint32_t kSpecializedDraw = 0x82B03F30;      // ABI under investigation
+inline constexpr uint32_t kClearRect = 0x82B04E78;
+inline constexpr uint32_t kResolve = 0x82B06C48;
+inline constexpr uint32_t kPresent = 0x82B0A2B0;              // Swap
+inline constexpr uint32_t kOcclusionQueryReport = 0x82B12EE0; // record 1 begins, 0 ends
+inline constexpr uint32_t kSetRenderTarget = 0x82B00438;
+inline constexpr uint32_t kSetDepthStencilSurface = 0x82B007C8;
+inline constexpr uint32_t kInitAuxiliaryCommandBuffer = 0x82B0D150;
 }  // namespace d3d
 
 // Offsets into the XDK D3D device. Values from 0x480 to 0x2A5F shadow Xenos
@@ -59,6 +62,6 @@ inline constexpr uint32_t kScissorRect = 0x327C;      // 4 words
 
 // Game code (UE3/Gears), not XDK: located by hand per title.
 namespace game {
-inline constexpr uint32_t kShaderCacheDecoderReturn = 0x823F702C; // LR into the shader-cache loader
+inline constexpr uint32_t kShaderCacheDecoderReturn = 0x824070F4; // LR into the shader-cache loader
 }  // namespace game
 }  // namespace gow3::renderer::profile

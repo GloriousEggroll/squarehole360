@@ -320,9 +320,9 @@ void CheckPlanner() {
     constexpr std::array<uint32_t,6> fetch{2|(1u<<22),0x10006,3|(3<<13),0,0,1<<9};
     auto shader=[](bool pixel){std::vector<uint8_t> v(pixel?68:72),p(24);Put(v,0,pixel?0x102a1100:0x102a1141);Put(v,4,uint32_t(v.size()));Put(v,8,uint32_t(p.size()));Put(v,24,36);Put(v,40,uint32_t(p.size()));const uint64_t exec=(2ull<<44)|1|(1<<12)|(pixel?1<<16:0);Put(p,0,uint32_t(exec));Put(p,4,uint32_t(exec>>32));Put(p,12,pixel?1:0);return std::pair{v,p};};
     const auto [vv,vp]=shader(false);const auto [pv,pp]=shader(true);
-    GraphicsBoundaryEvent draw;draw.function=0x82AEFF00;draw.phase=1;draw.args={0x83000000,4,0,3};draw.blocks={{1,draw.args[0],std::vector<uint8_t>(0x3600)},{2,0x83004000,vv},{3,0x11000,vp},{4,0x83005000,pv},{5,0x12000,pp},{32,0x10000,std::vector<uint8_t>(512,0x22)}};
+    GraphicsBoundaryEvent draw;draw.function=0x82B036A0;draw.phase=1;draw.args={0x83000000,4,0,3};draw.blocks={{1,draw.args[0],std::vector<uint8_t>(0x3600)},{2,0x83004000,vv},{3,0x11000,vp},{4,0x83005000,pv},{5,0x12000,pp},{32,0x10000,std::vector<uint8_t>(512,0x22)}};
     for(unsigned i=0;i<6;++i)Put(draw.blocks[0].bytes,0x480+i*4,fetch[i]);
-    GraphicsBoundaryEvent resolve;resolve.function=0x82AF34A8;resolve.args[0]=draw.args[0];resolve.blocks={{1,draw.args[0],draw.blocks[0].bytes},{6,0x83006000,std::vector<uint8_t>(64)},{100,0x83007000,std::vector<uint8_t>(64)}};Put(resolve.blocks[1].bytes,24,32);Put(resolve.blocks[1].bytes,36,(3<<18)|(3<<3));for(unsigned i=0;i<6;++i)Put(resolve.blocks[2].bytes,28+i*4,fetch[i]);
+    GraphicsBoundaryEvent resolve;resolve.function=0x82B06C48;resolve.args[0]=draw.args[0];resolve.blocks={{1,draw.args[0],draw.blocks[0].bytes},{6,0x83006000,std::vector<uint8_t>(64)},{100,0x83007000,std::vector<uint8_t>(64)}};Put(resolve.blocks[1].bytes,24,32);Put(resolve.blocks[1].bytes,36,(3<<18)|(3<<3));for(unsigned i=0;i<6;++i)Put(resolve.blocks[2].bytes,28+i*4,fetch[i]);
     for(bool lazy:{false,true})for(bool direct:{false,true}) {
         GearsLivePlan old({},true,lazy,direct),candidate({},true,lazy,direct);DeferredTextureSnapshotScope scope;
         std::vector<uint8_t> base(512,0x22),mips(512,0x66);size_t single_reads=0,batch_reads=0,batches=0;uint64_t sequence=0,generation=0;
@@ -342,7 +342,7 @@ void CheckPlanner() {
         old.InvalidateMemory(0x10000,4096,std::vector<uint8_t>(4096,0x55),91);candidate.InvalidateMemory(0x10000,4096,std::vector<uint8_t>(4096,0x55),91);push(draw,true);Require(batch_reads==prior+1,"Pending CPU write did not revoke GPU-only classification");
         auto partial=resolve;partial.blocks.push_back({98,0x83008000,std::vector<uint8_t>(16)});Put(partial.blocks.back().bytes,8,1);Put(partial.blocks.back().bytes,12,1);push(std::move(partial),false);push(draw,true);
         push(resolve,false);auto mip=draw;Put(mip.blocks[0].bytes,0x480+16,1<<6);Put(mip.blocks[0].bytes,0x480+20,0x20000|(1<<9));mip.blocks.push_back({33,0x20000,mips});const auto before=batch_reads;push(mip,true);Require(batch_reads==before+2,"Mixed GPU/CPU mip chain lost required snapshots");
-        GraphicsBoundaryEvent present;present.function=0x82AF6B10;present.sequence=sequence++;present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;auto a=old.Push(GraphicsBoundaryEvent(present)),b=candidate.Push(std::move(present));Require(a&&b,"Missing complete frame");CompareFrames(*a,*b);Require(batches>0&&batch_reads==single_reads,"Batch grouping lost required view conservation");
+        GraphicsBoundaryEvent present;present.function=0x82B0A2B0;present.sequence=sequence++;present.blocks={resolve.blocks[0],resolve.blocks[2]};present.blocks[1].kind=103;auto a=old.Push(GraphicsBoundaryEvent(present)),b=candidate.Push(std::move(present));Require(a&&b,"Missing complete frame");CompareFrames(*a,*b);Require(batches>0&&batch_reads==single_reads,"Batch grouping lost required view conservation");
         const auto first=original_prefix->batch->operations[0].Draw();Require(first&&first->textures[0].base_payload,"First prefix lost texture payload");Require(first->textures[0].base_payload->owner->front()==0x22,"Later mutation changed original prefix owner");
     }
 }

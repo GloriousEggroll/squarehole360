@@ -738,7 +738,8 @@ struct SceneExecutor::State {
     struct FsiDrawPassStats {uint64_t candidates=0,shape_refusals=0,plane_refusals=0,eligible=0,selected=0,
         continued=0,boundaries=0,groups=0,maximum_group_draws=0,sampled_barriers_avoided=0,queried_selected=0,query_controls_preserved=0;} fsi_draw_pass_stats_;
     bool open_fsi_draw_pass_=false;
-    uint64_t async_shader_skipped_draws_=0,invalid_texture_skipped_draws_=0,viewport_skipped_draws_=0;
+    uint64_t async_shader_skipped_draws_=0,invalid_texture_skipped_draws_=0,viewport_skipped_draws_=0,
+        up_geometry_skipped_draws_=0;
     uint64_t draws_seen_=0;
     template<class Op>std::optional<DrawViewport> UnrepresentableViewport(const Op& o) {
         const auto payload=ViewPayload(o.State());
@@ -6639,6 +6640,22 @@ public:
                     "y scale {} offset {}, z scale {} offset {})",o.Event(),skipped->x_scale,skipped->x_offset,
                     skipped->y_scale,skipped->y_offset,skipped->z_scale,skipped->z_offset);
             return;
+        }
+        // A UP draw whose vertices (or indices) were not captured, because the
+        // guest's buffer was empty, unreadable or over the capture limit, loses
+        // that one draw rather than the renderer.
+        if(const auto& function=o.Function();function.starts_with("Begin")) {
+            bool vertices=false,indices=false;
+            o.Geometry(true,[&](const DrawGeometryInput& g) {
+                if(g&&g.Kind()==96)vertices=true;
+                if(g&&g.Kind()==97)indices=true;
+            });
+            if(!vertices||(function=="BeginIndexedVertices"&&!indices)) {
+                if(up_geometry_skipped_draws_++<8)
+                    REXLOG_WARN("Native renderer: skipped {} draw {} without captured {}",function,o.Event(),
+                        vertices?"indices":"vertices");
+                return;
+            }
         }
         if(temporal_)TemporalBeforeDraw(o);
         std::optional<RetainedPhaseTimingContext> timing_context;

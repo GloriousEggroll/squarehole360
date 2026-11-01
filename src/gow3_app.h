@@ -13,6 +13,8 @@
 #include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/rex_app.h>
+#include <rex/system.h>
+#include <rex/system/flags.h>
 #include <rex/memory.h>
 #include <rex/graphics/graphics_system.h>
 #include "gameplay_hooks.h"
@@ -51,6 +53,8 @@ class Gow3App : public rex::ReXApp {
     if (paths.game_data_root.empty()) {
       paths.game_data_root = rex::filesystem::GetExecutableFolder() / "game";
     }
+    // The unpacked title update, mounted as update: (see gow3_content.h).
+    if (paths.update_data_root.empty()) paths.update_data_root = paths.user_data_root / "update";
   }
 
   void OnLoadConfig(const std::filesystem::path& path) override {
@@ -64,9 +68,16 @@ class Gow3App : public rex::ReXApp {
     rex::input::sdl::SetControllerMemoryPath(user_data_root() / "player1-controller.txt");
   }
 
+  void OnLoadXexImage(std::string&) override {
+    REXCVAR_SET(xex_apply_patches, true);
+    if (auto problem = Gow3TitleUpdateProblem(update_data_root()); !problem.empty()) Fail(problem);
+  }
+
   void OnPostLoadXexImage() override {
+    if (auto problem = Gow3TitleUpdateProblem(runtime()->kernel_state()); !problem.empty()) Fail(problem);
     Gow3ConfigureFrameRate(runtime()->memory()->virtual_membase());
     Gow3InstallDownloadedContent(runtime()->kernel_state(), user_data_root());
+    Gow3UpgradeCheckpoints(runtime()->kernel_state(), user_data_root());
   }
 
   void OnPostSetup() override {
@@ -134,9 +145,16 @@ class Gow3App : public rex::ReXApp {
     });
   }
 
+  // Setup cannot continue (for example without the title update the code is
+  // built for); nothing has started yet, so leave without unwinding.
+  [[noreturn]] static void Fail(const std::string& message) {
+    REXLOG_ERROR("{}", message);
+    rex::ShowSimpleMessageBox(rex::SimpleMessageBoxType::Error, message);
+    std::_Exit(1);
+  }
+
   // Override virtual hooks for further customization:
   // void OnPreSetup(rex::RuntimeConfig& config) override {}
-  // void OnLoadXexImage(std::string& xex_image) override {}
   // void OnPostSetup() override {}
   // void OnCreateDialogs(rex::ui::ImGuiDrawer* drawer) override {}
   // void OnShutdown() override {}

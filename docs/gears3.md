@@ -22,12 +22,13 @@ Each user supplies their own copy of the game; game content and converted
 renderer data are not release inputs. When the game files are missing, the
 launcher opens a setup wizard (`tools/setup-wizard.py`, a window with PySide6
 or prompts in a terminal). It asks for your Xbox 360 disc image (ISO) or a
-folder with the extracted disc files, imports them, then offers to add DLC from
-folders or `.zip`, `.tar.gz` and `.tar.xz` archives. The same steps work from
-the command line:
+folder with the extracted disc files, imports them, asks for Title Update 6,
+then offers to add DLC from folders or `.zip`, `.tar.gz` and `.tar.xz`
+archives. The same steps work from the command line:
 
 ```sh
 python3 tools/import-assets.py import "/path/to/gow3.iso"   # or a game folder
+python3 tools/import-assets.py update ~/Downloads            # Title Update 6 (file, folder or archive)
 python3 tools/import-assets.py dlc ~/Downloads               # DLC folders/archives
 python3 tools/setup-wizard.py --dlc                          # add DLC later
 python3 tools/setup-wizard.py --shaders                      # rescan and precompile shaders by hand
@@ -79,6 +80,20 @@ The normal launcher checks the imported inventory, sizes and executable hash;
 `verify` checks every game and prepared file's full SHA-256.
 See [the asset tool documentation](../tools/assets/README.md) for native shader
 compilation, recovery, and the boundary between extracted and converted assets.
+
+### Title Update 6
+
+The game code is recompiled from the disc's `default.xex` with Title Update 6
+applied, the last update for the game; RAAM's Shadow needs it (its campaign
+act comes from the update's script). Title updates are made per disc version:
+the one for the supported disc (media ID 58122AD6) is
+`TU_16L625B_000001C000000.00000000001GB`, and the wizard finds it by that name
+in folders and archives, checks it and unpacks it to `user/update/`. The game
+mounts that folder as `update:` and applies its `default.xexp` when it loads
+the executable, the same patch `rexglue codegen` applies
+(`patch_file_path` in `gow3_manifest.toml`). The game does not start without
+it. `tools/porting/xex_address_map.py` maps disc addresses to the updated
+executable by pairing functions through `.pdata`.
 
 ### Downloadable content
 
