@@ -27,3 +27,11 @@ std::string Gow3TitleUpdateProblem(rex::system::KernelState* kernel_state);
 // copied once to USER/<XUID>/<title>/checkpoints-before-tu6/ and then marked
 // version 4 in place. Run before the game starts.
 void Gow3UpgradeCheckpoints(rex::system::KernelState* kernel_state, const std::filesystem::path& user_root);
+
+// The game picks its text and speech language from the console language and,
+// for Czech, Hungarian and the two Spanish versions, the console country
+// (XGetLanguage/XGetLocale through XConfig). Sets those from gow3_language.
+// Discs differ in which languages they carry; one missing from the game
+// folder (no Coalesced_<code>.bin) falls back to English. Run before the
+// game starts.
+void Gow3ApplyLanguage(const std::filesystem::path& game_root);

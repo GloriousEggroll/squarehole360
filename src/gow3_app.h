@@ -78,6 +78,7 @@ class Gow3App : public rex::ReXApp {
     Gow3ConfigureFrameRate(runtime()->memory()->virtual_membase());
     Gow3InstallDownloadedContent(runtime()->kernel_state(), user_data_root());
     Gow3UpgradeCheckpoints(runtime()->kernel_state(), user_data_root());
+    Gow3ApplyLanguage(runtime()->game_data_root());
   }
 
   void OnPostSetup() override {

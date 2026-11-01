@@ -8,11 +8,18 @@
 #include <vector>
 
 #include <fmt/format.h>
+#include <rex/cvar.h>
 #include <rex/logging.h>
 #include <rex/system/kernel_state.h>
 #include <rex/system/user_module.h>
 #include <rex/system/xam/content_manager.h>
 #include <rex/system/xex_module.h>
+
+REXCVAR_DEFINE_STRING(gow3_language, "english", "Game",
+    "Game language: english, french, german, italian, spanish, spanish_latin_america, japanese, "
+    "korean, chinese, polish, portuguese, russian, czech or hungarian");
+REXCVAR_DECLARE(uint32_t, user_language);
+REXCVAR_DECLARE(uint32_t, user_country);
 
 namespace {
 constexpr uint32_t kTitleUpdateVersion = 0x0000060B;  // 11.0.6.0, Title Update 6
@@ -137,4 +144,42 @@ void Gow3UpgradeCheckpoints(rex::system::KernelState* kernel_state, const std::f
       REXLOG_INFO("Checkpoint {} updated for Title Update 6 (original in {})", path.string(), backup.string());
     }
   }
+}
+
+namespace {
+struct Language {
+  const char* name;
+  const char* code;     // the game's file suffix, as in Coalesced_INT.bin
+  uint32_t language;    // XConfig language
+  uint32_t country;     // XConfig country; the game reads Czech, Hungarian and Spain from it
+};
+// The game's own table (sub_8296C768): language 1-12 picks the suffix, Spanish
+// is ESN only in Spain, and Czech Republic, Slovakia and Hungary override it.
+constexpr Language kLanguages[] = {
+    {"english", "INT", 1, 103},  {"french", "FRA", 4, 34},   {"german", "DEU", 3, 24},
+    {"italian", "ITA", 6, 50},   {"spanish", "ESN", 5, 31},  {"spanish_latin_america", "ESM", 5, 71},
+    {"japanese", "JPN", 2, 53},  {"korean", "KOR", 7, 56},   {"chinese", "CHN", 8, 101},
+    {"polish", "POL", 11, 82},   {"portuguese", "PTB", 9, 13}, {"russian", "RUS", 12, 88},
+    {"czech", "CZE", 1, 23},     {"hungarian", "HUN", 1, 42},
+};
+}  // namespace
+
+void Gow3ApplyLanguage(const std::filesystem::path& game_root) {
+  const auto& wanted = REXCVAR_GET(gow3_language);
+  const Language* language = nullptr;
+  for (const auto& candidate : kLanguages)
+    if (wanted == candidate.name) language = &candidate;
+  if (!language) {
+    REXLOG_WARN("Language: unknown gow3_language '{}'; using English", wanted);
+    language = &kLanguages[0];
+  }
+  std::error_code ec;
+  const auto cooked = game_root / "GearGame" / "CookedXbox360";
+  if (!std::filesystem::exists(cooked / fmt::format("Coalesced_{}.bin", language->code), ec)) {
+    REXLOG_WARN("Language: this game disc has no {} ({}); using English", language->name, language->code);
+    language = &kLanguages[0];
+  }
+  REXCVAR_SET(user_language, language->language);
+  REXCVAR_SET(user_country, language->country);
+  REXLOG_INFO("Language: {} ({})", language->name, language->code);
 }

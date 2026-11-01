@@ -105,6 +105,18 @@ where the game finds it like content on a console hard drive; the packages in
 `user/dlc/` can be deleted afterwards. The map packs, the Horde Command Pack and
 RAAM's Shadow are supported. Booster's "Swamp" map is listed as Bullet Marsh.
 
+### Language
+
+**Language** in the settings (`gow3_language`) picks the game's text and
+speech language; it applies at the next start. The game chooses it from the
+console language and, for Czech, Hungarian and Spanish (Spain or Latin
+America), the console country, so the setting sets both. Each disc carries only
+some languages (the supported one has English, French, Chinese, Czech,
+Hungarian, Korean, Polish, Portuguese and Russian; others are on other
+regions' discs). A language missing from `game/` (no
+`GearGame/CookedXbox360/Coalesced_<code>.bin`) falls back to English, with a
+warning in the log.
+
 From this directory:
 
 ```sh
