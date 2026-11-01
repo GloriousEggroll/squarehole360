@@ -3,6 +3,7 @@
 #include <cstdint>
 
 namespace rex::ppc { union Register; }
+namespace rex::ui { class Window; }
 
 // Declarations are force-included in the generated translation units. The
 // hook sites themselves are emitted from config/gameplay-hooks.toml.
@@ -11,11 +12,16 @@ void Gow3SetPresentInterval(rex::ppc::Register& interval);
 void Gow3ConfigureFrameRate(const uint8_t* guest_base);
 void Gow3ConfigureInputPrompts(const uint8_t* guest_base);
 void Gow3OverrideScreenSize();
+// The window gow3_aspect_ratio = auto follows; set before the game starts.
+void Gow3SetDisplayWindow(rex::ui::Window* window);
 void Gow3ScreenWidthConstant(rex::ppc::Register& value);
 void Gow3ScreenHeightConstant(rex::ppc::Register& value);
 void Gow3ScaleformScaleMode(rex::ppc::Register& mode);
+void Gow3ScaleformViewport(rex::ppc::Register& viewport);
 void Gow3ScreenWidthFloat(rex::ppc::Register& value);
 void Gow3ScreenHeightFloat(rex::ppc::Register& value);
+void Gow3ConstrainedProjection(rex::ppc::Register& half_fov, rex::ppc::Register& aspect,
+                               rex::ppc::Register& height, rex::ppc::Register& camera);
 void Gow3CaptureUpEnd(rex::ppc::Register& device,rex::ppc::Register& command_end);
 void Gow3CapturePrimitiveChunk(rex::ppc::Register& device,rex::ppc::Register& topology,
     rex::ppc::Register& first,rex::ppc::Register& count,rex::ppc::Register& command_end);

@@ -27,7 +27,7 @@ const std::set<std::string> live_keys = {
   "present_effect", "present_fsr_sharpness_reduction", "present_fsr3_ghosting_reduction",
   "present_fsr_max_upsampling_passes", "present_cas_additional_sharpness",
   "present_dither", "swap_post_effect", "present_frame_generation",
-  "gow3_low_latency", "present_anti_lag", "mnk_mode", "mnk_mouse_mode", "mnk_sensitivity",
+  "gow3_low_latency", "present_anti_lag", "gow3_fov", "mnk_mode", "mnk_mouse_mode", "mnk_sensitivity",
   // Per-player controller settings; the SDL input driver applies them on change.
   "controller1_buttons", "controller1_gyro_activation", "controller1_gyro_invert_y", "controller1_gyro_mode", "controller1_gyro_sensitivity", "controller1_gyro_stick_deadzone", "controller1_gyro_turn_axis", "controller1_invert_look_y", "controller1_left_deadzone", "controller1_right_deadzone", "controller1_swap_sticks",
   "controller2_buttons", "controller2_gyro_activation", "controller2_gyro_invert_y", "controller2_gyro_mode", "controller2_gyro_sensitivity", "controller2_gyro_stick_deadzone", "controller2_gyro_turn_axis", "controller2_invert_look_y", "controller2_left_deadzone", "controller2_right_deadzone", "controller2_swap_sticks",
@@ -141,6 +141,8 @@ void Apply(Watch& w, const Values& desired) {
     if (key == "fullscreen" || key == "window_width" || key == "window_height") window_changed = true;
     else if (key.starts_with("mnk_") || key.starts_with("keybind_") || key.starts_with("gyro_")) {
       // Input settings take effect on the next controller poll.
+    } else if (key == "gow3_fov") {
+      // Read by the projection hook every frame.
     } else if (key == "swap_post_effect") {
       using Effect = rex::graphics::CommandProcessor::SwapPostEffect;
       processor->SetDesiredSwapPostEffect(value == "fxaa" ? Effect::kFxaa :

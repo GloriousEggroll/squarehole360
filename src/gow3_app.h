@@ -75,6 +75,7 @@ class Gow3App : public rex::ReXApp {
 
   void OnPostLoadXexImage() override {
     if (auto problem = Gow3TitleUpdateProblem(runtime()->kernel_state()); !problem.empty()) Fail(problem);
+    Gow3SetDisplayWindow(window());
     Gow3ConfigureFrameRate(runtime()->memory()->virtual_membase());
     Gow3InstallDownloadedContent(runtime()->kernel_state(), user_data_root());
     Gow3UpgradeCheckpoints(runtime()->kernel_state(), user_data_root());

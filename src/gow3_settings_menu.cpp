@@ -1,4 +1,5 @@
 #include "gow3_settings_menu.h"
+#include "gow3_content.h"
 #include "menu_guide_latch.h"
 #include "gow3_settings_navigation.h"
 #include "gow3_settings.h"
@@ -145,8 +146,14 @@ class GameSettings final : public rex::ui::ImGuiDialog {
       auto selected = std::find_if(s.choices.begin(), s.choices.end(),
           [&](const auto& choice) { return value == choice.value; });
       const int count = int(s.choices.size());
-      const int index = selected == s.choices.end() ? 0 : int(selected - s.choices.begin());
-      value = s.choices[(index + direction + count) % count].value;
+      int index = selected == s.choices.end() ? 0 : int(selected - s.choices.begin());
+      // Only languages on the disc; the rest fall back to English.
+      const bool language = std::string_view(s.key) == "gow3_language";
+      for (int step = 0; step < count; ++step) {
+        index = (index + direction + count) % count;
+        if (!language || Gow3LanguageAvailable(s.choices[index].value)) break;
+      }
+      value = s.choices[index].value;
     } else if (s.type == 'b') {
       value = value == "true" ? "false" : "true";
     } else {
@@ -164,6 +171,7 @@ class GameSettings final : public rex::ui::ImGuiDialog {
   }
   std::string DisplayValue(const MenuSetting& s) {
     const auto& value = values_.at(s.key);
+    if (std::string_view(s.key) == "gow3_language" && !Gow3LanguageAvailable(value)) return "English";
     for (const auto& choice : s.choices) if (value == choice.value) return choice.label;
     if (s.type == 'b') {
       if (std::string(s.key) == "present_hdr" && !rex::ui::IsNativeHdrAvailable()) return "UNAVAILABLE";

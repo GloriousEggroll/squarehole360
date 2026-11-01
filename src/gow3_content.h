@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace rex::system {
 class KernelState;
@@ -35,3 +36,5 @@ void Gow3UpgradeCheckpoints(rex::system::KernelState* kernel_state, const std::f
 // folder (no Coalesced_<code>.bin) falls back to English. Run before the
 // game starts.
 void Gow3ApplyLanguage(const std::filesystem::path& game_root);
+// Whether a gow3_language value is on the disc (after Gow3ApplyLanguage).
+bool Gow3LanguageAvailable(std::string_view name);

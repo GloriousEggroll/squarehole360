@@ -1,5 +1,6 @@
 #include "gow3_content.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -162,7 +163,12 @@ constexpr Language kLanguages[] = {
     {"polish", "POL", 11, 82},   {"portuguese", "PTB", 9, 13}, {"russian", "RUS", 12, 88},
     {"czech", "CZE", 1, 23},     {"hungarian", "HUN", 1, 42},
 };
+std::vector<std::string_view> available_languages;
 }  // namespace
+
+bool Gow3LanguageAvailable(std::string_view name) {
+  return std::find(available_languages.begin(), available_languages.end(), name) != available_languages.end();
+}
 
 void Gow3ApplyLanguage(const std::filesystem::path& game_root) {
   const auto& wanted = REXCVAR_GET(gow3_language);
@@ -175,7 +181,11 @@ void Gow3ApplyLanguage(const std::filesystem::path& game_root) {
   }
   std::error_code ec;
   const auto cooked = game_root / "GearGame" / "CookedXbox360";
-  if (!std::filesystem::exists(cooked / fmt::format("Coalesced_{}.bin", language->code), ec)) {
+  available_languages.clear();
+  for (const auto& candidate : kLanguages)
+    if (std::filesystem::exists(cooked / fmt::format("Coalesced_{}.bin", candidate.code), ec))
+      available_languages.push_back(candidate.name);
+  if (!Gow3LanguageAvailable(language->name)) {
     REXLOG_WARN("Language: this game disc has no {} ({}); using English", language->name, language->code);
     language = &kLanguages[0];
   }

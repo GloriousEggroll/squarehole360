@@ -110,6 +110,8 @@ SETTINGS = [
  S('monitor', 'Monitor', 0, 'Display', '0 uses the window manager’s default; other values select a monitor.', minimum=0, maximum=16),
  S('window_width', 'Window width', 1280, 'Display', 'Logical pixels; used only in windowed mode.', minimum=640, maximum=8192),
  S('window_height', 'Window height', 720, 'Display', 'Logical pixels; used only in windowed mode.', minimum=360, maximum=8192),
+ S('gow3_aspect_ratio', 'Aspect ratio', 'auto', 'Display', 'The shape of the picture the game renders. Automatic follows the window when the game starts. Wider than 16:9 shows more at the sides (ultrawide); menus and HUD stay in the middle 16:9 area. Narrower shows more above and below. Takes effect when the game restarts.', (('auto','Automatic (window)'),('16:9','16:9'),('16:10','16:10'),('21:9','21:9 (ultrawide)'),('32:9','32:9 (super ultrawide)'))),
+ S('gow3_fov', 'Field of view', 65, 'Display', 'Degrees, horizontal at 16:9; the game uses 65. Scales every camera, including cutscenes, and aiming still zooms in from it.', minimum=40, maximum=120),
  S('present_letterbox', 'Preserve aspect ratio', True, 'Display', 'Add bars as needed instead of stretching the image.'),
  S('vsync', 'Vertical sync', False, 'Display', 'Synchronize presentation to the display. Off allows tearing if the desktop permits it.'),
  S('gow3_frame_limit_mode', 'Frame-rate limit', 'custom', 'Display', 'A maximum only. Slow frames are never forced to catch up.', (('custom','Custom maximum'),('display','Monitor refresh rate'),('unlimited','Unlimited'))),
@@ -153,7 +155,7 @@ SETTINGS = [
  S('readback_memexport_fast', 'Buffered shader readbacks', True, 'Advanced', 'When CPU copies are enabled, reuse a completed previous result when available. Otherwise waits for the GPU; bursts can cause long freezes.', renderer='xenia'),
  S('gow3_60fps', 'Unlock original 30 FPS game cap', True, 'Advanced', 'Required for limits above 30 FPS. The frame-rate limit setting supplies the actual ceiling.'),
  S('gow3_movie_pacing', 'Smooth prerecorded movie timing', True, 'Advanced', 'Poll movie timing every millisecond instead of every 25 ms. Keeps the video’s original frame rate.'),
- S('gow3_language', 'Language', 'english', 'Game', 'Text and speech language. Takes effect when the game restarts. Discs carry different languages; one this disc lacks falls back to English.', (('english','English'),('french','French'),('german','German'),('italian','Italian'),('spanish','Spanish (Spain)'),('spanish_latin_america','Spanish (Latin America)'),('japanese','Japanese'),('korean','Korean'),('chinese','Chinese'),('polish','Polish'),('portuguese','Portuguese (Brazil)'),('russian','Russian'),('czech','Czech'),('hungarian','Hungarian'))),
+ S('gow3_language', 'Language', 'english', 'Game', 'Text and speech language. Takes effect when the game restarts. Lists the languages on your game disc; other regions’ discs carry others.', (('english','English'),('french','French'),('german','German'),('italian','Italian'),('spanish','Spanish (Spain)'),('spanish_latin_america','Spanish (Latin America)'),('japanese','Japanese'),('korean','Korean'),('chinese','Chinese'),('polish','Polish'),('portuguese','Portuguese (Brazil)'),('russian','Russian'),('czech','Czech'),('hungarian','Hungarian'))),
  S('user_gamertag', 'Gamertag', 'User', 'Online', 'Your name in multiplayer: 1–15 letters, digits and single spaces, starting with a letter. Each installation also has its own player ID in user/identity.toml.'),
  S('network_enabled', 'Networking', True, 'Online', 'Off disables System Link and internet play; the game then reports no network cable.'),
  S('network_lobby_server', 'Lobby server', '', 'Online', 'Internet play: address of a squarehole-lobby server (host or host:port, default port 36360). Leave empty to play System Link on your local network only.'),
@@ -255,12 +257,26 @@ for _n in CONTROLLER_PLAYERS:
 
 BY_KEY = {s.key:s for s in SETTINGS}
 # The C++ watcher applies only these reviewed settings, on their owning threads.
+# gow3_language value -> the game's file suffix. Discs carry different
+# languages; one is on the disc when GearGame/CookedXbox360/Coalesced_<code>.bin is.
+LANGUAGE_CODES = {'english': 'INT', 'french': 'FRA', 'german': 'DEU', 'italian': 'ITA', 'spanish': 'ESN',
+                  'spanish_latin_america': 'ESM', 'japanese': 'JPN', 'korean': 'KOR', 'chinese': 'CHN',
+                  'polish': 'POL', 'portuguese': 'PTB', 'russian': 'RUS', 'czech': 'CZE', 'hungarian': 'HUN'}
+
+
+def available_languages(root=None):
+    """gow3_language values the installed disc has; every language before setup."""
+    folder = (root or ROOT) / 'game' / 'GearGame' / 'CookedXbox360'
+    found = {name for name, code in LANGUAGE_CODES.items() if (folder / f'Coalesced_{code}.bin').is_file()}
+    return found or set(LANGUAGE_CODES)
+
+
 LIVE_SETTINGS = {
     'fullscreen', 'window_width', 'window_height', 'gow3_frame_limit_mode', 'framerate_limit',
     'present_effect', 'present_fsr_sharpness_reduction', 'present_fsr3_ghosting_reduction',
     'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
     'present_dither', 'swap_post_effect', 'present_frame_generation',
-    'gow3_low_latency', 'present_anti_lag',
+    'gow3_low_latency', 'present_anti_lag', 'gow3_fov',
 } | {s.key for s in SETTINGS if s.section in ('Input', 'Controls') or s.section.startswith('Controller ')}
 
 def game_running():

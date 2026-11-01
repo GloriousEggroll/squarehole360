@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QLineEdit,
     QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
-from model import CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, listed, widget_value, MAPPING_SOURCES, MAPPING_TARGETS, MAPPING_DEFAULTS, parse_mapping, format_mapping
+from model import available_languages, CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, listed, widget_value, MAPPING_SOURCES, MAPPING_TARGETS, MAPPING_DEFAULTS, parse_mapping, format_mapping
 
 
 def _qt_key_names():
@@ -258,8 +258,10 @@ class SettingsWindow(QMainWindow):
             for setting in (s for s in SETTINGS if s.section == section):
                 if setting.choices:
                     widget = QComboBox()
+                    languages = available_languages() if setting.key == 'gow3_language' else None
                     for value, label in setting.choices:
-                        widget.addItem(label, value)
+                        if languages is None or value in languages:
+                            widget.addItem(label, value)
                     widget.currentIndexChanged.connect(self.changed)
                 elif isinstance(setting.default, bool):
                     widget = QCheckBox()
@@ -391,7 +393,8 @@ class SettingsWindow(QMainWindow):
             value = widget_value(setting, self.values)
             self.loaded_widget_values[setting.key] = value
             if setting.choices:
-                w.setCurrentIndex(w.findData(value))
+                # A language the disc lacks shows English, as the game uses.
+                w.setCurrentIndex(w.findData(value) if w.findData(value) >= 0 else w.findData(setting.default))
             elif isinstance(setting.default, bool):
                 w.setChecked(value)
             elif isinstance(setting.default, str):

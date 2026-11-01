@@ -8,8 +8,11 @@
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/ui/flags.h>
+#include <rex/ui/window.h>
 
 #include <algorithm>
+#include <cmath>
 #include <atomic>
 #include <bit>
 #include <cstring>
@@ -24,8 +27,15 @@ REXCVAR_DEFINE_BOOL(gow3_movie_pacing, true, "Game",
                    "Use millisecond idle-render polling for prerecorded movie pacing")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_INT32(gow3_fov, 65, "Game",
+                    "Field of view in degrees, horizontal at 16:9; the game's is 65. Scales every camera, so aiming still zooms in");
+
+REXCVAR_DEFINE_STRING(gow3_aspect_ratio, "auto", "Game",
+                     "Render aspect ratio: auto (the window's), 16:9, 16:10, 21:9 or 32:9. Wider than 16:9 shows more at the sides")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 REXCVAR_DEFINE_INT32(gow3_render_height, 1080, "Game",
-                    "The game's own render height (16:9 width); 720 is the console's, 1080 the maximum")
+                    "The game's own render height (width from gow3_aspect_ratio); 720 is the console's, 1080 the maximum")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 namespace {
@@ -34,6 +44,9 @@ uint8_t* screen_size_base = nullptr;
 bool enabled = false;
 bool movie_pacing_enabled = false;
 bool mouse_look_enabled = false;
+bool projection_hooks = false;
+uint8_t* guest_memory = nullptr;
+rex::ui::Window* display_window = nullptr;
 
 // The engine's MouseX and MouseY key names (FName, index and number), set up
 // at startup from the UTF-16 names at 0x821471D0 and 0x821471E0.
@@ -61,10 +74,14 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   // lwz r11,0(r30) loads the stored screen width into CreateDevice's
   // presentation parameters.
   // Only the native renderer models EDRAM beyond the console's 10 MB.
-  if (REXCVAR_GET(gow3_render_height) != 720 &&
+  guest_memory = const_cast<uint8_t*>(guest_base);
+  if ((REXCVAR_GET(gow3_render_height) != 720 || REXCVAR_GET(gow3_aspect_ratio) != "16:9") &&
       ParseGow3RendererMode(REXCVAR_QUERY(std::string, gow3_renderer)) == Gow3RendererMode::Native &&
-      ReadInstruction(guest_base, 0x82971CDC) == 0x817E0000)
+      ReadInstruction(guest_base, 0x82971CDC) == 0x817E0000) {
     screen_size_base = const_cast<uint8_t*>(guest_base);
+    // The video mode stays 1280x720; show the frame at the render aspect.
+    REXCVAR_SET(present_frontbuffer_aspect, true);
+  }
   movie_pacing_enabled = REXCVAR_GET(gow3_movie_pacing) &&
       ReadInstruction(guest_base, 0x824042E0) == 0xC00A06EC &&
       ReadInstruction(guest_base, 0x824042E4) == 0xFF1F0000 &&
@@ -74,6 +91,10 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
       HasUtf16Name(guest_base, 0x821471D0, "MouseX") && HasUtf16Name(guest_base, 0x821471E0, "MouseY");
   if (!mouse_look_enabled) REXLOG_WARN("Gears mouse look disabled: executable does not match");
   Gow3ConfigureInputPrompts(guest_base);
+  // bl FPerspectiveMatrix at the projection hook site.
+  projection_hooks = ReadInstruction(guest_base, 0x8262CE30) == 0x48004299 &&
+      ReadInstruction(guest_base, 0x826310C8) == 0x7D8802A6;
+  if (!projection_hooks) REXLOG_WARN("Gears field of view disabled: executable does not match");
   supported_image = ReadInstruction(guest_base, 0x8254E4A8) == 0xC02304C8 &&
                     ReadInstruction(guest_base, 0x82B09E5C) == 0x39600002;
   enabled = supported_image && REXCVAR_GET(gow3_60fps);
@@ -105,10 +126,41 @@ void Gow3MoviePollInterval(rex::ppc::Register& interval) {
 // aspect ratio) at 0x833A2BD4/0x833A2BD8 before CreateDevice; every later
 // reader, including the back buffer parameters, takes it from there.
 namespace {
-// A multiple of 8, the GPU's resolve block size.
-uint32_t RenderHeight() { return uint32_t(std::clamp(REXCVAR_GET(gow3_render_height), 360, 2160)) & ~7u; }
-uint32_t RenderWidth() { return (RenderHeight() * 16 / 9 + 4) & ~7u; }
+constexpr double kGameAspect = 16.0 / 9.0;
+
+double DisplayAspect() {
+  const auto& choice = REXCVAR_GET(gow3_aspect_ratio);
+  if (choice == "16:10") return 1.6;
+  if (choice == "21:9") return 64.0 / 27.0;  // 2560x1080, 5120x2160; 3440x1440 is close
+  if (choice == "32:9") return 32.0 / 9.0;
+  if (choice == "auto" && display_window) {
+    const double width = display_window->GetActualPhysicalWidth();
+    const double height = display_window->GetActualPhysicalHeight();
+    if (width > 0 && height > 0) return std::clamp(width / height, 1.25, 4.0);
+  }
+  return kGameAspect;
+}
+
+struct RenderSize { uint32_t width, height; };
+// Height from gow3_render_height, width from the aspect ratio, both multiples
+// of 8 (the GPU's resolve block size). Wider sizes keep at most 1920x1080's
+// pixels, the largest the EDRAM model has been validated for; the presenter
+// scales the image to the window. Fixed on first use.
+RenderSize RenderSizeFor() {
+  static const RenderSize size = [] {
+    const double aspect = DisplayAspect();
+    double height = std::clamp(REXCVAR_GET(gow3_render_height), 360, 2160);
+    height = std::min(height, std::sqrt(1920.0 * 1080.0 / std::max(aspect, kGameAspect)));
+    const uint32_t h = uint32_t(height) & ~7u;
+    return RenderSize{std::max(8u, uint32_t(h * aspect + 4) & ~7u), h};
+  }();
+  return size;
+}
+uint32_t RenderHeight() { return RenderSizeFor().height; }
+uint32_t RenderWidth() { return RenderSizeFor().width; }
 }  // namespace
+
+void Gow3SetDisplayWindow(rex::ui::Window* window) { display_window = window; }
 
 // Viewport rectangles some engine objects initialize to a literal 1280x720.
 void Gow3ScreenWidthConstant(rex::ppc::Register& value) {
@@ -122,6 +174,26 @@ void Gow3ScreenHeightConstant(rex::ppc::Register& value) {
 // the 1280x720 stage at 1:1 from the top-left; showAll (1) scales it to fit.
 void Gow3ScaleformScaleMode(rex::ppc::Register& mode) {
   if (screen_size_base && mode.u32 == 0) mode.u64 = 1;
+}
+
+// GFxMovieRoot::SetViewport. The menus and HUD lay out a 16:9 stage, with
+// some items anchored to the visible edges and backgrounds the stage's width,
+// so on a screen wider than 16:9 they are drawn in a centered 16:9 area of
+// the full-width view. GViewport: BufferWidth, BufferHeight, Left, Top,
+// Width, Height, ...
+void Gow3ScaleformViewport(rex::ppc::Register& viewport) {
+  if (!screen_size_base || !viewport.u32 || RenderWidth() * 9 <= RenderHeight() * 16 + 72) return;
+  const uint32_t left = ReadInstruction(guest_memory, viewport.u32 + 8);
+  const uint32_t width = ReadInstruction(guest_memory, viewport.u32 + 16);
+  const uint32_t height = ReadInstruction(guest_memory, viewport.u32 + 20);
+  if (left != 0 || width != RenderWidth() || height != RenderHeight()) return;
+  const uint32_t stage = (height * 16 / 9) & ~1u;
+  const auto write = [&](uint32_t offset, uint32_t value) {
+    uint8_t* p = guest_memory + viewport.u32 + offset;
+    p[0] = uint8_t(value >> 24); p[1] = uint8_t(value >> 16); p[2] = uint8_t(value >> 8); p[3] = uint8_t(value);
+  };
+  write(8, (width - stage) / 2);
+  write(16, stage);
 }
 
 void Gow3ScreenWidthFloat(rex::ppc::Register& value) {
@@ -152,6 +224,35 @@ void Gow3OverrideScreenSize() {
     }
   }
   REXLOG_INFO("Gears render size: {}x{}", width, height);
+}
+
+// ULocalPlayer::CalcSceneView (0x8262C988) builds the view projection with
+// FPerspectiveMatrix(FOV * pi / 360, PlayerCamera.ConstrainedAspectRatio, 1,
+// NearPlane), then letterboxes the view to that aspect: Gears always
+// constrains it, to 16:9. Before the call (r9 = PlayerCamera), widen a 16:9
+// camera to the render aspect, keeping the vertical field of view (Hor+), and
+// apply gow3_fov. Cinematic cameras with their own aspect keep it.
+void Gow3ConstrainedProjection(rex::ppc::Register& half_fov, rex::ppc::Register& aspect,
+                               rex::ppc::Register&, rex::ppc::Register& camera) {
+  if (!projection_hooks || !camera.u32) return;
+  uint8_t* field = guest_memory + camera.u32 + 476;
+  const auto read = [&] { return std::bit_cast<float>(uint32_t(ReadInstruction(guest_memory, camera.u32 + 476))); };
+  const float target = screen_size_base ? float(double(RenderWidth()) / RenderHeight()) : float(kGameAspect);
+  float current = read();
+  const bool game_aspect = std::abs(current - float(kGameAspect)) < 0.005f;
+  if (std::abs(target - float(kGameAspect)) > 0.005f && (game_aspect || current == target)) {
+    const uint32_t bits = std::bit_cast<uint32_t>(target);
+    field[0] = uint8_t(bits >> 24); field[1] = uint8_t(bits >> 16); field[2] = uint8_t(bits >> 8); field[3] = uint8_t(bits);
+    aspect.f64 = target;
+    current = target;
+  }
+  double half = half_fov.f64;
+  const int fov = std::clamp(REXCVAR_GET(gow3_fov), 40, 120);
+  if (fov != 65) half *= fov / 65.0;
+  // Wider than 16:9: the 16:9 vertical field of view; narrower keeps the
+  // horizontal one and so shows more above and below.
+  if (current == target && target > float(kGameAspect)) half = std::atan(std::tan(half) * target / kGameAspect);
+  half_fov.f64 = std::min(half, 1.5);
 }
 
 // FXenonViewport::ProcessInput (0x8297EE10, r3 = viewport, f1 = DeltaTime)

@@ -28,6 +28,14 @@ after_instruction = true
 address = 0x82971CDC
 name = "Gow3OverrideScreenSize"
 after_instruction = false
+# FPerspectiveMatrix (0x826310C8) call in ULocalPlayer::CalcSceneView with the
+# player camera in r9: field of view (gow3_fov) and render aspects other than
+# 16:9 (gow3_aspect_ratio).
+[[midasm_hook]]
+address = 0x8262CE30
+name = "Gow3ConstrainedProjection"
+registers = ["f1", "f2", "f3", "r9"]
+
 # Literal 1280x720 viewport rectangles (li r,1280 / li r,720).
 [[midasm_hook]]
 address = 0x8288C744
@@ -157,6 +165,13 @@ address = 0x82C5333C
 name = "Gow3ScaleformScaleMode"
 registers = ["r4"]
 after_instruction = true
+
+# GFxMovieRoot::SetViewport (r4 = the new GViewport): keep the menus and HUD
+# in a centered 16:9 area on screens wider than 16:9.
+[[midasm_hook]]
+address = 0x82BEA8D8
+name = "Gow3ScaleformViewport"
+registers = ["r4"]
 
 # Diagnostic-only engine counter observations. Original stores and completion
 # remain authoritative; these observations are not allocation lifetime pins.

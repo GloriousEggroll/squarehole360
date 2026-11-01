@@ -311,12 +311,36 @@ The runtime logs the actual swapchain dimensions.
 `gow3_render_height` (default 1080) sets the resolution the game itself renders
 at: 1920x1080 by default, or `gow3_render_height = 720` for the console's
 original 1280x720. The engine sizes its scene buffers from it and the Scaleform
-menus scale to fit; no assets change. Heights round to a multiple of 8 with a
-16:9 width. Above 720p the native renderer models 8192 EDRAM tiles instead of
+menus scale to fit; no assets change. Heights round to a multiple of 8; the
+width follows the aspect ratio below. Above 720p the native renderer models 8192 EDRAM tiles instead of
 the console's 2048, since 1080p buffers no longer fit in 10 MB. 1080p is the
 practical maximum: the game stores EDRAM positions in 12 bits. Shadow map
 resolutions are unchanged. Changing it needs a restart; the Xenia renderer
 always renders at 720.
+
+### Aspect ratio and field of view
+
+**Aspect ratio** (`gow3_aspect_ratio`, default `auto`) sets the shape the game
+renders: `auto` takes the window's when the game starts; 16:9, 16:10, 21:9 and
+32:9 are fixed. The game itself only renders 16:9: its player camera always
+constrains the view to that aspect and letterboxes anything else. A hook on
+`ULocalPlayer::CalcSceneView`'s projection (`FPerspectiveMatrix` with the
+camera at r9) writes the render aspect into the camera instead, so the view
+fills the screen. Wider than 16:9 keeps the 16:9 vertical field of view and
+shows more at the sides (Hor+); 16:10 keeps the horizontal one and shows more
+above and below. Cinematic cameras with their own aspect keep it. Menus and
+the HUD are laid out for a 16:9 stage, so on wider screens their Scaleform
+viewport is narrowed to the middle 16:9 area. Wide sizes keep at most
+1920x1080's pixels (21:9 renders 2200x928, 32:9 2704x760) because of the EDRAM
+limit above; the upscaler scales to the window. The presenter shows the frame
+at its own aspect (`present_frontbuffer_aspect`), since the console video mode
+stays 1280x720. The game's Bink player fits prerecorded movies to the screen
+at their own aspect, with black bars at the sides. Needs the native renderer
+and a restart.
+
+**Field of view** (`gow3_fov`, default 65, the game's) is in degrees,
+horizontal at 16:9, and applies while playing. It scales every camera's field
+of view, so aiming and zooming keep their proportions; cutscenes widen too.
 
 ### Temporal upscaling, frame generation and latency (Native)
 
