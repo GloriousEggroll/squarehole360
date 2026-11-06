@@ -18,8 +18,8 @@ int main() {
     throw std::runtime_error("Missing schema key");
   };
   const auto n = Gow3RendererMode::Native, x = Gow3RendererMode::Xenia;
-  for (const auto& setting : kMenuSettings)
-    assert(std::string_view(setting.key) != "anisotropic_override");
+  assert(find("anisotropic_override").value == std::string_view("-1"));  // the game's own filtering
+  assert(Gow3MenuLiveApplies(find("anisotropic_override"), n, n));
   assert(!Gow3MenuLiveApplies(find("gow3_renderer"), n, x));
   assert(Gow3MenuLiveApplies(find("framerate_limit"), n, x));
   assert(!Gow3MenuLiveApplies(find("swap_post_effect"), n, x));
@@ -91,7 +91,7 @@ int main() {
       }
     }
     assert(keys.contains("gow3_renderer") && keys.contains("present_hdr") && keys.contains("mnk_mode"));
-    assert(!keys.contains("anisotropic_override"));
+    assert(keys.contains("anisotropic_override"));
     assert(keys.contains("present_effect") == (mode == x));
     assert(keys.contains("gow3_native_pipeline_prewarm") == (mode == n));
     for (int press = 0; press < 120; ++press) {

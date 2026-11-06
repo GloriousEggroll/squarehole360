@@ -132,6 +132,29 @@ add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/temporal_inputs_spv.h"
     COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.1 --vn temporal_inputs_spv
         -o "${GOW3_NATIVE_SHADER_DIR}/temporal_inputs_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/temporal_inputs.comp"
     DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/temporal_inputs.comp" VERBATIM)
+# Ray-traced ambient occlusion (ray_traced_ao.cpp).
+foreach(stage convert trace temporal)
+    add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/rt_ao_${stage}_spv.h"
+        COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.2 --vn rt_ao_${stage}_spv
+            -o "${GOW3_NATIVE_SHADER_DIR}/rt_ao_${stage}_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_ao_${stage}.comp"
+        DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_ao_${stage}.comp" VERBATIM)
+endforeach()
+add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_trace_spv.h"
+    COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.2 --vn rt_shadow_trace_spv
+        -o "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_trace_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_shadow_trace.comp"
+    DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_shadow_trace.comp" VERBATIM)
+foreach(format rgba8 rgb10_a2 rgba16f)
+    add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/rt_ao_composite_${format}_spv.h"
+        COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.2 -DOUT_FORMAT=${format}
+            --vn rt_ao_composite_${format}_spv
+            -o "${GOW3_NATIVE_SHADER_DIR}/rt_ao_composite_${format}_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_ao_composite.comp"
+        DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_ao_composite.comp" VERBATIM)
+    add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_${format}_spv.h"
+        COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.2 -DOUT_FORMAT=${format}
+            --vn rt_shadow_${format}_spv
+            -o "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_${format}_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_shadow.comp"
+        DEPENDS "${GOW3_NATIVE_SHADER_SOURCE_DIR}/rt_shadow.comp" VERBATIM)
+endforeach()
 add_custom_command(OUTPUT "${GOW3_NATIVE_SHADER_DIR}/state_transfer_spv.h"
     COMMAND "${GOW3_NATIVE_GLSLANG}" -V --target-env vulkan1.1 --vn state_transfer_spv
         -o "${GOW3_NATIVE_SHADER_DIR}/state_transfer_spv.h" "${GOW3_NATIVE_SHADER_SOURCE_DIR}/state_transfer.comp"
@@ -185,6 +208,17 @@ add_library(gow3-native-renderer STATIC
     "${CMAKE_CURRENT_LIST_DIR}/native_monotonic_depth_module.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/readonly_depth_conversion.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/temporal_inputs.cpp"
+    "${CMAKE_CURRENT_LIST_DIR}/ray_traced_ao.cpp"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_ao_convert_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_ao_trace_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_ao_temporal_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_ao_composite_rgba8_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_ao_composite_rgb10_a2_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_ao_composite_rgba16f_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_trace_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_rgba8_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_rgb10_a2_spv.h"
+    "${GOW3_NATIVE_SHADER_DIR}/rt_shadow_rgba16f_spv.h"
     "${GOW3_NATIVE_SHADER_DIR}/early_depth_lower_bound_comp_spv.h"
     "${CMAKE_CURRENT_LIST_DIR}/retained_opaque_writer.cpp"
     "${CMAKE_CURRENT_LIST_DIR}/retained_fp24_depth_writer.cpp"

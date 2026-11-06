@@ -6,7 +6,8 @@ it. This covers co-op Campaign, Horde, Beast and private Versus. Ranked Versus
 matchmaking ran on Epic's servers, which are gone, so it is not available.
 
 Players can be on the same local network, or anywhere on the internet through
-a **lobby server**, which anyone can run.
+a **dedicated lobby server**, which anyone can run. Choose with **System-Link**
+under **Multiplayer** in the settings app.
 
 ## Your profile
 
@@ -14,7 +15,7 @@ Every installation has its own player ID (XUID), generated on first start and
 kept in `user/identity.toml`. Two players with the same ID cannot share a
 party, so do not copy that file to another PC.
 
-- Choose your **gamertag** in the settings app under **Online**: 1–15 letters,
+- Choose your **gamertag** in the settings app under **Multiplayer**: 1–15 letters,
   digits and single spaces, starting with a letter.
 - Earlier versions used one built-in ID for everyone. On first start, saves and
   profile progress made with it are copied to your new ID. Gears signs player
@@ -23,7 +24,7 @@ party, so do not copy that file to another PC.
 
 ## Playing on a local network
 
-1. Leave **Lobby server** empty.
+1. Set **System-Link** to **LAN** (the default).
 2. In the game, open the main menu and press **Back** (Tab with keyboard
    controls) for **Party Options**, then choose **System Link**.
 3. Host: choose **Create Party**. Others: **Refresh** and join the host's party
@@ -31,21 +32,21 @@ party, so do not copy that file to another PC.
 4. The host chooses Campaign, Horde or another mode. Everyone in the party
    follows.
 
-The game uses UDP ports 1000 and 14000–14001. Ports below 1024 are moved to
-10000 plus the port (11000) on every system, so no administrator rights are
-needed and Linux and Windows players can mix. Allow these ports through a
-firewall if parties do not appear:
+Whoever creates a party runs a small lobby server inside their game until they
+leave the party; nothing has to be started or configured. Other games look for
+it on the network when they browse. Allow this through a firewall if parties do
+not appear:
 
-- UDP 11000;
-- UDP 14000–14001;
-- broadcasts on the LAN.
+- UDP 36360 on the PC of the player who hosts;
+- broadcasts on the LAN to UDP 36360.
 
 ## Playing over the internet
 
 1. Someone runs a lobby server (see below) and shares its address.
-2. Every player sets **Lobby server** to that address. Use the same **Room**
-   name; the default is `public`. Optionally set a **Room password**: the first
-   player in a room sets it.
+2. Every player sets **System-Link** to **Dedicated Server** and enters that
+   address in **Dedicated server**. Use the same **Room** name; the default is
+   `public`. Optionally set a **Room password**: the first player in a room sets
+   it. If the server does not answer, the game behaves as in LAN mode.
 3. In the game, use System Link exactly as on a LAN. The room behaves like one
    local network: parties of players in your room appear in the System Link
    Browser.
@@ -65,6 +66,13 @@ While other players are connected, the frame rate is held at 60 FPS
 (**Multiplayer frame-rate lock**, default 60), so every machine runs the game
 at the same speed. Your normal limit returns about 15 seconds after the last
 other player disconnects. 0 disables the lock.
+
+## When a player leaves
+
+A game that closes tells the room as it goes, so the others drop that player
+within a moment. A game that dies without warning (killed, crashed, or cut off
+from the network) is noticed after about 4 seconds without its keepalives. A
+player who is cut off for that long and comes back has to rejoin the party.
 
 ## Running a lobby server
 
@@ -95,7 +103,9 @@ use your public address, or `address:port` for a port other than 36360.
 |---|---|---|
 | `user_gamertag` | `User` | Name shown to other players |
 | `network_enabled` | `true` | Off: the game reports no network cable |
-| `network_lobby_server` | empty | `host[:port]` of a lobby server; empty for LAN only |
+| `network_system_link` | `auto` | `lan`, `dedicated`, or `auto` (dedicated if a server is set; the settings app writes `lan` or `dedicated`) |
+| `network_lobby_server` | empty | `host[:port]` of the dedicated server |
+| `network_lan_lobby` | `true` | Host a server for a party and search the LAN; `false` with no dedicated server uses plain LAN sockets |
 | `network_lobby_room` | `public` | Room on the lobby server |
 | `network_lobby_password` | empty | Room password |
 | `network_frame_rate_lock` | `60` | FPS limit while others are connected; 0 disables |

@@ -1,0 +1,58 @@
+#version 460
+// Ray-traced shadows for the game's dominant light, step 2: merges the traced
+// visibility (step 1, rt_shadow_trace.comp) into the red channel of the
+// game's light attenuation buffer (1: lit, 0: shadowed), which the base pass
+// multiplies into that light. The darker of the two is kept, so a caster
+// missing from the captured geometry keeps the game's own shadow. Soft
+// shadows are blurred by depth first, which hides their per-pixel dither.
+// Built once per storage format (OUT_FORMAT) to match the buffer.
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform texture2D visibility;
+layout(set = 0, binding = 1) uniform texture2D depth_texture;  // device depth, reverse Z
+layout(set = 0, binding = 2) uniform texture2D attenuation;
+layout(set = 0, binding = 3, OUT_FORMAT) uniform writeonly image2D result;
+
+layout(push_constant, std430) uniform Push {
+    uvec2 size;
+    int blur_radius;   // 0: hard shadows, used as traced
+    uint debug_view;   // 1: traced visibility only; 2: everything shadowed
+    uint step;         // pixels per traced point (visibility is that much smaller)
+} p;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(pixel), p.size))) return;
+    const vec4 game = texelFetch(attenuation, pixel, 0);
+    if (p.debug_view == 2u) {
+        imageStore(result, pixel, vec4(0.0, game.gba));
+        return;
+    }
+    const int step = int(max(p.step, 1u));
+    const ivec2 traced_size = textureSize(visibility, 0);
+    // The traced point nearest this pixel, and this pixel's position among
+    // the traced points.
+    const ivec2 own = min(pixel / step, traced_size - 1);
+    const vec2 at = (vec2(pixel) + 0.5) / float(step) - 0.5;
+    float visible = texelFetch(visibility, own, 0).r;
+    if (p.blur_radius > 0) {
+        // Reverse-Z device depth is proportional to 1 / distance.
+        const float depth = texelFetch(depth_texture, pixel, 0).r;
+        float sum = 0.0, weight = 0.0;
+        for (int y = -p.blur_radius; y <= p.blur_radius; ++y)
+            for (int x = -p.blur_radius; x <= p.blur_radius; ++x) {
+                const ivec2 tap = clamp(own + ivec2(x, y), ivec2(0), traced_size - 1);
+                // Depth where the point was traced.
+                const float d = texelFetch(depth_texture, min(tap * step, ivec2(p.size) - 1), 0).r;
+                if (abs(d - depth) > 0.01 * depth) continue;
+                const vec2 offset = vec2(tap) - at;
+                const float w = exp(-0.5 * dot(offset, offset) / float(p.blur_radius * p.blur_radius));
+                sum += texelFetch(visibility, tap, 0).r * w;
+                weight += w;
+            }
+        if (weight > 0.0) visible = sum / weight;
+    }
+    const float value = p.debug_view == 1u ? visible : min(game.r, visible);
+    imageStore(result, pixel, vec4(value, game.gba));
+}

@@ -1,0 +1,94 @@
+#version 460
+// Ray-traced ambient occlusion, step 2: at half resolution (the top-left pixel
+// of each 2x2 block), cast cosine-distributed rays around the surface normal
+// (from the depth buffer) against the frame's geometry and store the
+// unoccluded fraction.
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1) uniform texture2D depth_texture;  // device depth, reverse Z
+layout(set = 0, binding = 2, r16f) uniform writeonly image2D ao_out;
+
+layout(push_constant, std430) uniform Push {
+    vec4 inverse_view_projection[4];  // guest clip to camera-relative world, one row per output
+    uvec2 size;       // full resolution
+    uint frame;
+    uint rays;
+    float radius;       // world units (cm)
+    float sky_depth;    // device depth at or below which a pixel is sky
+    uint step;          // traced every step-th pixel in each direction (2, or more when scaled)
+    float padding;
+} p;
+
+vec3 Position(ivec2 pixel, float depth) {
+    const vec2 ndc = vec2((float(pixel.x) + 0.5) / float(p.size.x) * 2.0 - 1.0,
+                          1.0 - (float(pixel.y) + 0.5) / float(p.size.y) * 2.0);
+    // The viewport maps NDC z to device depth 1 - z (reverse Z).
+    const vec4 c = vec4(ndc, 1.0 - depth, 1.0);
+    const vec4 w = vec4(dot(p.inverse_view_projection[0], c), dot(p.inverse_view_projection[1], c),
+                        dot(p.inverse_view_projection[2], c), dot(p.inverse_view_projection[3], c));
+    return w.xyz / w.w;
+}
+
+float Depth(ivec2 pixel) {
+    return texelFetch(depth_texture, clamp(pixel, ivec2(0), ivec2(p.size) - 1), 0).r;
+}
+
+uint Hash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+
+void main() {
+    const ivec2 half_pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(uvec2(half_pixel), (p.size + p.step - 1u) / p.step))) return;
+    const ivec2 pixel = min(half_pixel * int(p.step), ivec2(p.size) - 1);
+    const float depth = Depth(pixel);
+    if (depth <= p.sky_depth) {
+        imageStore(ao_out, half_pixel, vec4(1.0));
+        return;
+    }
+    const vec3 position = Position(pixel, depth);
+    // Normal from the neighbours on the nearer side in each direction, which
+    // keeps silhouettes from blending the foreground with the background.
+    const vec3 left = Position(pixel - ivec2(1, 0), Depth(pixel - ivec2(1, 0)));
+    const vec3 right = Position(pixel + ivec2(1, 0), Depth(pixel + ivec2(1, 0)));
+    const vec3 up = Position(pixel - ivec2(0, 1), Depth(pixel - ivec2(0, 1)));
+    const vec3 down = Position(pixel + ivec2(0, 1), Depth(pixel + ivec2(0, 1)));
+    const vec3 dx = distance(right, position) < distance(position, left) ? right - position : position - left;
+    const vec3 dy = distance(down, position) < distance(position, up) ? down - position : position - up;
+    vec3 normal = normalize(cross(dx, dy));
+    if (any(isnan(normal))) {
+        imageStore(ao_out, half_pixel, vec4(1.0));
+        return;
+    }
+    if (dot(normal, position) > 0.0) normal = -normal;  // face the camera
+    const vec3 tangent = normalize(abs(normal.z) < 0.9 ? cross(normal, vec3(0, 0, 1)) : cross(normal, vec3(1, 0, 0)));
+    const vec3 bitangent = cross(normal, tangent);
+    const float distance_to_camera = length(position);
+    const vec3 origin = position + normal * (0.5 + distance_to_camera * 0.002);
+
+    float occlusion = 0.0;
+    const uint seed = Hash(uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + p.frame * 26699u);
+    for (uint i = 0u; i < p.rays; ++i) {
+        const uint h = Hash(seed + i * 0x9e3779b9u);
+        // R2 sequence offset by the per-pixel hash, advanced every frame.
+        const float n = float(p.frame * p.rays + i);
+        const float u1 = fract(float(h & 0xffffu) / 65536.0 + n * 0.7548776662);
+        const float u2 = fract(float(h >> 16) / 65536.0 + n * 0.5698402910);
+        const float r = sqrt(u1), phi = 6.2831853 * u2;
+        const vec3 direction = normalize(tangent * (r * cos(phi)) + bitangent * (r * sin(phi)) +
+                                         normal * sqrt(max(0.0, 1.0 - u1)));
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xff,
+                              origin, 0.0, direction, p.radius);
+        rayQueryProceedEXT(query);
+        if (rayQueryGetIntersectionTypeEXT(query, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+            const float t = rayQueryGetIntersectionTEXT(query, true) / p.radius;
+            occlusion += 1.0 - t * t;
+        }
+    }
+    imageStore(ao_out, half_pixel, vec4(1.0 - occlusion / float(max(p.rays, 1u))));
+}

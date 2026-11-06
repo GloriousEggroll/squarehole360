@@ -230,7 +230,7 @@ PySide6 and tomli-w are required). **Window mode** offers **Windowed** and
 **Borderless fullscreen**. Returning to Windowed restores the configured client
 size (1280×720 by default). Click **Apply**: window mode and size, the frame-rate
 ceiling, dithering, the upscaler (FSR 1, FSR 3.1, DLSS, XeSS, CAS, bilinear),
-sharpening, frame generation and the latency options can update while playing.
+sharpening and the latency options can update while playing.
 Xenia also supports live FSR pass count and FXAA. The editor waits for the running game to
 acknowledge the saved file; resource/compatibility options show **Game restart
 needed** at the bottom. Reverting those options clears the notice. The editor
@@ -297,8 +297,18 @@ Both renderers offer FSR 1, CAS and bilinear output scaling and sharpening.
 Native also offers temporal upscalers, which use depth, motion vectors and
 sub-pixel jitter from the scene (see below). Xenia adds 1×/2×/3× internal
 rendering, FXAA and MSAA support.
-Dithering is available in both renderers. Both always use the game's original
-per-texture filtering; legacy `anisotropic_override` values normalize to `-1`.
+Dithering is available in both renderers. **Anisotropic filtering**
+(`anisotropic_override`, Image tab) defaults to the game's own per-texture
+filtering (`-1`); 2x, 4x, 8x and 16x (`2` to `5`, the Xenos encoding) apply
+to every mipmapped, bilinear-filtered texture, leaving point-sampled and
+unmipped ones (lookup tables, render targets) as they are. It applies while
+playing; other saved values fall back to the game's filtering.
+**Motion blur** (`gow3_motion_blur`, Image tab, native renderer, live) is off
+by default. Gears 3's blur is part of its post-process passes: a tile pass
+(pixel shader `8e22319c…`, velocity scale in c12.xy) and a gather pass
+(`f5e7c3c5…`, c11), which read the velocity buffer resolved after the
+velocity pass. Off zeroes those scales for the draws that sample that buffer,
+so the passes still run (bloom, tone, everything else) without blurring.
 FSR 1 scales to the actual window or fullscreen surface; for 720p to 4K use
 native internal resolution and a 3840×2160 desktop surface. Fractional desktop
 scaling uses Wayland's preferred fractional scale and viewport protocol, so
@@ -314,9 +324,17 @@ original 1280x720. The engine sizes its scene buffers from it and the Scaleform
 menus scale to fit; no assets change. Heights round to a multiple of 8; the
 width follows the aspect ratio below. Above 720p the native renderer models 8192 EDRAM tiles instead of
 the console's 2048, since 1080p buffers no longer fit in 10 MB. 1080p is the
-practical maximum: the game stores EDRAM positions in 12 bits. Shadow map
-resolutions are unchanged. Changing it needs a restart; the Xenia renderer
-always renders at 720.
+largest size the game itself can lay out: it stores EDRAM positions in 12 bits.
+
+`gow3_render_height = 1440` keeps the game's 720p layout and has the native
+renderer draw every screen-sized target at twice the size behind its back
+(2560x1440 with 16:9): render targets, the copies the game samples back
+(resolves), viewports and pixel positions are scaled, while everything the
+game itself sees stays at 720p. Targets smaller than half the frame (colour
+grading tables, the bloom chain) stay at their own size. Shadow maps are
+scaled too. See [resolution-scaling-plan.md](resolution-scaling-plan.md).
+Changing the resolution needs a restart; the Xenia renderer always renders
+at 720.
 
 ### Aspect ratio and field of view
 
@@ -342,7 +360,86 @@ and a restart.
 horizontal at 16:9, and applies while playing. It scales every camera's field
 of view, so aiming and zooming keep their proportions; cutscenes widen too.
 
-### Temporal upscaling, frame generation and latency (Native)
+**HUD size** (`gow3_hud_size`, Display tab, applies while playing) sizes the
+in-game HUD compared with the console's. The game draws parts of its HUD
+(weapon panel, ammo, prompts, subtitles) at fixed pixel sizes, so they look
+smaller at 1080p than at 720p. Automatic (0) keeps that behaviour for every
+internal resolution: 100% at 720p, 67% at 1080p, 50% at 1440p, which would
+otherwise keep the 720p layout's size. A percentage (25-200) fixes the size
+instead. `src/gow3_hud_scale.cpp` lets the HUD lay out on a virtual screen:
+after `UCanvas::Update` (0x827483C0) it sets the canvas size and clip size to
+the virtual size and scales the canvas transform to match. Scaleform menus
+are not affected.
+
+### Ray-traced ambient occlusion (Native)
+
+**Ray-traced ambient occlusion** (`gow3_rt_ao`, off by default; Ray tracing
+tab) adds soft shadows where surfaces meet and objects touch, traced against
+the frame's real geometry with the GPU's ray tracing. It needs a GPU and
+driver with Vulkan ray queries and transform feedback (AMD RX 6000 or NVIDIA
+RTX and newer; not macOS) and costs about 2.5 ms per frame at 1080p on an
+RX 9070 XT. Strength, reach and rays per pixel apply while playing.
+
+How it works (`src/renderer/native/ray_traced_ao.cpp`): each scene draw that
+writes depth without alpha test is drawn a second time with a vertex-only
+pipeline whose transform feedback stores its clip-space triangles; the game's
+own draw is unchanged. Before the HUD (or the final resolve when there is no
+HUD) the triangles become camera-relative positions through the frame's camera
+(VS c0..c3, c5), one bottom-level and one top-level acceleration structure are
+built, and rays from the game's depth resolve are traced at half resolution,
+accumulated over frames with the camera motion and upsampled by depth. The
+result multiplies the tonemapped colour, less on bright pixels (direct light,
+glow and light shafts), and goes back into the colour target the HUD is drawn
+on. Alpha-tested surfaces (foliage, fences) and translucency cast no
+occlusion; fog in front of a surface is darkened with it. `gow3_rt_ao_debug`
+shows the occlusion alone.
+
+### Ray-traced shadows (Native)
+
+**Ray-traced shadows** (`gow3_rt_shadows`, off by default; Ray tracing tab)
+trace the shadows of the game's dynamic shadow-casting light (the dominant
+light: the sun outdoors, often a lamp indoors) against the frame's geometry.
+**Shadow softness** (`gow3_rt_shadow_softness`, 0 to 1, default 0.25) widens
+the light; 0 gives hard shadows. Both apply while playing. Same GPU
+requirements as the ambient occlusion above. On an RX 9070 XT at 1080p they
+cost about 3.5 ms per frame soft and 1.5 to 2 ms hard; with ambient occlusion
+also on, the two together cost about 4 ms, since they share the frame's
+acceleration structures.
+
+Gears 3 bakes most of its lighting, sun shadows included, into lightmaps;
+only the dominant light is shaded in real time, and only on materials that
+accept dynamic shadows (characters, most walls and floors near them). Its
+shadow maps are per object: each caster's depth is drawn from the light,
+projected into the red channel of a frame-sized light attenuation buffer
+(1 lit, 0 shadowed), and the base pass multiplies the light by that buffer.
+The renderer hooks in there (`src/renderer/native/ray_traced_ao.cpp`,
+`tools/rendering/native/rt_shadow.comp`):
+
+- A projection draw writes only red into a frame-sized target, with the
+  shadow buffer's size in PS c7.xy; its ScreenToShadow matrix (PS c8..c11,
+  input `(ndc.xy * w, w, 1)`) combined with the camera gives world to shadow
+  space, whose centre of projection is the light (perspective, a local light)
+  or whose depth axis points away from it (orthographic, a directional one).
+- Before that buffer is resolved for the base pass, the geometry captured so
+  far (the depth prepass) becomes the frame's acceleration structures, and
+  every pixel of the depth resolve is traced towards the light. The buffer
+  keeps the darker of the game's value and the traced one, so the RT can only
+  add shadow: a caster that was not captured (alpha-tested bars, foliage,
+  geometry outside the view) still has the game's shadow map.
+- Soft shadows trace two rays towards a disc the size of the light, two more
+  where those disagree, and blur the result by depth before merging it.
+  Hits within 15% of a local light's distance are ignored (lamps sit in
+  fixtures the game does not draw into its shadow maps).
+- Ray-traced AO, when on, reuses the same acceleration structures later in
+  the frame.
+
+The light comes only from the frame's projections, so frames where the game
+draws no dynamic shadow get none traced either. Surfaces that are lit only
+by lightmaps do not change. `gow3_rt_shadows_debug = 1` uses the traced
+visibility alone, `2` shadows everything (shows which surfaces take the
+dynamic light).
+
+### Temporal upscaling and latency (Native)
 
 With **Upscaling** set to a temporal mode, the native renderer jitters the
 camera by a sub-pixel amount each frame and hands the upscaler the scene depth,
@@ -360,9 +457,9 @@ Menus, movies and loading screens have no 3D scene; they use FSR 1.
 
 DLSS and XeSS need the vendor SDKs fetched at build time
 (`tools/fetch-vendor-sdks.sh`) and fall back to FSR 3.1 when the GPU, driver or
-library cannot run them; the log says which upscaler is active. FSR 4 and XeSS
-frame generation exist only for Direct3D 12 and are not available to this
-Vulkan renderer.
+library cannot run them; the log says which upscaler is active. FSR 4 exists
+only for Direct3D 12 and is not available to this Vulkan renderer. There is no
+frame generation.
 
 FSR 3.1 at 720p to 4K (a 3× ratio, AMD's Ultra Performance) leans on about
 60 frames of history. Surfaces that animate without motion vectors, such as
@@ -373,15 +470,6 @@ accumulation per frame (from 0.333 to 0.1). In an offline test against a known
 pattern, 1 cut the error on swaying content by about a quarter, with more
 shimmer from frame to frame. FSR 1 has no history and so no ghosting at all.
 
-**Frame generation** (`present_frame_generation = true`, with any temporal
-upscaler) uses FSR 3.1 frame interpolation: between two game frames it shows a
-generated frame, then the real frame half a game frame after the generated
-one has finished on the GPU. Motion looks smoother;
-input still follows the real frame rate and the real frame is shown slightly
-later, so it suits a base rate of 60 FPS or more. The HUD of the real frame is
-drawn over generated frames. On an RX 9070 XT at 4K the base rate in the Act 1
-pan drops from about 135 to about 83 FPS, presenting about 166 frames per second.
-
 **Low latency** (`gow3_low_latency = true`) keeps the game at most one frame
 ahead of the renderer and applies the frame-rate limit on the game thread just
 before the next frame reads input, instead of holding finished frames back. It
@@ -389,7 +477,7 @@ cost no measurable throughput in testing. **AMD Anti-Lag**
 (`present_anti_lag = true`) additionally uses the driver's `VK_AMD_anti_lag`:
 built into AMD's Windows driver, and on Linux provided by Mesa's anti-lag layer,
 which the game enables at startup (so turning it on takes effect after a
-restart there). Both options can be combined with frame generation.
+restart there).
 
 Native Wayland presentation is the default. The launcher first checks Vulkan
 Wayland support; if unavailable it uses X11/Xwayland with HDR disabled. Set

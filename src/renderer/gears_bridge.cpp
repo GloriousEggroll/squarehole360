@@ -660,6 +660,16 @@ void GeometryBlocks(uint8_t* base, const uint8_t* device, uint32_t function,
       size = uint32_t(bytes);
     }
   }
+  // The executor skips such a draw (it used to stop the renderer); say why.
+  if (draw && function == profile::d3d::kDrawIndexedVertices && args[3] && (!indexed || !size)) {
+    static std::atomic<uint32_t> reported{0};
+    if (reported.fetch_add(1, std::memory_order_relaxed) < 8)
+      REXLOG_WARN("Native capture: indexed draw without capturable indices (index buffer {:08X} {}, "
+                  "primitive {}, start {}, {} indices, data at {:08X}, {} bytes)",
+                  index, indexed ? "readable" : "unreadable", args[1], args[2], args[3],
+                  indexed ? BigWord(base + index + 0x18) : 0u,
+                  indexed ? uint64_t(args[3]) * ((BigWord(base + index) & 0x80000000u) ? 4 : 2) : 0ull);
+  }
   PhysicalBlock(31, physical, size);
 }
 

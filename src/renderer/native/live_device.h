@@ -41,6 +41,10 @@ struct LiveVulkanDeviceDesc {
     bool ordered_pixel_interlock = false;
     bool shader_stencil_export = false; // Actually enabled device extension.
     bool store_op_none = false; // Actually enabled EXT_load_store_op_none (core 1.3 checked separately).
+    // Actually enabled acceleration structures with ray queries, and transform
+    // feedback (for ray-traced effects; see ray_traced_ao.h).
+    bool ray_query = false;
+    bool transform_feedback = false;
     std::function<std::unique_ptr<LiveQueueLease>()> acquire_queue;
 };
 

@@ -46,7 +46,7 @@ anisotropic_override = 5
   CHECK(rex::cvar::GetFlagByName("render_target_path_vulkan") == "fsi");
   CHECK(rex::cvar::GetFlagByName("occlusion_query_enable") == "true");
   CHECK(rex::cvar::GetFlagByName("present_effect") == "bilinear");
-  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "-1");
+  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "5");
   CHECK(rex::cvar::GetFlagByName("swap_post_effect") == "none");
   CHECK(rex::cvar::GetFlagByName("texture_cache_memory_limit_soft") == "384");
   { std::ofstream file(path); file << R"(gow3_renderer = "reference"
@@ -62,13 +62,14 @@ anisotropic_override = 3
   CHECK(rex::cvar::GetFlagByName("present_effect") == "fsr");
   CHECK(REXCVAR_GET(gow3_native_settings_test));
   CHECK(rex::cvar::GetFlagByName("texture_cache_memory_limit_soft") == "1024");
-  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "-1");
-  char forced_filter[] = "--anisotropic_override=5";
-  char* forced_args[] = {program, forced_filter};
-  rex::cvar::Init(2, forced_args);
-  REQUIRE(rex::cvar::GetFlagByName("anisotropic_override") == "5");
+  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "3");
+  { std::ofstream file(path); file << "gow3_renderer = \"native\"\nanisotropic_override = 1\n"; }
   Gow3LoadSettingsConfig(path);
-  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "-1");
+  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "-1");  // not an offered level
+  { std::ofstream file(path); file << "gow3_renderer = \"native\"\n"; }
+  REQUIRE(rex::cvar::SetFlagByName("anisotropic_override", "5"));
+  Gow3LoadSettingsConfig(path);
+  CHECK(rex::cvar::GetFlagByName("anisotropic_override") == "-1");  // no saved choice: the game's own
   char legacy[] = "--gow3_renderer=reference";
   char* alias_args[] = {program, legacy};
   rex::cvar::Init(2, alias_args);

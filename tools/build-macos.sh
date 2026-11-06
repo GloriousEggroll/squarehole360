@@ -18,7 +18,7 @@ command -v brew >/dev/null || { echo 'Homebrew is needed: https://brew.sh' >&2; 
 llvm="$(brew --prefix llvm)"
 mkdir -p logs
 # FidelityFX's shader compiler is a Windows program; macOS builds go without
-# FSR 3.1 and frame generation.
+# FSR 3.1.
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER="$llvm/bin/clang" -DCMAKE_CXX_COMPILER="$llvm/bin/clang++" \

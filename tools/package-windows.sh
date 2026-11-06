@@ -82,7 +82,6 @@ under Proton or Wine, for example:
 
 Upscaling (config\gow3.toml):
   present_effect = "fsr3"   # or "dlss" (NVIDIA RTX), "xess", "fsr", "cas", "bilinear"
-  present_frame_generation = true   # FSR 3.1 frame generation
   gow3_low_latency = true           # game at most one frame ahead
   present_anti_lag = true           # AMD Anti-Lag where the driver has it
 DLSS or XeSS fall back to FSR 3.1 when unavailable; the log says which runs.

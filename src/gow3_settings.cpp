@@ -75,9 +75,14 @@ void Gow3LoadSettingsConfig(const std::filesystem::path& path) {
       if (!Gow3SettingAppliesToRenderer(it->first, mode)) it = values.erase(it);
       else ++it;
     }
-    // Both renderers use the original per-texture filtering. Normalize legacy
-    // saved overrides before validation, including settings from older GUIs.
-    values["anisotropic_override"] = "-1";
+    // Without a saved choice the game's own per-texture filtering applies
+    // (the SDK's default would force 4x). Only the offered levels are kept.
+    {
+      const auto found = values.find("anisotropic_override");
+      if (found == values.end() || (found->second != "-1" && found->second != "2" && found->second != "3" &&
+                                    found->second != "4" && found->second != "5"))
+        values["anisotropic_override"] = "-1";
+    }
     if (mode == Gow3RendererMode::Native) {
       const std::pair<const char*, const char*> required[] = {
           {"resolution_scale", "1"}, {"draw_resolution_scale_x", "1"},
@@ -98,7 +103,4 @@ void Gow3LoadSettingsConfig(const std::filesystem::path& path) {
     REXLOG_WARN("AMD Anti-Lag is unavailable with the Xenia renderer; turning it off");
     rex::cvar::SetFlagByName("present_anti_lag", "false");
   }
-  // CLI and environment overrides must not restore forced filtering either.
-  if (!rex::cvar::SetFlagByName("anisotropic_override", "-1"))
-    throw std::runtime_error("Unable to select original game texture filtering");
 }

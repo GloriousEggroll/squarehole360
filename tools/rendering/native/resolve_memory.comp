@@ -16,6 +16,8 @@ layout(set=0,binding=0,std430) buffer Memory {uint words[];} memory;
 #endif
 #if STORE
 layout(set=0,binding=1) uniform texture2D input_image;
+// The full-resolution EDRAM copy, written by the same store (see below).
+layout(set=0,binding=3,std430) buffer Copy {uint words[];} copy_memory;
 layout(set=0,binding=2) uniform utexture2D stencil_image;
 #elif !FRAGMENT
 #if LOAD_COMPONENTS == 1
@@ -30,6 +32,16 @@ layout(push_constant) uniform Parameters {
     uvec2 extent;uvec2 origin;uvec2 packed_offset;uint pitch;uint log_bytes;
     uint tiled;uint endian;uint format;uint signs;uint offset;uint word_count;ivec2 stencil_offset;
 } pc;
+// Full-resolution EDRAM (internal resolution scaling): the memory binding is
+// then a copy holding scale x scale samples of every 32-bit word, sample k of
+// word w at w * scale * scale + k (format bits 27-29: log2 of that scale, 0
+// for packed guest memory). shadow_k selects the sample being accessed.
+uint shadow_samples=1u,shadow_k=0u;
+#define WORD(at) memory.words[((at)>>2)*shadow_samples+shadow_k]
+// Stores write packed EDRAM (binding 0) and, with a copy scale, every sample
+// into the copy (binding 3).
+bool store_copy=false;
+#define COPY_WORD(at) copy_memory.words[((at)>>2)*shadow_samples+shadow_k]
 uint address(uvec2 p) {
     p+=pc.packed_offset;
     if(pc.tiled>=2) {
@@ -50,31 +62,32 @@ uint order(uint v) {
     if(pc.endian==2||pc.endian==3)v=(v<<16)|(v>>16);
     return v;
 }
-uint read32(uint a) {return order(memory.words[a>>2]);}
+uint read32(uint a) {return order(WORD(a));}
 uint read8(uint a) {
     const uint swaps[4]=uint[4](0,1,3,2);
     uint at=a^swaps[pc.endian];
-    return (memory.words[at>>2]>>((at&3)*8))&255;
+    return (WORD(at)>>((at&3)*8))&255;
 }
 uint read16(uint a) {
     const uint swaps[4]=uint[4](0,1,3,2);
     uint lo=a^swaps[pc.endian],hi=(a+1)^swaps[pc.endian];
-    return ((memory.words[lo>>2]>>((lo&3)*8))&255)|(((memory.words[hi>>2]>>((hi&3)*8))&255)<<8);
+    return ((WORD(lo)>>((lo&3)*8))&255)|(((WORD(hi)>>((hi&3)*8))&255)<<8);
 }
 #if STORE
-void write32(uint a,uint v) {memory.words[a>>2]=order(v);}
+void write32(uint a,uint v) {if(store_copy)COPY_WORD(a)=order(v);else WORD(a)=order(v);}
 void write8(uint a,uint v) {
     const uint swaps[4]=uint[4](0,1,3,2);
     uint at=a^swaps[pc.endian],shift=(at&3)*8;
     // Adjacent texels share a dword. Each invocation may only replace its byte.
-    atomicAnd(memory.words[at>>2],~(255u<<shift));
-    atomicOr(memory.words[at>>2],(v&255u)<<shift);
+    if(store_copy) {atomicAnd(COPY_WORD(at),~(255u<<shift));atomicOr(COPY_WORD(at),(v&255u)<<shift);}
+    else {atomicAnd(WORD(at),~(255u<<shift));atomicOr(WORD(at),(v&255u)<<shift);}
 }
 void write16(uint a,uint v) {
     const uint swaps[4]=uint[4](0,1,3,2);
     for(uint i=0;i<2;++i) {
         uint at=(a+i)^swaps[pc.endian],shift=(at&3)*8;
-        atomicAnd(memory.words[at>>2],~(255u<<shift));atomicOr(memory.words[at>>2],((v>>(i*8))&255)<<shift);
+        if(store_copy) {atomicAnd(COPY_WORD(at),~(255u<<shift));atomicOr(COPY_WORD(at),((v>>(i*8))&255)<<shift);}
+        else {atomicAnd(WORD(at),~(255u<<shift));atomicOr(WORD(at),((v>>(i*8))&255)<<shift);}
     }
 }
 #endif
@@ -125,22 +138,9 @@ float decode16(uint v,uint channel) {
     if(((pc.signs>>(channel*2))&3)==1)return max(float(int(v<<16)>>16)/32767.0,-1.0);
     return float(v)/65535.0;
 }
-void main() {
-#if FRAGMENT
-    const uvec2 invocation=uvec2(gl_FragCoord.xy);
-    if(any(greaterThanEqual(invocation,pc.extent)))discard;
-#else
-    const uvec2 invocation=gl_GlobalInvocationID.xy;
-    if(any(greaterThanEqual(invocation,pc.extent)))return;
-#endif
-    uvec2 p=invocation+pc.origin;uint a=address(p),f=pc.format&0x7fffffffu;
-#if FRAGMENT
-    if((a+(1u<<pc.log_bytes)+3)/4>pc.word_count)discard;
-#else
-    if((a+(1u<<pc.log_bytes)+3)/4>pc.word_count)return;
-#endif
 #if STORE
-    vec4 c=texelFetch(input_image,ivec2(p),0);uvec4 u;
+void store_texel(uint a,uint f,ivec2 texel,ivec2 stencil_texel) {
+    vec4 c=texelFetch(input_image,texel,0);uvec4 u;
     if(f==2)write8(a,encode8(c.x,0));
     else if(f==6) {u=uvec4(encode8(c.x,0),encode8(c.y,1),encode8(c.z,2),encode8(c.w,3));write32(a,u.x|(u.y<<8)|(u.z<<16)|(u.w<<24));}
     else if(f==7) {
@@ -150,7 +150,7 @@ void main() {
         write32(a,u.x|(u.y<<10)|(u.z<<20)|(u.w<<30));
     }
     else if(f==22||f==23) {
-        uint stencil=(pc.format&0x80000000u)!=0?texelFetch(stencil_image,ivec2(p)+pc.stencil_offset,0).x:0;
+        uint stencil=(pc.format&0x80000000u)!=0?texelFetch(stencil_image,stencil_texel,0).x:0;
         uint depth=f==22?uint(roundEven(clamp(c.x,0.0,1.0)*16777215.0)):depth24(c.x);
         write32(a,(depth<<8)|(stencil&255u));
     }
@@ -164,7 +164,9 @@ void main() {
     }
     else if(f==65||f==66) {write32(a,fixed16(c.x)|(fixed16(c.y)<<16));if(f==66)write32(a+4,fixed16(c.z)|(fixed16(c.w)<<16));}
     else {write32(a,floatBitsToUint(c.x));if(f>=37)write32(a+4,floatBitsToUint(c.y));if(f==38){write32(a+8,floatBitsToUint(c.z));write32(a+12,floatBitsToUint(c.w));}}
+}
 #else
+vec4 load_texel(uint a,uint f) {
     vec4 c=vec4(0,0,0,1);uint u;
     if(f==2)u=read8(a);else if(f==10||f==24||f==30)u=read16(a);else u=read32(a);
     if(f==2)c.x=decode8(u,0);
@@ -181,10 +183,53 @@ void main() {
     else if(f==64)c=vec4(unpack7e3(u&1023),unpack7e3((u>>10)&1023),unpack7e3((u>>20)&1023),float(u>>30)/3.0);
     else if(f==65||f==66) {c.xy=vec2(unfixed16(u&65535),unfixed16(u>>16));if(f==66){u=read32(a+4);c.zw=vec2(unfixed16(u&65535),unfixed16(u>>16));}}
     else {c.x=uintBitsToFloat(u);if(f>=37)c.y=uintBitsToFloat(read32(a+4));if(f==38){c.z=uintBitsToFloat(read32(a+8));c.w=uintBitsToFloat(read32(a+12));}}
+    return c;
+}
+#endif
+void main() {
 #if FRAGMENT
-    result=c;
+    const uvec2 invocation=uvec2(gl_FragCoord.xy);
+    if(any(greaterThanEqual(invocation,pc.extent)))discard;
 #else
-    imageStore(output_image,ivec2(p),c);
+    const uvec2 invocation=gl_GlobalInvocationID.xy;
+    if(any(greaterThanEqual(invocation,pc.extent)))return;
+#endif
+    // format bits 24-26: log2 of the store input's scale (internal
+    // resolution scaling: host pixels per guest pixel); bits 27-29: log2 of
+    // the full-resolution copy's scale (above); bit 31: stencil.
+    const uint shadow_log=(pc.format>>27)&7u,shadow_scale=1u<<shadow_log;
+    const uint f=pc.format&0x00ffffffu;
+    const int input_scale=1<<int((pc.format>>24)&7u);
+    shadow_samples=shadow_scale*shadow_scale;
+#if STORE
+    // Stores run per guest pixel: packed EDRAM gets its first host sample,
+    // the copy every host sample of it (a guest-size input repeats its one
+    // sample).
+    uvec2 p=invocation+pc.origin;uint a=address(p);
+    if((a+(1u<<pc.log_bytes)+3)/4>pc.word_count)return;
+    const int s=int(shadow_scale);
+    if(shadow_log!=0) {
+        store_copy=true;
+        for(uint k=0;k<shadow_samples;++k) {
+            shadow_k=k;
+            const ivec2 sub=ivec2(int(k)%s,int(k)/s);
+            store_texel(a,f,(ivec2(p)*s+sub)*input_scale/s,((ivec2(p)+pc.stencil_offset)*s+sub)*input_scale/s);
+        }
+        store_copy=false;shadow_samples=1u;shadow_k=0u;
+    }
+    store_texel(a,f,ivec2(p)*input_scale,(ivec2(p)+pc.stencil_offset)*input_scale);
+#else
+    // Loads from the copy run per host pixel (extent in host pixels, origin
+    // in guest pixels).
+    const uvec2 host=invocation+pc.origin*shadow_scale;
+    uvec2 p=host>>shadow_log;uint a=address(p);
+    shadow_k=(host.y&(shadow_scale-1u))*shadow_scale+(host.x&(shadow_scale-1u));
+#if FRAGMENT
+    if((a+(1u<<pc.log_bytes)+3)/4>pc.word_count)discard;
+    result=load_texel(a,f);
+#else
+    if((a+(1u<<pc.log_bytes)+3)/4>pc.word_count)return;
+    imageStore(output_image,ivec2(host),load_texel(a,f));
 #endif
 #endif
 }

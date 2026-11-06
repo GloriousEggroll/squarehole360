@@ -716,7 +716,7 @@ def main():
     parser.add_argument("--capture-reference-history", action="store_true", help="Capture paired original GPU history; requires --reference-only and --capture-api")
     parser.add_argument("--draw-batch-size", type=int, default=64, help="Native draw batch size, 1-64; one is the same-binary baseline")
     parser.add_argument("--native-query-capacity", type=int, choices=range(1, 129), metavar="1-128", help="Override the native logical query limit for a same-binary pressure comparison")
-    parser.add_argument("--native-submission-capacity", type=int, choices=(64, 128), help="Override physical GPU slots; two async batches share this capacity")
+    parser.add_argument("--native-submission-capacity", type=int, choices=(64, 128, 256), help="Override physical GPU slots; two async batches share this capacity")
     parser.add_argument("--native-snapshot-workers", type=int, default=None, help="Override exact snapshot comparison helpers; runtime bounds allocation by hardware threads minus 2")
     parser.add_argument("--native-direct-resource-refs", action=argparse.BooleanOptionalAction, default=None,
                         help="Use exact direct canonical-entry handoff for typed producer bindings")

@@ -111,6 +111,8 @@ SETTINGS = [
  S('window_width', 'Window width', 1280, 'Display', 'Logical pixels; used only in windowed mode.', minimum=640, maximum=8192),
  S('window_height', 'Window height', 720, 'Display', 'Logical pixels; used only in windowed mode.', minimum=360, maximum=8192),
  S('gow3_aspect_ratio', 'Aspect ratio', 'auto', 'Display', 'The shape of the picture the game renders. Automatic follows the window when the game starts. Wider than 16:9 shows more at the sides (ultrawide); menus and HUD stay in the middle 16:9 area. Narrower shows more above and below. Takes effect when the game restarts.', (('auto','Automatic (window)'),('16:9','16:9'),('16:10','16:10'),('21:9','21:9 (ultrawide)'),('32:9','32:9 (super ultrawide)'))),
+ S('gow3_render_height', 'Internal resolution', 1080, 'Display', 'The resolution the game renders at before upscaling to the screen; the width follows the aspect ratio. Higher is sharper and slower. 1440p draws the game\u2019s 720p layout at twice the size. Takes effect when the game restarts.', ((720,'720p (console)'),(1080,'1080p'),(1440,'1440p')), renderer='native'),
+ S('gow3_hud_size', 'HUD size', 0, 'Display', 'Size of the in-game HUD (weapon, ammo, prompts, subtitles) compared with the Xbox 360\u2019s. Automatic sizes it for the internal resolution, as the game does at 1080p: 100% at 720p, 67% at 1080p, 50% at 1440p. Menus are not affected.', ((0,'Automatic'),(150,'150%'),(125,'125%'),(100,'100% (console)'),(83,'83%'),(67,'67%'),(50,'50%'))),
  S('gow3_fov', 'Field of view', 65, 'Display', 'Degrees, horizontal at 16:9; the game uses 65. Scales every camera, including cutscenes, and aiming still zooms in from it.', minimum=40, maximum=120),
  S('present_letterbox', 'Preserve aspect ratio', True, 'Display', 'Add bars as needed instead of stretching the image.'),
  S('vsync', 'Vertical sync', False, 'Display', 'Synchronize presentation to the display. Off allows tearing if the desktop permits it.'),
@@ -119,7 +121,6 @@ SETTINGS = [
  S('gow3_low_latency', 'Low latency', False, 'Display', 'Keeps the game at most one frame ahead of the renderer and applies the frame-rate limit before input is read. Lowers input lag; may cost a little throughput.'),
  S('present_anti_lag', 'AMD Anti-Lag', False, 'Display', 'Uses the driver\u2019s anti-lag (VK_AMD_anti_lag) when available: AMD on Windows, or Mesa on Linux (turning it on there takes effect after a restart). No effect elsewhere.', renderer='native'),
  S('present_effect', 'Upscaling', 'fsr', 'Image', 'FSR 1 scales the final image to the window. FSR 3.1, DLSS and XeSS (native renderer) also use depth and motion from earlier frames for a sharper, steadier image; menus use FSR 1. DLSS or XeSS fall back to FSR 3.1 where unavailable.', (('fsr','AMD FSR 1 (spatial)'),('fsr3','AMD FSR 3.1 (temporal)'),('dlss','NVIDIA DLSS (temporal, NVIDIA RTX)'),('xess','Intel XeSS (temporal, Windows)'),('cas','AMD CAS sharpening'),('bilinear','Bilinear')), renderer='shared'),
- S('present_frame_generation', 'Frame generation', False, 'Image', 'FSR 3.1 shows a generated frame between game frames: smoother motion at the cost of some input latency. Needs FSR 3.1 upscaling; best above 60 FPS.', renderer='shared'),
  S('present_fsr_sharpness_reduction', 'FSR softness', 0.2, 'Image', '0 is the sharpest; larger values reduce sharpening.', minimum=0, maximum=2, renderer='shared'),
  S('present_fsr3_ghosting_reduction', 'FSR 3.1 ghosting reduction', 1.0, 'Image', 'Shortens FSR 3.1\u2019s history. 0 keeps the sharpest still image; higher values reduce smearing on grass, foliage and animated characters but add shimmer.', minimum=0, maximum=1, renderer='shared'),
  S('present_fsr_max_upsampling_passes', 'FSR scaling passes', 2, 'Image', 'Two passes cover 720p to 4K. Each pass scales by at most 2×. FSR 3.1 always uses one.', minimum=1, maximum=4, renderer='shared'),
@@ -127,6 +128,8 @@ SETTINGS = [
  S('resolution_scale', 'Internal resolution', 1, 'Image', '1× renders at the game’s original resolution; 2× is about 1440p and 3× about 4K.', ((1,'1× (original resolution)'),(2,'2× (about 1440p)'),(3,'3× (about 4K)')), renderer='xenia'),
  S('swap_post_effect', 'Post-process anti-aliasing', 'none', 'Image', 'FXAA smooths edges before scaling; it may soften the picture.', (('none','None'),('fxaa','FXAA'),('fxaa_extreme','FXAA (strong)')), renderer='xenia'),
  S('present_dither', 'Output dithering', False, 'Image', 'Reduce visible color banding in gradients.'),
+ S('gow3_motion_blur', 'Motion blur', False, 'Image', 'The game’s blur on fast camera and object motion (off by default). Off keeps the picture sharp while turning; the rest of the post-processing is unchanged. Native renderer. Applies while playing.', renderer='native'),
+ S('anisotropic_override', 'Anisotropic filtering', -1, 'Image', 'Sharper textures on floors and walls seen at an angle. Game default keeps each texture’s original filtering; 2x to 16x applies to every mipmapped, smoothly filtered texture. Applies while playing.', ((-1,'Game default'),(2,'2x'),(3,'4x'),(4,'8x'),(5,'16x'))),
  S('native_2x_msaa', 'Native 2× MSAA support', True, 'Image', 'Honor game-requested 2× multisampling when supported.', renderer='xenia'),
  S('present_hdr', 'HDR output', False, 'HDR', 'Use native HDR10 output when the selected display has HDR enabled. The game checks again at launch and uses SDR if unavailable.'),
  S('present_hdr_paper_white', 'Paper white (nits)', 203.0, 'HDR', 'Brightness of ordinary scene content before highlight expansion.', minimum=80, maximum=500),
@@ -153,17 +156,24 @@ SETTINGS = [
  S('vulkan_batch_occlusion_queries', 'Group visibility queries', True, 'Advanced', 'Send visibility queries together. Requires asynchronous visibility queries.', renderer='xenia'),
  S('readback_memexport', 'Copy shader output to CPU memory', False, 'Advanced', 'Copy shader-written data to CPU memory when needed by the game.', renderer='xenia'),
  S('readback_memexport_fast', 'Buffered shader readbacks', True, 'Advanced', 'When CPU copies are enabled, reuse a completed previous result when available. Otherwise waits for the GPU; bursts can cause long freezes.', renderer='xenia'),
+ S('gow3_rt_ao', 'Ray-traced ambient occlusion', False, 'Ray tracing', 'Soft shadows where surfaces meet and objects touch, traced against the scene with the GPU’s ray tracing. Native renderer; needs a GPU with ray tracing (AMD RX 6000 or NVIDIA RTX and newer). Costs about 2–3 ms per frame at 1080p.', renderer='native'),
+ S('gow3_rt_ao_strength', 'Strength', 0.6, 'Ray tracing', 'How dark occluded areas become.', minimum=0, maximum=1, renderer='native'),
+ S('gow3_rt_ao_radius', 'Reach (cm)', 150.0, 'Ray tracing', 'How far away surfaces still occlude. Larger values darken more of the scene and cost more.', minimum=25, maximum=500, renderer='native'),
+ S('gow3_rt_ao_rays', 'Rays per pixel', 2, 'Ray tracing', 'Traced at half resolution and averaged over frames. More rays are less noisy and cost more.', minimum=1, maximum=8, renderer='native'),
+ S('gow3_rt_shadows', 'Ray-traced shadows', False, 'Ray tracing', 'Traces the shadows of the game’s dynamic shadow-casting light (the sun outdoors, a lamp indoors) against the scene geometry instead of using only its shadow maps: sharper, steadier shadows that every object casts. Surfaces lit only by baked lighting are unchanged. Native renderer; needs a GPU with ray tracing.', renderer='native'),
+ S('gow3_rt_shadow_softness', 'Shadow softness', 0.25, 'Ray tracing', '0 gives hard shadows; higher values soften their edges like a larger light.', minimum=0, maximum=1, renderer='native'),
  S('gow3_60fps', 'Unlock original 30 FPS game cap', True, 'Advanced', 'Required for limits above 30 FPS. The frame-rate limit setting supplies the actual ceiling.'),
  S('gow3_movie_pacing', 'Smooth prerecorded movie timing', True, 'Advanced', 'Poll movie timing every millisecond instead of every 25 ms. Keeps the video’s original frame rate.'),
  S('gow3_language', 'Language', 'english', 'Game', 'Text and speech language. Takes effect when the game restarts. Lists the languages on your game disc; other regions’ discs carry others.', (('english','English'),('french','French'),('german','German'),('italian','Italian'),('spanish','Spanish (Spain)'),('spanish_latin_america','Spanish (Latin America)'),('japanese','Japanese'),('korean','Korean'),('chinese','Chinese'),('polish','Polish'),('portuguese','Portuguese (Brazil)'),('russian','Russian'),('czech','Czech'),('hungarian','Hungarian'))),
- S('user_gamertag', 'Gamertag', 'User', 'Online', 'Your name in multiplayer: 1–15 letters, digits and single spaces, starting with a letter. Each installation also has its own player ID in user/identity.toml.'),
- S('network_enabled', 'Networking', True, 'Online', 'Off disables System Link and internet play; the game then reports no network cable.'),
- S('network_lobby_server', 'Lobby server', '', 'Online', 'Internet play: address of a squarehole-lobby server (host or host:port, default port 36360). Leave empty to play System Link on your local network only.'),
- S('network_lobby_room', 'Room', 'public', 'Online', 'Only players in the same room on the lobby server see each other’s System Link parties.'),
- S('network_lobby_password', 'Room password', '', 'Online', 'Optional. The first player to enter a room sets its password; others must use the same one.'),
- S('network_frame_rate_lock', 'Multiplayer frame-rate lock', 60, 'Online', 'Frame-rate limit while other players are connected, so every machine runs the game at the same speed. 0 keeps your normal limit.', minimum=0, maximum=240),
- S('network_address', 'Network address', '', 'Online', 'Advanced. The IPv4 address other System Link players reach you at; empty detects it.'),
- S('network_broadcast_peers', 'System Link peers', '', 'Online', 'Advanced. Comma-separated IPv4 addresses that receive System Link broadcasts directly, for networks that block broadcasts or several copies on one PC.'),
+ S('user_gamertag', 'Gamertag', 'User', 'Multiplayer', 'Your name in multiplayer: 1–15 letters, digits and single spaces, starting with a letter. Each installation also has its own player ID in user/identity.toml.'),
+ S('network_enabled', 'Networking', True, 'Multiplayer', 'Off disables System Link and internet play; the game then reports no network cable.'),
+ S('network_system_link', 'System-Link', 'lan', 'Multiplayer', 'LAN: whoever creates a party runs the server for it on their PC, and other games on the local network find it by themselves. Dedicated Server: everyone connects to a squarehole-lobby server, for play over the internet; if it does not answer, the game falls back to LAN. Takes effect when the game restarts.', (('lan','LAN'),('dedicated','Dedicated Server'))),
+ S('network_lobby_server', 'Dedicated server', '', 'Multiplayer', 'The IP address or host name of the dedicated server, optionally followed by :port (default 36360).'),
+ S('network_lobby_room', 'Room', 'public', 'Multiplayer', 'Only players in the same room on the lobby server see each other’s System Link parties.'),
+ S('network_lobby_password', 'Room password', '', 'Multiplayer', 'Optional. The first player to enter a room sets its password; others must use the same one.'),
+ S('network_frame_rate_lock', 'Multiplayer frame-rate lock', 60, 'Multiplayer', 'Frame-rate limit while other players are connected, so every machine runs the game at the same speed. 0 keeps your normal limit.', minimum=0, maximum=240),
+ S('network_address', 'Network address', '', 'Multiplayer', 'Advanced. The IPv4 address other System Link players reach you at; empty detects it.'),
+ S('network_broadcast_peers', 'System Link peers', '', 'Multiplayer', 'Advanced. Comma-separated IPv4 addresses that receive System Link broadcasts directly, for networks that block broadcasts or several copies on one PC.'),
  S('mnk_mode', 'Mouse and keyboard controls', True, 'Input', 'Play with the mouse and keyboard; a controller keeps working alongside them. Keys act as controller buttons.'),
  S('mnk_mouse_mode', 'Mouse aiming', 'look', 'Input', 'Mouse look turns the camera directly with the mouse. Right stick moves the stick instead, with the game’s stick aiming feel, for example for a gyro mapped to the mouse.', (('look','Mouse look'),('stick','As right stick'))),
  S('mnk_sensitivity', 'Mouse sensitivity', 1.0, 'Input', 'Multiplies the game’s mouse sensitivity, or the stick speed when the mouse acts as the right stick.', minimum=0.01, maximum=10),
@@ -275,8 +285,9 @@ LIVE_SETTINGS = {
     'fullscreen', 'window_width', 'window_height', 'gow3_frame_limit_mode', 'framerate_limit',
     'present_effect', 'present_fsr_sharpness_reduction', 'present_fsr3_ghosting_reduction',
     'present_fsr_max_upsampling_passes', 'present_cas_additional_sharpness',
-    'present_dither', 'swap_post_effect', 'present_frame_generation',
-    'gow3_low_latency', 'present_anti_lag', 'gow3_fov',
+    'present_dither', 'swap_post_effect',
+    'gow3_low_latency', 'present_anti_lag', 'gow3_fov', 'gow3_hud_size',
+    'anisotropic_override', 'gow3_motion_blur', 'gow3_rt_ao', 'gow3_rt_ao_strength', 'gow3_rt_ao_radius', 'gow3_rt_ao_rays', 'gow3_rt_shadows', 'gow3_rt_shadow_softness',
 } | {s.key for s in SETTINGS if s.section in ('Input', 'Controls') or s.section.startswith('Controller ')}
 
 def game_running():
@@ -354,9 +365,17 @@ def listed(setting):
     return setting.key != 'gow3_renderer' and setting.renderer != 'xenia'
 
 
+# Shown only when System-Link is set to Dedicated Server.
+DEDICATED_SETTINGS = ('network_lobby_server', 'network_lobby_room', 'network_lobby_password')
+
+
+def shown(setting, values):
+    return setting.key not in DEDICATED_SETTINGS or values.get('network_system_link') == 'dedicated'
+
+
 def visible_settings(values):
     mode = renderer_mode(values.get('gow3_renderer', 'native'))
-    return [s for s in SETTINGS if applies(s, mode) and listed(s)]
+    return [s for s in SETTINGS if applies(s, mode) and listed(s) and shown(s, values)]
 
 
 # Key names the keyboard/mouse driver accepts (vendor/rexglue-sdk/src/ui/keybinds.cpp),
@@ -412,6 +431,9 @@ def validate_setting(s, value):
 
 def widget_value(setting, values):
     value = values.get(setting.key, setting.default)
+    # Configs from before the System-Link setting: a server meant that server.
+    if setting.key == 'network_system_link' and setting.key not in values and values.get('network_lobby_server'):
+        return 'dedicated'
     if setting.key == 'gow3_renderer':
         return renderer_mode(value)
     try:
@@ -458,16 +480,22 @@ def load(path=CONFIG):
         loaded = tomllib.loads(path.read_text())
         migrate_controller_settings(loaded)
         values.update(loaded)
-    # Filtering is owned by the game. Legacy overrides are not editable and
-    # must not survive a settings round-trip as an expert/unknown option.
-    values['anisotropic_override'] = -1
+    # Older versions saved other override levels; keep only the offered ones.
+    if values.get('anisotropic_override') not in (-1, 2, 3, 4, 5):
+        values['anisotropic_override'] = -1
+    # Hand-edited heights: the nearest offered one.
+    if values.get('gow3_render_height') not in (720, 1080, 1440):
+        try:
+            height = int(values['gow3_render_height'])
+        except (TypeError, ValueError):
+            height = 1080
+        values['gow3_render_height'] = min((720, 1080, 1440), key=lambda h: abs(h - height))
     values['gow3_renderer'] = renderer_mode(values['gow3_renderer'])
     validate(values)
     return values
 
 def save(values, path=CONFIG, expected=None):
     values = dict(values)
-    values['anisotropic_override'] = -1
     values['gow3_renderer'] = renderer_mode(values['gow3_renderer'])
     validate(values)
     if fingerprint(path) != expected:

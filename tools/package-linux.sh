@@ -100,9 +100,9 @@ squarehole360 - Gears of War 3, Linux build (x86-64, Vulkan)
 3. Settings: tools/settings.sh, config/gow3.toml, or F4 / L3+R3 in game.
 
 Multiplayer (System Link and internet play): see docs/multiplayer.md.
-  - Set your gamertag in tools/settings.sh -> Online.
-  - Internet play: set "Lobby server" to the server's address and use the same
-    "Room" as the other players.
+  - Set your gamertag in tools/settings.sh -> Multiplayer.
+  - Internet play: set "System-Link" to "Dedicated Server", enter the server's
+    address and use the same "Room" as the other players.
   - In game: main menu -> Back (Tab) -> Party Options -> System Link.
   A player ID is created in user/identity.toml on first start; never copy it
   between PCs. build/bin/squarehole-lobby is the lobby server (static binary).

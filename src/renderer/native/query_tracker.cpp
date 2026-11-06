@@ -1,4 +1,5 @@
 #include "query_tracker.h"
+#include "render_scale.h"
 #include <array>
 #include <algorithm>
 #include <limits>
@@ -140,6 +141,10 @@ void NativeQueryTracker::CompletePrefix(uint32_t count) {
             throw std::runtime_error("Native query unavailable after submission fence");
     };
     read(pending_head_,first,values.data());read(0,count-first,values.data()+first);
+    // Internal resolution scaling draws each guest pixel as scale x scale
+    // samples; report guest samples (a partly covered pixel still counts).
+    if(const uint64_t samples=uint64_t(NativeRenderScale())*NativeRenderScale();samples>1)
+        for(uint32_t i=0;i<count;++i)values[i]=(values[i]+samples-1)/samples;
     // Validate every owner and subtotal in a copy before committing anything.
     // Slots from multiple closed queries and the current query share this fence.
     auto completed=records_;

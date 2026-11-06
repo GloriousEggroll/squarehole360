@@ -81,8 +81,11 @@ class NativePipelineRecipeCache {
   public:
     // Hardware render target recordings may use the full bounds; the default
     // Limits keep the FSI recording size.
-    static constexpr size_t kMaxRecipes = 8192, kMaxSources = 4096,
-                            kMaxSourceBytes = 256u * 1024 * 1024;
+    // A full playthrough reaches about 5k recipes over 4k sources in the
+    // first acts alone; once full, nothing new is recorded and every later
+    // session builds those pipelines during play.
+    static constexpr size_t kMaxRecipes = 32768, kMaxSources = 32768,
+                            kMaxSourceBytes = 1024u * 1024 * 1024;
     static constexpr size_t kMaxPending = 128, kMaxPendingBytes = 16u * 1024 * 1024;
     struct Limits {
         size_t recipes = 2048, sources = 1024, source_bytes = 64u * 1024 * 1024;
@@ -100,6 +103,12 @@ class NativePipelineRecipeCache {
     void Observe(ObservedNativePipeline observation) noexcept;
     // Startup worker only; malformed/incompatible data is a cache miss.
     std::vector<ObservedNativePipeline> Load() const noexcept;
+    // Startup, before constructing the cache for `version` under `parent`.
+    // Recipes name guest shaders and pipeline state, not compiled code, so a
+    // compiler update keeps them: those recorded under other versions are
+    // merged into `parent/version` once each. Returns the recipes added.
+    static size_t AdoptOlderVersions(const std::filesystem::path &parent, const std::string &version,
+                                     Limits limits) noexcept;
     void StopAccepting() noexcept;
     void Drain(); // Startup/tests/shutdown only, never a gameplay boundary.
     Statistics statistics() const;

@@ -10,7 +10,17 @@
 //             over history: high where a surface moved by itself (vertex
 //             animation such as grass in the wind, which has no motion
 //             vectors) and under the HUD; green: HUD coverage, where the HUD
-//             changed the frame after the scene was finished
+//             changed the frame after the scene was finished; blue: HUD
+//             transmittance, how much of the scene shows through the HUD
+//             (0 where the HUD is opaque or not yet known); alpha: the game's
+//             velocity pass drew here (0.5: as still, 1: moving, 0.25: its
+//             vector was replaced as implausible), for debugging
+//
+// The HUD is mostly fixed on screen while the scene under it moves, so where
+// both the frame before the HUD and the final frame changed since the last
+// frame, final = before * T + hud gives T = d(final) / d(before). Presenters
+// then put only the HUD's own contribution over a generated or upscaled frame
+// instead of the real frame's scene under translucent panels.
 #extension GL_EXT_samplerless_texture_functions : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
@@ -21,19 +31,26 @@ layout(binding = 2) uniform texture2D hud_before;       // scene before the HUD
 layout(binding = 3) uniform texture2D hud_after;        // final frame
 layout(binding = 4, r32f) uniform writeonly image2D depth_out;
 layout(binding = 5, rg16f) uniform writeonly image2D motion_out;
-layout(binding = 6, rg8) uniform writeonly image2D reactive_out;
+layout(binding = 6, rgba8) uniform writeonly image2D reactive_out;
 // UE3 velocity buffer at half resolution: clampLength(ndc motion * scale)
 // * 0.5 + 0.5, current minus previous; 0 where nothing was drawn.
 layout(binding = 7) uniform texture2D object_velocity;
 // The previous frame's depth output.
 layout(binding = 8) uniform texture2D previous_depth;
+// HUD transmittance estimate: rgb the frame before (9, 11) and after (10, 12)
+// the HUD, alpha the transmittance (before) and its confidence (after).
+layout(binding = 9) uniform texture2D previous_before_state;
+layout(binding = 10) uniform texture2D previous_after_state;
+layout(binding = 11, rgba16f) uniform writeonly image2D before_state_out;
+layout(binding = 12, rgba16f) uniform writeonly image2D after_state_out;
 
 layout(push_constant) uniform Constants {
   // Rows of the current-NDC -> previous-clip matrix (row-vector convention).
   vec4 reprojection[4];
   uvec2 size;
   uint flags;  // 1: late depth, 2: HUD snapshot, 4: world depth, 8: velocity,
-              // 16: velocity in blue/green (resolve swapped red and blue)
+              // 16: velocity in blue/green (resolve swapped red and blue),
+              // 32: previous depth, 64: previous HUD state
   float min_depth;  // Depth of a point at infinity; sky clears below it.
   vec2 velocity_scale;  // Screen pixels per encoded unit (x right, y down).
   vec2 jitter;          // This frame's jitter in pixels; the game's velocity includes it.
@@ -42,6 +59,23 @@ layout(push_constant) uniform Constants {
 } pc;
 
 float ViewDepth(float device) { return pc.depth_scale / max(device - pc.min_depth, 1e-7); }
+
+// Whether motion (previous - current, in pixels) from this pixel lands on a
+// surface of about the same view depth in the previous frame's depth.
+bool Plausible(vec2 motion, vec2 uv, float view) {
+  const ivec2 q = ivec2(floor(uv * vec2(pc.size) + motion));
+  if (any(lessThan(q, ivec2(1))) || any(greaterThanEqual(q, ivec2(pc.size) - 1))) return true;
+  float nearest = 1e30, farthest = 0.0;
+  for (int y = -1; y <= 1; ++y) {
+    for (int x = -1; x <= 1; ++x) {
+      const float v = ViewDepth(texelFetch(previous_depth, q + ivec2(x, y), 0).r);
+      nearest = min(nearest, v);
+      farthest = max(farthest, v);
+    }
+  }
+  const float tolerance = 0.08 * view + 5.0;  // moving objects change depth a little
+  return view >= nearest - tolerance && view <= farthest + tolerance;
+}
 
 void main() {
   const uvec2 pixel = gl_GlobalInvocationID.xy;
@@ -68,6 +102,7 @@ void main() {
     if (depth > pc.min_depth) expected_previous_depth = 1.0 - clip.z / clip.w;
   }
   bool object_motion = false;
+  bool saturated = false, unreliable = false;
   if ((pc.flags & 8u) != 0u) {
     const vec4 texel = texelFetch(object_velocity, p / 2, 0);
     const vec2 encoded = (pc.flags & 16u) != 0u ? texel.bg : texel.rg;
@@ -82,7 +117,45 @@ void main() {
       } else {
         // Current (jittered) minus previous, in pixels; motion vectors are
         // previous minus the unjittered current position.
-        const vec2 velocity = steps * (2.0 / 255.0) * pc.velocity_scale;
+        vec2 velocity = steps * (2.0 / 255.0) * pc.velocity_scale;
+        // Pinned at the encoding's limit: motion longer than the buffer holds.
+        // Characters' heads (separate meshes, in gameplay and cutscene
+        // close-ups) also carry a stale previous position, pinned or not:
+        // the upscaler smeared them along it. A vector is
+        // kept only where it points at a surface of about the same depth in
+        // the previous frame; otherwise the nearest neighbouring vector of
+        // the object that does (the neck or body under a head) is taken.
+        saturated = any(greaterThanEqual(abs(steps), vec2(126.0)));
+        const bool check = (pc.flags & 32u) != 0u && depth > pc.min_depth;
+        const float view = ViewDepth(depth);
+        if (saturated || (check && !Plausible(pc.jitter - velocity, uv, view))) {
+          unreliable = true;
+          const ivec2 half_size = textureSize(object_velocity, 0);
+          bool found = false, fallback = !saturated;
+          vec2 first = velocity;
+          for (int radius = 2; radius <= 32 && !found; radius *= 2) {
+            for (int d = 0; d < 8 && !found; ++d) {
+              const ivec2 dir = ivec2(d == 0 || d == 1 || d == 7 ? 1 : d >= 3 && d <= 5 ? -1 : 0,
+                                      d >= 1 && d <= 3 ? 1 : d >= 5 ? -1 : 0);
+              const ivec2 q = clamp(p / 2 + dir * radius, ivec2(0), half_size - 1);
+              const vec4 t = texelFetch(object_velocity, q, 0);
+              const vec2 e = (pc.flags & 16u) != 0u ? t.bg : t.rg;
+              if (!any(greaterThan(e, vec2(0.5 / 255.0)))) continue;
+              const vec2 s2 = round(e * 255.0) - 128.0;
+              if (any(greaterThanEqual(abs(s2), vec2(126.0)))) continue;
+              const vec2 candidate = s2 * (2.0 / 255.0) * pc.velocity_scale;
+              if (!fallback) {
+                first = candidate;
+                fallback = true;
+              }
+              if (!check || Plausible(pc.jitter - candidate, uv, view)) {
+                velocity = candidate;
+                found = true;
+              }
+            }
+          }
+          if (!found) velocity = first;
+        }
         motion = pc.jitter - velocity;
         object_motion = true;
       }
@@ -113,11 +186,36 @@ void main() {
   }
 
   float hud = 0.0;
+  float transmittance = 0.0, confidence = 0.0;
   if ((pc.flags & 2u) != 0u) {
-    const vec4 before = texelFetch(hud_before, p, 0);
-    const vec4 after = texelFetch(hud_after, p, 0);
-    const vec3 delta = abs(after.rgb - before.rgb);
+    const vec3 before = texelFetch(hud_before, p, 0).rgb;
+    const vec3 after = texelFetch(hud_after, p, 0).rgb;
+    const vec3 delta = abs(after - before);
     hud = max(delta.r, max(delta.g, delta.b)) > (1.0 / 255.0) ? 1.0 : 0.0;
+    if (hud > 0.0 && (pc.flags & 64u) != 0u) {
+      const vec4 previous_before = texelFetch(previous_before_state, p, 0);
+      const vec4 previous_after = texelFetch(previous_after_state, p, 0);
+      transmittance = previous_before.a;
+      confidence = previous_after.a;
+      const vec3 scene_change = before - previous_before.rgb;
+      const float energy = dot(scene_change, scene_change);
+      // A few 8-bit steps per channel, so quantization does not dominate.
+      if (energy > 3.0 * (4.0 / 255.0) * (4.0 / 255.0)) {
+        const float estimate =
+            clamp(dot(after - previous_after.rgb, scene_change) / energy, 0.0, 1.0);
+        // Larger scene changes give better estimates; HUD animation adds noise.
+        const float weight = confidence > 0.0 ? clamp(energy * 8.0, 0.1, 0.5) : 1.0;
+        transmittance = mix(transmittance, estimate, weight);
+        confidence = min(confidence + weight, 1.0);
+      }
+    }
+    imageStore(before_state_out, p, vec4(before, transmittance));
+    imageStore(after_state_out, p, vec4(after, confidence));
   }
-  imageStore(reactive_out, p, vec4(max(max(moved, hud), pc.reactive_floor), hud, 0.0, 0.0));
+  // Unreliable motion: the upscaler takes the current frame there instead of
+  // blending history along a wrong vector (ghost trails on characters).
+  if (unreliable) moved = 1.0;
+  imageStore(reactive_out, p,
+             vec4(max(max(moved, hud), pc.reactive_floor), hud, transmittance,
+                  unreliable ? 0.25 : object_motion ? (all(equal(motion, vec2(0.0))) ? 0.5 : 1.0) : 0.0));
 }

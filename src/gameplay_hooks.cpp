@@ -8,6 +8,7 @@
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/system/xam/network.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/window.h>
 
@@ -35,14 +36,21 @@ REXCVAR_DEFINE_STRING(gow3_aspect_ratio, "auto", "Game",
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_INT32(gow3_render_height, 1080, "Game",
-                    "The game's own render height (width from gow3_aspect_ratio); 720 is the console's, 1080 the maximum")
+                    "Internal render height (width from gow3_aspect_ratio): 720 (the console's), 1080, or 1440 "
+                    "(the game's 720p layout drawn at twice the size by the native renderer)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+int Gow3GuestRenderHeight() {
+  const int height = REXCVAR_GET(gow3_render_height);
+  return height >= 1440 ? 720 : std::clamp(height, 360, 1080);
+}
 
 namespace {
 bool supported_image = false;
 uint8_t* screen_size_base = nullptr;
 bool enabled = false;
 bool movie_pacing_enabled = false;
+bool departed_connection_hook = false;
 bool mouse_look_enabled = false;
 bool projection_hooks = false;
 uint8_t* guest_memory = nullptr;
@@ -75,7 +83,7 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   // presentation parameters.
   // Only the native renderer models EDRAM beyond the console's 10 MB.
   guest_memory = const_cast<uint8_t*>(guest_base);
-  if ((REXCVAR_GET(gow3_render_height) != 720 || REXCVAR_GET(gow3_aspect_ratio) != "16:9") &&
+  if ((Gow3GuestRenderHeight() != 720 || REXCVAR_GET(gow3_aspect_ratio) != "16:9") &&
       ParseGow3RendererMode(REXCVAR_QUERY(std::string, gow3_renderer)) == Gow3RendererMode::Native &&
       ReadInstruction(guest_base, 0x82971CDC) == 0x817E0000) {
     screen_size_base = const_cast<uint8_t*>(guest_base);
@@ -93,8 +101,14 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   Gow3ConfigureInputPrompts(guest_base);
   // bl FPerspectiveMatrix at the projection hook site.
   projection_hooks = ReadInstruction(guest_base, 0x8262CE30) == 0x48004299 &&
-      ReadInstruction(guest_base, 0x826310C8) == 0x7D8802A6;
+      ReadInstruction(guest_base, 0x826310C8) == 0x7D8802A6 &&
+      ReadInstruction(guest_base, 0x8262CF14) == 0x480040B5;
   if (!projection_hooks) REXLOG_WARN("Gears field of view disabled: executable does not match");
+  // lwz r11,276(r31) in UNetConnection::Tick; lwz r3,20420(r3) in the
+  // UIpConnection accessor for the remote address.
+  departed_connection_hook = ReadInstruction(guest_base, 0x828CE13C) == 0x817F0114 &&
+      ReadInstruction(guest_base, 0x829088C8) == 0x80634FC4;
+  if (!departed_connection_hook) REXLOG_WARN("Gears network drop disabled: executable does not match");
   supported_image = ReadInstruction(guest_base, 0x8254E4A8) == 0xC02304C8 &&
                     ReadInstruction(guest_base, 0x82B09E5C) == 0x39600002;
   enabled = supported_image && REXCVAR_GET(gow3_60fps);
@@ -113,6 +127,21 @@ void Gow3SetPresentInterval(rex::ppc::Register& interval) {
   if (Gow3UncapFrameRate()) {
     interval.s64 = 1;
   }
+}
+
+// The title only learns a remote game is gone through its connection timeout.
+// Make that test true for the address the network layer knows has left; the
+// title then closes the connection the normal way.
+void Gow3ExpireDepartedConnection(rex::ppc::Register& connection) {
+  if (!departed_connection_hook) return;
+  auto* object = guest_memory + connection.u32;
+  const uint32_t ip = uint32_t(object[20420]) << 24 | uint32_t(object[20421]) << 16 |
+                      uint32_t(object[20422]) << 8 | object[20423];
+  if (!rex::system::xam::Network::Get().PeerGone(ip)) return;
+  REXLOG_INFO("Network: closing the connection to {}.{}.{}.{}; that player has left", object[20420],
+              object[20421], object[20422], object[20423]);
+  const uint64_t long_ago = std::bit_cast<uint64_t>(-1.0e9);
+  for (int i = 0; i < 8; ++i) object[276 + i] = uint8_t(long_ago >> (56 - 8 * i));
 }
 
 void Gow3MoviePollInterval(rex::ppc::Register& interval) {
@@ -145,11 +174,12 @@ struct RenderSize { uint32_t width, height; };
 // Height from gow3_render_height, width from the aspect ratio, both multiples
 // of 8 (the GPU's resolve block size). Wider sizes keep at most 1920x1080's
 // pixels, the largest the EDRAM model has been validated for; the presenter
-// scales the image to the window. Fixed on first use.
+// scales the image to the window. Fixed on first use. 1440p is the 720p
+// layout scaled by the renderer (Gow3GuestRenderHeight).
 RenderSize RenderSizeFor() {
   static const RenderSize size = [] {
     const double aspect = DisplayAspect();
-    double height = std::clamp(REXCVAR_GET(gow3_render_height), 360, 2160);
+    double height = Gow3GuestRenderHeight();
     height = std::min(height, std::sqrt(1920.0 * 1080.0 / std::max(aspect, kGameAspect)));
     const uint32_t h = uint32_t(height) & ~7u;
     return RenderSize{std::max(8u, uint32_t(h * aspect + 4) & ~7u), h};
@@ -232,6 +262,19 @@ void Gow3OverrideScreenSize() {
 // constrains it, to 16:9. Before the call (r9 = PlayerCamera), widen a 16:9
 // camera to the render aspect, keeping the vertical field of view (Hor+), and
 // apply gow3_fov. Cinematic cameras with their own aspect keep it.
+// gow3_fov as a zoom factor: tan(half angle) times tan(fov / 2) / tan(65 / 2),
+// the game's own 65 degrees. Every camera keeps its zoom relative to the
+// default one (aiming, cover, scopes), and wide cameras do not approach 180
+// degrees as multiplying the angle did (cover at 90 became 166 at fov 120).
+// At most 140 degrees in total.
+static double ScaleHalfFov(double half) {
+  const int fov = std::clamp(REXCVAR_GET(gow3_fov), 40, 120);
+  if (fov == 65) return half;
+  constexpr double kPi = 3.14159265358979323846;
+  const double factor = std::tan(fov * kPi / 360.0) / std::tan(65.0 * kPi / 360.0);
+  return std::min(std::atan(std::tan(half) * factor), 70.0 * kPi / 180.0);
+}
+
 void Gow3ConstrainedProjection(rex::ppc::Register& half_fov, rex::ppc::Register& aspect,
                                rex::ppc::Register&, rex::ppc::Register& camera) {
   if (!projection_hooks || !camera.u32) return;
@@ -246,13 +289,29 @@ void Gow3ConstrainedProjection(rex::ppc::Register& half_fov, rex::ppc::Register&
     aspect.f64 = target;
     current = target;
   }
-  double half = half_fov.f64;
-  const int fov = std::clamp(REXCVAR_GET(gow3_fov), 40, 120);
-  if (fov != 65) half *= fov / 65.0;
+  double half = ScaleHalfFov(half_fov.f64);
   // Wider than 16:9: the 16:9 vertical field of view; narrower keeps the
   // horizontal one and so shows more above and below.
   if (current == target && target > float(kGameAspect)) half = std::atan(std::tan(half) * target / kGameAspect);
   half_fov.f64 = std::min(half, 1.5);
+}
+
+// The other projection in CalcSceneView, FPerspectiveMatrix(HalfFOVX,
+// HalfFOVY, MultFOVX, MultFOVY, MinZ) at 0x82630FC8 for cameras without a
+// constrained aspect: both half angles are FOV * pi / 360 and the multipliers
+// (from the viewport and AspectRatioAxisConstraint) set the aspect. gow3_fov
+// scales both angles; scaling only X squashed the picture horizontally.
+void Gow3UnconstrainedProjection(rex::ppc::Register& half_fov, rex::ppc::Register& half_fov_y,
+                                 rex::ppc::Register& local_player) {
+  if (!projection_hooks || !local_player.u32) return;
+  // Only while the player controls a pawn: the main menu's backdrop is a 3D
+  // scene framed for the game's own field of view (wider showed past its
+  // edges). LocalPlayer.Actor (+64) is the PlayerController; its Pawn is at
+  // +0x1C8 (zero in the menu, set from the first gameplay frame).
+  const uint32_t controller = ReadInstruction(guest_memory, local_player.u32 + 64);
+  if (!controller || !ReadInstruction(guest_memory, controller + 0x1C8)) return;
+  half_fov.f64 = ScaleHalfFov(half_fov.f64);
+  half_fov_y.f64 = ScaleHalfFov(half_fov_y.f64);
 }
 
 // FXenonViewport::ProcessInput (0x8297EE10, r3 = viewport, f1 = DeltaTime)

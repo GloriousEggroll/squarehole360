@@ -184,6 +184,35 @@ void PassTransfer::Resolve(RenderTexture& source, RenderTexture& destination,
     commands->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(&destination, RenderTextureLayout::SHADER_READ));
     if(!batched)Submit(&presentation_scope);
 }
+void PassTransfer::Blit(RenderTexture& source,RenderTexture& destination) {
+    const auto& src=static_cast<VulkanTexture&>(source).desc;
+    const auto& dst=static_cast<VulkanTexture&>(destination).desc;
+    if(&source==&destination||src.format!=dst.format||!src.width||!src.height||!dst.width||!dst.height||
+       src.multisampling.sampleCount!=1||dst.multisampling.sampleCount!=1||
+       (src.width%dst.width&&dst.width%src.width)||(src.height%dst.height&&dst.height%src.height))
+        throw std::runtime_error("Invalid native scaling blit");
+    // Colour only: depth/stencil formats need not support BLIT_DST (RADV's
+    // D32_SFLOAT_S8_UINT does not); scaled depth goes through RestoreDepth
+    // and scaled EDRAM stores instead.
+    if((src.flags|dst.flags)&RenderTextureFlag::DEPTH_TARGET)
+        throw std::runtime_error("Native scaling blit of a depth/stencil image");
+    const bool batched=batch_&&batch_->active();
+    auto* commands=batched?&batch_->BeginStage():commands_.get();
+    if(!batched){if(batch_)batch_->Flush();commands->begin();}
+    commands->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(&source,RenderTextureLayout::COPY_SOURCE));
+    commands->barriers(RenderBarrierStage::COPY,RenderTextureBarrier(&destination,RenderTextureLayout::COPY_DEST));
+    VkImageBlit region{};
+    region.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.dstSubresource=region.srcSubresource;
+    region.srcOffsets[1]={int32_t(src.width),int32_t(src.height),1};
+    region.dstOffsets[1]={int32_t(dst.width),int32_t(dst.height),1};
+    vkCmdBlitImage(static_cast<VulkanCommandList&>(*commands).vk,
+        static_cast<VulkanTexture&>(source).vk,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        static_cast<VulkanTexture&>(destination).vk,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&region,
+        VK_FILTER_NEAREST);
+    commands->barriers(RenderBarrierStage::GRAPHICS|RenderBarrierStage::COMPUTE,
+        RenderTextureBarrier(&destination,RenderTextureLayout::SHADER_READ));
+    if(!batched)Submit();
+}
 bool PassTransfer::PrepareStencilExport() {
     if(!stencil_export_pixel_||stencil_export_failed_)return false;
     if(stencil_export_pipeline_)return true;
@@ -209,7 +238,10 @@ bool PassTransfer::PrepareStencilExport() {
 void PassTransfer::RestoreDepth(RenderTexture& source,RenderTexture& destination,const RenderRect* region) {
     const auto& src=static_cast<VulkanTexture&>(source).desc;
     const auto& dst=static_cast<VulkanTexture&>(destination).desc;
-    if(!depth_pixel_||&source==&destination||src.width!=dst.width||src.height!=dst.height||
+    // The destination may be an integer multiple of the source (internal
+    // resolution scaling): each source texel fills a block.
+    const uint32_t scale=src.width&&dst.width%src.width==0?dst.width/src.width:0;
+    if(!depth_pixel_||&source==&destination||!scale||dst.height!=src.height*scale||(scale!=1&&region)||
        dst.format!=RenderFormat::D32_FLOAT_S8_UINT||dst.multisampling.sampleCount!=1)
         throw std::runtime_error("Invalid depth/stencil restoration");
     if(region) {CheckRect(source,*region);CheckRect(destination,*region);}
@@ -241,6 +273,8 @@ void PassTransfer::RestoreDepth(RenderTexture& source,RenderTexture& destination
     commands->setGraphicsPipelineLayout(layout_.get());commands->setGraphicsDescriptorSet(descriptor_ptr,0);
     ++restore_statistics_.calls;
     if(export_stencil) {
+        const std::array<uint32_t,5> push{scale,0,0,0,0};
+        commands->setGraphicsPushConstants(0,push.data());
         commands->setPipeline(stencil_export_pipeline_.get());commands->drawInstanced(3,1,0,0);
         ++restore_statistics_.export_calls;++restore_statistics_.draws;
     } else {
@@ -261,7 +295,7 @@ void PassTransfer::RestoreDepth(RenderTexture& source,RenderTexture& destination
             if(!pipeline||!static_cast<VulkanGraphicsPipeline*>(pipeline.get())->vk)
                 throw std::runtime_error("Cannot create depth restoration pipeline");
         }
-        const std::array<uint32_t,5> push{0,0,0,bit,0};
+        const std::array<uint32_t,5> push{scale,0,0,bit,0};
         commands->setGraphicsPushConstants(0,push.data());commands->setPipeline(pipeline.get());
         commands->drawInstanced(3,1,0,0);++restore_statistics_.draws;
     }

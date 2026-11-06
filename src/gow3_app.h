@@ -15,6 +15,7 @@
 #include <rex/rex_app.h>
 #include <rex/system.h>
 #include <rex/system/flags.h>
+#include <rex/system/xam/network.h>
 #include <rex/memory.h>
 #include <rex/graphics/graphics_system.h>
 #include "gameplay_hooks.h"
@@ -112,6 +113,8 @@ class Gow3App : public rex::ReXApp {
   }
 
   void OnBeforeTitleTermination() override {
+    // First, so the other players are told even if the rest of shutdown stalls.
+    rex::system::xam::Network::Get().Shutdown();
     // Guest capture hooks may hold host locks or wait for renderer capacity.
     // Quiesce them while guest threads can still unwind those critical sections.
 #ifdef GOW3_HAS_NATIVE_RENDERER

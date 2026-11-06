@@ -35,14 +35,14 @@ endif()
 
 # The SDK already bundles the CAS/FSR 1 shaders and host constants.
 add_compile_definitions(REX_HAS_FIDELITYFX_SDK=1)
-# FSR 3.1 temporal upscaling and frame generation come from our FidelityFX
+# FSR 3.1 temporal upscaling comes from our FidelityFX
 # fork (vendor/fidelityfx-sdk). Its shader compiler is a Windows program;
 # Linux builds run it through Wine.
-option(GOW3_ENABLE_FIDELITYFX "Build FSR 3.1 temporal upscaling and frame generation" ON)
+option(GOW3_ENABLE_FIDELITYFX "Build FSR 3.1 temporal upscaling" ON)
 if(GOW3_ENABLE_FIDELITYFX AND CMAKE_HOST_UNIX)
     find_program(GOW3_WINE wine)
     if(NOT GOW3_WINE)
-        message(WARNING "Wine was not found: building without FSR 3.1 and frame generation "
+        message(WARNING "Wine was not found: building without FSR 3.1 "
                         "(FidelityFX's shader compiler is a Windows program)")
         set(GOW3_ENABLE_FIDELITYFX OFF CACHE BOOL "" FORCE)
     endif()
@@ -246,7 +246,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
             target_link_libraries(${launcher} PRIVATE shell32 user32)
         endforeach()
     endif()
-    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_input_prompts.cpp src/gow3_content.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_host.cpp
+    add_executable(gow3 src/main.cpp src/gameplay_hooks.cpp src/gow3_hud_scale.cpp src/gow3_input_prompts.cpp src/gow3_content.cpp src/gow3_identity.cpp src/gow3_settings.cpp src/gow3_settings_live.cpp src/gow3_settings_menu.cpp src/gow3_host.cpp
         src/renderer/gears_bridge.cpp src/renderer/native/getdata_inline_leaf.cpp
         ${CMAKE_BINARY_DIR}/gow3_settings_schema.h)
     rexglue_setup_target(gow3)

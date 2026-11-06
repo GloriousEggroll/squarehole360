@@ -26,8 +26,9 @@ const std::set<std::string> live_keys = {
   "fullscreen", "window_width", "window_height", "gow3_frame_limit_mode", "framerate_limit",
   "present_effect", "present_fsr_sharpness_reduction", "present_fsr3_ghosting_reduction",
   "present_fsr_max_upsampling_passes", "present_cas_additional_sharpness",
-  "present_dither", "swap_post_effect", "present_frame_generation",
-  "gow3_low_latency", "present_anti_lag", "gow3_fov", "mnk_mode", "mnk_mouse_mode", "mnk_sensitivity",
+  "present_dither", "swap_post_effect",
+  "gow3_low_latency", "present_anti_lag", "gow3_fov", "gow3_hud_size", "anisotropic_override", "gow3_motion_blur",
+  "gow3_rt_ao", "gow3_rt_ao_strength", "gow3_rt_ao_radius", "gow3_rt_ao_rays", "gow3_rt_shadows", "gow3_rt_shadow_softness", "mnk_mode", "mnk_mouse_mode", "mnk_sensitivity",
   // Per-player controller settings; the SDL input driver applies them on change.
   "controller1_buttons", "controller1_gyro_activation", "controller1_gyro_invert_y", "controller1_gyro_mode", "controller1_gyro_sensitivity", "controller1_gyro_stick_deadzone", "controller1_gyro_turn_axis", "controller1_invert_look_y", "controller1_left_deadzone", "controller1_right_deadzone", "controller1_swap_sticks",
   "controller2_buttons", "controller2_gyro_activation", "controller2_gyro_invert_y", "controller2_gyro_mode", "controller2_gyro_sensitivity", "controller2_gyro_stick_deadzone", "controller2_gyro_turn_axis", "controller2_invert_look_y", "controller2_left_deadzone", "controller2_right_deadzone", "controller2_swap_sticks",
@@ -72,11 +73,10 @@ Values Parse(const std::string& text) {
   if (renderer_node && !renderer_node->is_string()) throw std::runtime_error("Invalid renderer setting");
   const auto mode = ParseGow3RendererMode(renderer_node ? renderer_node->as_string()->get() : "native");
   values["gow3_renderer"] = Gow3RendererName(mode);
-  values["anisotropic_override"] = "-1";
   for (auto&& [key, node] : table) {
     std::string name(key);
     if (!rex::cvar::GetFlagInfo(name) || !Gow3MenuKeyApplies(name, mode)) continue;
-    if (name == "gow3_renderer" || name == "anisotropic_override") continue;
+    if (name == "gow3_renderer") continue;
     if (node.is_string()) values[name] = node.as_string()->get();
     else if (node.is_boolean()) values[name] = node.as_boolean()->get() ? "true" : "false";
     else if (node.is_number()) {
@@ -141,8 +141,10 @@ void Apply(Watch& w, const Values& desired) {
     if (key == "fullscreen" || key == "window_width" || key == "window_height") window_changed = true;
     else if (key.starts_with("mnk_") || key.starts_with("keybind_") || key.starts_with("gyro_")) {
       // Input settings take effect on the next controller poll.
-    } else if (key == "gow3_fov") {
-      // Read by the projection hook every frame.
+    } else if (key == "gow3_fov" || key == "gow3_hud_size" || key.starts_with("gow3_rt_") || key == "anisotropic_override" ||
+               key == "gow3_motion_blur") {
+      // Read every frame (projection and canvas hooks, native renderer; samplers are
+      // keyed by the override).
     } else if (key == "swap_post_effect") {
       using Effect = rex::graphics::CommandProcessor::SwapPostEffect;
       processor->SetDesiredSwapPostEffect(value == "fxaa" ? Effect::kFxaa :

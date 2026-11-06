@@ -10,7 +10,7 @@ from PySide6.QtCore import Qt, QProcess, QTimer, Signal
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QLineEdit,
     QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
     QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget)
-from model import available_languages, CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, listed, widget_value, MAPPING_SOURCES, MAPPING_TARGETS, MAPPING_DEFAULTS, parse_mapping, format_mapping
+from model import available_languages, CONFIG, ROOT, WINDOWS, binary, bind_keys, game_running, SETTINGS, LIVE_SETTINGS, BY_KEY, running_states, fingerprint, load, save, applies, listed, shown, widget_value, MAPPING_SOURCES, MAPPING_TARGETS, MAPPING_DEFAULTS, parse_mapping, format_mapping
 
 
 def _qt_key_names():
@@ -429,6 +429,7 @@ class SettingsWindow(QMainWindow):
         focus = QApplication.focusWidget()
         for setting in SETTINGS:
             visible = applies(setting, mode) and listed(setting)
+            visible = visible and shown(setting, {'network_system_link': self.widgets['network_system_link'].currentData()})
             form, label, widget = self.rows[setting.key]
             hidden_focus |= not visible and (focus is widget or widget.isAncestorOf(focus) if focus else False)
             form.setRowVisible(widget, visible)
@@ -446,12 +447,11 @@ class SettingsWindow(QMainWindow):
         temporal = effect in ('fsr3', 'dlss', 'xess')
         self.widgets['present_fsr_sharpness_reduction'].setEnabled(effect == 'fsr' or temporal)
         self.widgets['present_fsr_max_upsampling_passes'].setEnabled(effect == 'fsr')
-        self.widgets['present_frame_generation'].setEnabled(temporal)
         self.widgets['present_fsr3_ghosting_reduction'].setEnabled(effect == 'fsr3')
         online = self.widgets['network_enabled'].isChecked()
         lobby = online and bool(self.widgets['network_lobby_server'].text().strip())
-        for key in ('network_lobby_server', 'network_frame_rate_lock', 'network_address',
-                    'network_broadcast_peers'):
+        for key in ('network_system_link', 'network_lobby_server', 'network_frame_rate_lock',
+                    'network_address', 'network_broadcast_peers'):
             self.widgets[key].setEnabled(online)
         for key in ('network_lobby_room', 'network_lobby_password'):
             self.widgets[key].setEnabled(lobby)

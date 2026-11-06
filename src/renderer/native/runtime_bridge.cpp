@@ -1,6 +1,7 @@
 #include "edram_inventory.h"
 #include "hitch_trace.h"
 #include "renderer/native/edram_extent.h"
+#include "renderer/native/render_scale.h"
 #include "renderer/game_profile.h"
 #include "published_query_results.h"
 #include "runtime_bridge.h"
@@ -84,16 +85,17 @@ REXCVAR_DECLARE(bool, native_direct_execution);
 REXCVAR_DECLARE(bool, gpu_native_marker_operands);
 
 // Options that remove EDRAM round trips. They matter most on tile-based GPUs
-// (Apple silicon), where each extra pass and synchronous wait is expensive;
-// other platforms keep them opt-in until they have had wider testing.
+// (Apple silicon), where each extra pass and synchronous wait is expensive.
+// Skip-full-clear-restore, lazy commits, direct fixed resolves and deferred
+// resolve stores are on everywhere (2026-11-05, ~1-2% in heavy PC scenes).
 #if defined(__APPLE__)
 constexpr bool kTiledGpuDefault=true;
 #else
 constexpr bool kTiledGpuDefault=false;
 #endif
 // Scene cache bounds in hardware render target mode.
-constexpr uint32_t kHardwareShaderCacheEntries=4096,kHardwarePipelineCacheEntries=8192;
-constexpr uint64_t kHardwareShaderCacheBytes=256u*1024*1024;
+constexpr uint32_t kHardwareShaderCacheEntries=8192,kHardwarePipelineCacheEntries=16384;
+constexpr uint64_t kHardwareShaderCacheBytes=512u*1024*1024;
 REXCVAR_DEFINE_BOOL(gow3_native_hardware_render_targets, true, "Graphics",
                    "Render into real GPU render targets with hardware depth, stencil and blending instead of emulating Xbox EDRAM in shaders")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -178,16 +180,16 @@ REXCVAR_DEFINE_BOOL(gow3_native_direct_resolve_textures, kTiledGpuDefault, "Rend
 REXCVAR_DEFINE_BOOL(gow3_native_verify_direct_resolve_textures, false, "Renderer diagnostics",
                    "Compare direct resolve images with the decode of their stored memory (slow; diagnostics)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_hardware_skip_full_clear_restore, kTiledGpuDefault, "Renderer diagnostics",
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_skip_full_clear_restore, true, "Renderer diagnostics",
                    "Hardware render targets: skip restoring a color surface's old contents before a clear covers all of it")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_hardware_lazy_commits, kTiledGpuDefault, "Renderer diagnostics",
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_lazy_commits, true, "Renderer diagnostics",
                    "Hardware render targets: commit surfaces to EDRAM only when another interpretation reads those tiles")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_hardware_direct_fixed_resolves, kTiledGpuDefault, "Renderer diagnostics",
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_direct_fixed_resolves, true, "Renderer diagnostics",
                    "Hardware render targets: quantize fixed16 resolve sources in the resolve pass instead of an EDRAM round trip")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_BOOL(gow3_native_deferred_resolve_stores, kTiledGpuDefault, "Renderer diagnostics",
+REXCVAR_DEFINE_BOOL(gow3_native_deferred_resolve_stores, true, "Renderer diagnostics",
                    "Write directly sampled resolves to texture memory only when something reads those bytes as memory")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_canonical_resolve_stores, false, "Renderer diagnostics",
@@ -252,6 +254,9 @@ REXCVAR_DEFINE_BOOL(gow3_native_fsi_draw_pass_groups, true, "Renderer diagnostic
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_fsi_draw_pass_queries, false, "Renderer diagnostics",
                    "Let occlusion-query draws share FSI draw passes (host query reset only)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_native_hardware_pass_queries, true, "Renderer diagnostics",
+                   "Keep the open draw group across occlusion query controls with hardware render targets (host query reset only)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_async_shaders, false, "Graphics",
                    "Skip a draw while its shader is still compiling instead of stalling (objects may appear a few frames late)")
@@ -492,9 +497,9 @@ REXCVAR_DEFINE_BOOL(gow3_native_host_query_reset, false, "Renderer diagnostics",
 REXCVAR_DEFINE_BOOL(gow3_native_readonly_query_render_pass_groups, false, "Renderer diagnostics",
                    "Group audited immutable D32 visibility draws while retaining separate query results")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
-REXCVAR_DEFINE_INT32(gow3_native_submission_capacity, 64, "Renderer diagnostics",
-                    "Physical async GPU draw/query/list capacity: 64 or 128; synchronous mode uses 64")
-    .range(64,128).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_INT32(gow3_native_submission_capacity, 256, "Renderer diagnostics",
+                    "Physical async GPU draw/query/list capacity: 64, 128 or 256; synchronous mode uses 64")
+    .range(64,256).lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_deferred_queries, true, "Renderer diagnostics",
                    "Batch independent native visibility queries until an ordered completion boundary")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
@@ -517,8 +522,35 @@ REXCVAR_DEFINE_INT32(gow3_native_temporal_trace_frames, 0, "Renderer diagnostics
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 REXCVAR_DEFINE_BOOL(gow3_native_temporal_object_motion, true, "Renderer diagnostics",
                     "Per-object motion vectors from the game's velocity pass for temporal "
-                    "upscaling and frame generation; off uses camera motion only")
+                    "upscaling; off uses camera motion only")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_motion_blur, false, "Native renderer",
+    "The game's motion blur (off zeroes the blur's velocity scale in its post-process passes)");
+REXCVAR_DEFINE_BOOL(gow3_rt_ao, false, "Native renderer",
+    "Ray-traced ambient occlusion: soft shadows where surfaces meet, from the frame's geometry "
+    "(GPUs with ray queries)");
+REXCVAR_DEFINE_DOUBLE(gow3_rt_ao_strength, 0.6, "Native renderer",
+    "Ray-traced ambient occlusion strength, 0 to 1");
+REXCVAR_DEFINE_DOUBLE(gow3_rt_ao_radius, 150.0, "Native renderer",
+    "Ray-traced ambient occlusion reach in game units (centimetres)");
+REXCVAR_DEFINE_INT32(gow3_rt_ao_rays, 2, "Native renderer",
+    "Ray-traced ambient occlusion rays per pixel per frame");
+REXCVAR_DEFINE_BOOL(gow3_rt_ao_debug, false, "Renderer diagnostics",
+    "Show only the ray-traced ambient occlusion");
+REXCVAR_DEFINE_INT32(gow3_rt_scene_parts, 2, "Renderer diagnostics",
+                     "Split the ray-traced scene into this many parts, one captured and built per frame "
+                     "(1: all of it every frame); the others are reused, moved with the camera");
+REXCVAR_DEFINE_BOOL(gow3_rt_timing, false, "Renderer diagnostics",
+                    "Log the GPU time of the ray-traced shadow and AO stages");
+REXCVAR_DEFINE_BOOL(gow3_rt_fast_build, true, "Renderer diagnostics",
+                    "Build ray-tracing geometry for build speed instead of trace speed (the scene is "
+                    "rebuilt every frame: about 0.8 instead of 3.5 ms, for slightly slower rays)");
+REXCVAR_DEFINE_BOOL(gow3_rt_shadows, false, "Native renderer",
+    "Ray-traced shadows for the game's dynamic shadow-casting light (GPUs with ray queries)");
+REXCVAR_DEFINE_DOUBLE(gow3_rt_shadow_softness, 0.25, "Native renderer",
+    "Ray-traced shadow softness, 0 (hard) to 1");
+REXCVAR_DEFINE_INT32(gow3_rt_shadows_debug, 0, "Renderer diagnostics",
+    "Ray-traced shadows: 1 uses only the traced visibility, 2 shadows everything");
 REXCVAR_DEFINE_BOOL(gow3_native_temporal_inputs, true, "Renderer diagnostics",
                    "Jitter the scene and produce depth, motion vectors and a HUD mask when a "
                    "temporal upscaler (FSR 3) is selected; restart required")
@@ -700,6 +732,8 @@ LiveVulkanDeviceDesc DescribeDevice(HostDevice* device) {
   desc.null_descriptor = p.nullDescriptor;
   desc.ordered_pixel_interlock = p.fragmentShaderPixelInterlock;
   desc.shader_stencil_export = device->extensions().ext_EXT_shader_stencil_export;
+  desc.ray_query = device->extensions().ext_KHR_ray_query;
+  desc.transform_feedback = device->extensions().ext_EXT_transform_feedback;
   desc.acquire_queue = [device] { return std::make_unique<QueueLease>(device); };
   return desc;
 }
@@ -1194,9 +1228,11 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         limits.recipes=NativePipelineRecipeCache::kMaxRecipes;limits.sources=NativePipelineRecipeCache::kMaxSources;
         limits.source_bytes=NativePipelineRecipeCache::kMaxSourceBytes;
       }
+      const auto recipe_root=cache/(hardware_pipeline_recipes?"native-hardware-pipeline-recipes":"native-pipeline-recipes")/"v1";
+      if(const auto adopted=NativePipelineRecipeCache::AdoptOlderVersions(recipe_root,NativeShaderCompiler::CacheVersion(),limits))
+        REXLOG_INFO("Observed native pipeline cache: kept {} recipes recorded by an earlier shader compiler",adopted);
       pipeline_recipes=std::make_shared<NativePipelineRecipeCache>(
-          cache/(hardware_pipeline_recipes?"native-hardware-pipeline-recipes":"native-pipeline-recipes")/"v1"/
-              NativeShaderCompiler::CacheVersion(),NativeShaderCompiler::CacheVersion(),limits);
+          recipe_root/NativeShaderCompiler::CacheVersion(),NativeShaderCompiler::CacheVersion(),limits);
     }catch(const std::exception& error){REXLOG_WARN("Observed native pipeline cache unavailable: {}",error.what());}
     if(REXCVAR_GET(gow3_native_specialize_fsi_pipeline_state)&&REXCVAR_GET(gow3_native_fsi_state_forward_cfg))
       throw std::invalid_argument("Pure FSI state and composed forward FSI state are separate experiments");
@@ -2350,6 +2386,7 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     config.packed_depth_render_pass_groups=REXCVAR_GET(gow3_native_packed_depth_render_pass_groups);
     config.fsi_draw_pass_groups=REXCVAR_GET(gow3_native_fsi_draw_pass_groups);
     config.fsi_draw_pass_queries=REXCVAR_GET(gow3_native_fsi_draw_pass_queries);
+    config.hardware_pass_queries=REXCVAR_GET(gow3_native_hardware_pass_queries);
     config.async_pipelines=REXCVAR_GET(gow3_native_async_pipelines);
     config.async_pipeline_budget=std::chrono::milliseconds(std::max(0,REXCVAR_GET(gow3_native_async_shader_budget_ms)));
     config.packed_zero_depth_clear=REXCVAR_GET(gow3_native_packed_zero_depth_clear);
@@ -2360,7 +2397,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     config.direct_atlas_depth_resolves=native_raster&&REXCVAR_GET(gow3_native_direct_atlas_depth_resolves);
     config.fused_packed_atlas_resolves=native_raster&&REXCVAR_GET(gow3_native_fused_packed_atlas_resolves);
     config.canonical_resolve_stores=native_raster&&REXCVAR_GET(gow3_native_canonical_resolve_stores);
-    config.direct_resolve_textures=native_raster&&REXCVAR_GET(gow3_native_direct_resolve_textures);
+    // Internal resolution scaling samples resolves at host size: decoding
+    // them from guest memory would bring every one back to guest pixels
+    // (and present a 720p front buffer, which FSR 3 cannot accumulate).
+    config.direct_resolve_textures=native_raster&&(REXCVAR_GET(gow3_native_direct_resolve_textures)||NativeRenderScale()!=1);
     config.verify_direct_resolve_textures=config.direct_resolve_textures&&
         REXCVAR_GET(gow3_native_verify_direct_resolve_textures);
     config.deferred_resolve_stores=config.direct_resolve_textures&&REXCVAR_GET(gow3_native_deferred_resolve_stores);
@@ -2462,6 +2502,24 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     if(config.implicit_fsi_barriers)
       REXLOG_INFO("Native FSI shader variant: implicit coherent interlock v1");
     REXLOG_INFO("Native raster output: {}", config.native_fsi ? "ordered pixel interlock" : "fixed-function diagnostic path");
+    config.ray_traced_ao = description.ray_query && description.transform_feedback;
+    config.ray_traced_ao_settings = [] {
+      NativeRtAoSettings settings;
+      settings.enabled = REXCVAR_GET(gow3_rt_ao);
+      settings.strength = float(REXCVAR_GET(gow3_rt_ao_strength));
+      settings.radius = float(REXCVAR_GET(gow3_rt_ao_radius));
+      settings.rays = uint32_t(std::clamp(REXCVAR_GET(gow3_rt_ao_rays), 1, 16));
+      settings.debug_view = REXCVAR_GET(gow3_rt_ao_debug);
+      settings.shadows = REXCVAR_GET(gow3_rt_shadows);
+      settings.shadow_softness = float(REXCVAR_GET(gow3_rt_shadow_softness));
+      settings.shadow_debug = uint32_t(std::clamp(REXCVAR_GET(gow3_rt_shadows_debug), 0, 2));
+      settings.timing = REXCVAR_GET(gow3_rt_timing);
+      settings.fast_build = REXCVAR_GET(gow3_rt_fast_build);
+      settings.scene_parts = uint32_t(std::clamp(REXCVAR_GET(gow3_rt_scene_parts), 1, 2));
+      return settings;
+    };
+    if (config.ray_traced_ao) REXLOG_INFO("Native renderer: ray-traced AO available");
+    config.motion_blur = [] { return REXCVAR_GET(gow3_motion_blur); };
     config.temporal_inputs = REXCVAR_GET(gow3_native_temporal_inputs);
     config.temporal_trace_frames = uint32_t(REXCVAR_GET(gow3_native_temporal_trace_frames));
     config.temporal_object_motion = REXCVAR_GET(gow3_native_temporal_object_motion);
@@ -2524,8 +2582,8 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     std::set<std::string> modules;
     size_t module_bytes = 0;
     uint64_t failed = 0, capped = 0;
-    // Three quarters of the Scene's hardware pipeline and shader cache limits,
-    // so the first new area does not immediately evict prepared entries.
+    // Three quarters of the Scene's hardware pipeline cache limit, so the
+    // first new area does not immediately evict prepared entries.
     for (const auto &item : recipes) {
       if (stopping)
         break;
@@ -2539,15 +2597,12 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
         if (vs->stage != NativeShaderStage::Vertex || vs->source_sha256 != item.recipe.vertex ||
             (ps && (ps->stage != NativeShaderStage::Pixel || ps->source_sha256 != *item.recipe.pixel)))
           throw std::runtime_error("Observed hardware recipe source stage/identity mismatch");
+        // Shader modules are not capped: a pipeline keeps working after its
+        // modules leave the Scene's module cache, which evicts the oldest
+        // while preparing. Only pipelines are what a draw would wait for.
         const std::string vk = item.recipe.vertex, pk = item.recipe.pixel ? *item.recipe.pixel : std::string();
-        const size_t extra_count = size_t(!modules.contains(vk)) + size_t(ps && !modules.contains(pk));
         const size_t extra_bytes = (modules.contains(vk) ? 0 : vs->spirv.size() * 4) +
                                    (!ps || modules.contains(pk) ? 0 : ps->spirv.size() * 4);
-        if (modules.size() + extra_count > kHardwareShaderCacheEntries * 3 / 4 ||
-            extra_bytes > kHardwareShaderCacheBytes * 3 / 4 - module_bytes) {
-          ++capped;
-          continue;
-        }
         modules.insert(vk);
         if (ps)
           modules.insert(pk);
@@ -4607,7 +4662,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
       if (!preview) { output.reset(); return std::nullopt; }
       if (!output) throw std::runtime_error("Native presentation image is absent");
       auto& texture = static_cast<plume::VulkanTexture&>(*output);
-      if (texture.desc.width != width || texture.desc.height != height)
+      // Internal resolution scaling presents the front buffer at host size.
+      const uint32_t scale = NativeRenderScale();
+      if ((texture.desc.width != width || texture.desc.height != height) &&
+          (texture.desc.width != width * scale || texture.desc.height != height * scale))
         throw std::runtime_error("Native frontbuffer dimensions do not match the host swap");
       struct RetainedImage {
         std::shared_ptr<RuntimeState> owner;
@@ -4727,8 +4785,17 @@ void Gow3StartNativeRenderer(rex::graphics::GraphicsSystem* graphics, const std:
     if(NativeRasterRequested()&&(!description.ordered_pixel_interlock||!description.features.fragmentStoresAndAtomics))
       throw std::runtime_error("Native raster authority requires enabled ordered pixel interlock and fragment storage writes");
     // Render sizes above 720p place surfaces past the console's 2048 EDRAM tiles.
-    SetNativeEdramTiles(REXCVAR_QUERY(int32_t,gow3_render_height)>720?kNativeEdramMaxTiles:2048);
+    // 1440p is the 720p layout scaled by the renderer (docs/resolution-scaling-plan.md).
+    const int32_t render_height=REXCVAR_QUERY(int32_t,gow3_render_height);
+    SetNativeEdramTiles(render_height>720&&render_height<1440?kNativeEdramMaxTiles:2048);
     if(NativeEdramTiles()!=2048)REXLOG_INFO("Native EDRAM model: {} tiles for the larger render size",NativeEdramTiles());
+    // Only hardware render targets scale; the FSI path stays 1x.
+    native_render_scale=1;
+    if(render_height>=1440) {
+      if(REXCVAR_GET(gow3_native_hardware_render_targets)) native_render_scale=2;
+      else REXLOG_WARN("Native renderer: 1440p needs hardware render targets; rendering at 720p");
+    }
+    if(NativeRenderScale()!=1)REXLOG_INFO("Native render scale: {}x (internal {}p)",NativeRenderScale(),720*NativeRenderScale());
     state = std::make_shared<RuntimeState>(processor, graphics->memory(), std::move(description), true, cache_root);
     if(state->direct&&(!state->native_raster||!state->deferred_queries||!state->retire_query_prefixes))
       throw std::runtime_error("Direct execution requires native raster with deferred, retired query prefixes");

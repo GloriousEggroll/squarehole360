@@ -1,5 +1,7 @@
 #include "defined_byte_ranges.h"
 #include "resolve_memory.h"
+#include <atomic>
+#include <chrono>
 #include "edram_extent.h"
 #include "synchronous_gpu_timing.h"
 #include "cpu_write_policy.h"
@@ -53,7 +55,11 @@ bool Surface64(const SurfaceLayout& s) {return !s.depth&&(s.format==5||s.format=
 auto DescriptorRanges(bool store) {
     std::vector<RenderDescriptorRange> ranges{{RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1},
         {store?RenderDescriptorRangeType::TEXTURE:RenderDescriptorRangeType::READ_WRITE_TEXTURE,1,1}};
-    if(store)ranges.emplace_back(RenderDescriptorRangeType::TEXTURE,2,1);
+    if(store) {
+        ranges.emplace_back(RenderDescriptorRangeType::TEXTURE,2,1);
+        // The full-resolution EDRAM copy (packed EDRAM again when unused).
+        ranges.emplace_back(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,3,1);
+    }
     return ranges;
 }
 auto CanonicalStoreDescriptorRanges() {
@@ -257,6 +263,10 @@ NativeGpuAliasState ResolveMemory::InspectTextureState(const TextureLayout& t,ui
 }
 void ResolveMemory::Define(const Ranges& ranges) {
     AdvancePhysicalSerial();
+    if(scaled_copy_)for(const auto& [first,last]:ranges) {
+        if(scaled_defining_)DefineNativeByteRange(scaled_current_,first,last,false);
+        else ScaledCopyStale(first,last);
+    }
     if(definition_stats_.enabled){++definition_stats_.calls;definition_stats_.ranges+=ranges.size();}
     // Exact covered-hull fast path. defined_ is canonical: Define merges both
     // overlapping and touching intervals and InvalidateBytes only removes bytes,
@@ -416,6 +426,7 @@ void ResolveMemory::InvalidateBytes(uint32_t address,uint32_t count,bool queued)
     if(!count||uint64_t(address)+count>capacity_)throw std::runtime_error("Invalid GPU memory invalidation");
     const uint32_t last=address+count;AdvancePhysicalSerial();++mutation_serial_;
     page_versions_.Assign(address/4096,(last-1)/4096+1,serial_);
+    if(scaled_copy_)ScaledCopyStale(address,last);
     auto it=defined_.lower_bound(address);
     if(it!=defined_.begin()&&std::prev(it)->second>address)--it;
     while(it!=defined_.end()&&it->first<last) {
@@ -1239,6 +1250,12 @@ std::shared_ptr<RenderTexture> ResolveMemory::LoadShared(const TextureLayout& la
     compact_load_stats_.logical_bytes_avoided+=pixels*(4-channels)*4;
     return image;
 }
+// Selects the full-resolution copy for the dispatches in its scope.
+namespace {struct ScaledDispatchScope {
+    bool& flag;bool previous;
+    ScaledDispatchScope(bool& f,bool on):flag(f),previous(f){flag=on;}
+    ~ScaledDispatchScope(){flag=previous;}
+};}
 void ResolveMemory::Transfer(RenderTexture& image,const TextureLayout& t,const RenderRect& r,bool store,uint32_t address,
                               RenderTexture* stencil,int32_t source_x,int32_t source_y,
                               const NativeSynchronousGpuTimingContext* presentation_timing,bool rgba_stencil) {
@@ -1262,7 +1279,8 @@ void ResolveMemory::Transfer(RenderTexture& image,const TextureLayout& t,const R
     // Validate all reachable addresses, including tiled swizzles at odd pitches.
     const auto& footprint=Footprint(t,r,address);
     const auto& desc=static_cast<VulkanTexture&>(image).desc;
-    if(desc.width!=t.width||desc.height!=t.height)throw std::runtime_error("Resolve storage image extent mismatch");
+    const uint32_t scale=store?store_input_scale_:1;
+    if(desc.width!=t.width*scale||desc.height!=t.height*scale)throw std::runtime_error("Resolve storage image extent mismatch");
     // A physical memory allocation may exceed maxStorageBufferRange (only
     // 128 MiB is guaranteed by Vulkan). Bind an aligned window containing this
     // dispatch, subdividing the rectangle if its tiled footprint is too wide.
@@ -1278,7 +1296,8 @@ void ResolveMemory::Transfer(RenderTexture& image,const TextureLayout& t,const R
         return;
     }
     const Parameters push{uint32_t(r.right-r.left),uint32_t(r.bottom-r.top),uint32_t(r.left),uint32_t(r.top),
-        level.x,level.y,level.pitch_blocks,uint32_t(std::countr_zero(t.block.bytes)),t.tiled,t.endian,format|(stencil?0x80000000u:0),
+        level.x,level.y,level.pitch_blocks,uint32_t(std::countr_zero(t.block.bytes)),t.tiled,t.endian,
+        format|StoreScaleBits(store)|(stencil?0x80000000u:0),
         (t.fetch[0]>>2)&255,uint32_t(level.offset)+address,capacity_/4,source_x,source_y};
     Dispatch(image,push,store,stencil,first,last-first,presentation_timing,rgba_stencil);
     if(store)Define(footprint);
@@ -1289,7 +1308,10 @@ void ResolveMemory::Dispatch(RenderTexture& image,Parameters push,bool store,Ren
     if(!byte_count||first_byte%descriptor_alignment_||byte_count>descriptor_range_||uint64_t(first_byte)+byte_count>capacity_)
         throw std::runtime_error("Invalid resolve storage descriptor range");
     // Earlier deferred stores into these bytes run first, in order.
-    MaterializeDeferredStores(first_byte,first_byte+byte_count);
+    {
+        const ScaledDispatchScope packed(scaled_dispatch_,false);
+        MaterializeDeferredStores(first_byte,first_byte+byte_count);
+    }
     if(deferring_image_) {
         if(!store||stencil||rgba_stencil||&image!=deferring_image_.get())
             throw std::logic_error("Deferred resolve store accepts only its own plain store dispatches");
@@ -1327,8 +1349,17 @@ void ResolveMemory::Dispatch(RenderTexture& image,Parameters push,bool store,Ren
     auto* descriptor_ptr=descriptor_lease?descriptor_lease.get():descriptors.get();
     // No binding contents are cached: previous resources may already be gone.
     // Every fixed-layout binding is overwritten while this lease is exclusive.
-    const RenderBufferStructuredView window(4,first_byte/4);
-    descriptor_ptr->setBuffer(0,bytes_.get(),byte_count,&window);
+    // The full-resolution copy holds scale x scale words per word. Loads
+    // read it as binding 0; stores write packed EDRAM (binding 0) and the
+    // copy (binding 3) together.
+    if(scaled_dispatch_&&!scaled_copy_)throw std::logic_error("Full-resolution EDRAM copy is not configured");
+    const uint32_t samples=scaled_dispatch_?scaled_scale_*scaled_scale_:1;
+    auto* memory=scaled_dispatch_&&!store?scaled_copy_.get():bytes_.get();
+    const RenderBufferStructuredView window(4,first_byte/4*(store?1:samples));
+    descriptor_ptr->setBuffer(0,memory,uint64_t(byte_count)*(store?1:samples),&window);
+    auto* copy=store&&scaled_dispatch_?scaled_copy_.get():nullptr;
+    const RenderBufferStructuredView copy_window(4,first_byte/4*samples);
+    if(store)descriptor_ptr->setBuffer(3,copy?copy:bytes_.get(),uint64_t(byte_count)*(copy?samples:1),copy?&copy_window:&window);
     bool reuse_identity_view=false;
     if(identity_view_reuse_stats_.enabled) {
         if(store)++identity_view_reuse_stats_.store_bypasses;
@@ -1368,7 +1399,8 @@ void ResolveMemory::Dispatch(RenderTexture& image,Parameters push,bool store,Ren
     if(!batched){if(batch_)batch_->Flush();commands->begin();}
     NativeSynchronousGpuTimingScope presentation_scope(!batched&&!store?presentation_timing:nullptr,*commands,
         NativeSynchronousGpuPhase::FrontbufferDecode,push.width,push.height);
-    commands->barriers(RenderBarrierStage::COMPUTE,RenderBufferBarrier(bytes_.get(),store?(RenderBufferAccess::READ|RenderBufferAccess::WRITE):RenderBufferAccess::READ));
+    commands->barriers(RenderBarrierStage::COMPUTE,RenderBufferBarrier(memory,store?(RenderBufferAccess::READ|RenderBufferAccess::WRITE):RenderBufferAccess::READ));
+    if(copy)commands->barriers(RenderBarrierStage::COMPUTE,RenderBufferBarrier(copy,RenderBufferAccess::READ|RenderBufferAccess::WRITE));
     commands->barriers(RenderBarrierStage::COMPUTE,RenderTextureBarrier(&image,store?RenderTextureLayout::SHADER_READ:RenderTextureLayout::GENERAL));
     if(store)commands->barriers(RenderBarrierStage::COMPUTE,RenderTextureBarrier(stencil_binding,RenderTextureLayout::SHADER_READ));
     commands->setComputePipelineLayout(layouts_[index].get());commands->setComputePushConstants(0,&push);
@@ -1377,7 +1409,21 @@ void ResolveMemory::Dispatch(RenderTexture& image,Parameters push,bool store,Ren
     if(!batched){
         presentation_scope.End(*commands);commands->end();presentation_scope.BeforeSubmit();
         queue_.executeCommandLists(commands,fence_.get());presentation_scope.BeforeFenceWait();
-        queue_.waitForCommandFence(fence_.get());presentation_scope.FenceCompleted();
+        {
+            // Each synchronous dispatch drains the GPU queue: report long ones.
+            const auto wait_start=std::chrono::steady_clock::now();
+            queue_.waitForCommandFence(fence_.get());
+            const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-wait_start).count();
+            static std::atomic<uint64_t> waits{0},long_waits{0};
+            const uint64_t n=waits.fetch_add(1,std::memory_order_relaxed)+1;
+            if(ms>20.0) {
+                const uint64_t l=long_waits.fetch_add(1,std::memory_order_relaxed)+1;
+                if(l<=16||(l&(l-1))==0)
+                    REXLOG_WARN("Resolve memory: synchronous {} dispatch waited {:.1f} ms for the GPU ({} long of {} synchronous)",
+                                store?"store":"load",ms,l,n);
+            }
+        }
+        presentation_scope.FenceCompleted();
     }
 }
 const ResolveMemory::Ranges& ResolveMemory::SurfaceFootprint(const SurfaceLayout& s) const {
@@ -1434,8 +1480,10 @@ void ResolveMemory::RecordSurfaceWrite(const SurfaceLayout& s,PrimarySurfaceWrit
     AdvancePhysicalSerial();
     const auto& footprint=SurfaceFootprint(s);
     const auto mutations_before=page_versions_.mutations();
-    for(const auto& [first,last]:footprint)
+    for(const auto& [first,last]:footprint) {
         page_versions_.Assign(first/4096,(last-1)/4096+1,serial_);
+        if(scaled_copy_)ScaledCopyStale(first,last);
+    }
     // Exact memo maintenance (reached only after every Assign succeeded).
     // The only page changes since mutations_before are the Assigns above, all
     // inside [write_first,write_end). An entry current at mutations_before whose
@@ -1467,14 +1515,71 @@ std::optional<std::array<uint64_t,2>> ResolveMemory::PrimarySurfaceWriteVersions
 void ResolveMemory::RecordPackedSurfaceCommit(const SurfaceLayout& surface) {
     ++mutation_serial_;Define(SurfaceFootprint(surface));
 }
-void ResolveMemory::TransferSurface(RenderTexture& image,const SurfaceLayout& s,bool store) {
+void ResolveMemory::TransferSurface(RenderTexture& image,const SurfaceLayout& s,bool store,bool scaled_load) {
     const auto& footprint=SurfaceFootprint(s);
     const auto& desc=static_cast<VulkanTexture&>(image).desc;
-    if(desc.width!=s.width||desc.height!=s.height)throw std::runtime_error("EDRAM image extent mismatch");
-    const Parameters push{s.width,s.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,s.depth?3u:2u,0,
-        SurfaceStorageFormat(s)|(s.depth&&store?0x80000000u:0),0,s.base*5120,(NativeEdramTiles()*1280),0,0};
-    Dispatch(image,push,store,s.depth&&store?&image:nullptr,0,NativeEdramBytes());
-    if(store)Define(footprint);
+    const uint32_t scale=store?store_input_scale_:scaled_load?scaled_scale_:1;
+    if(desc.width!=s.width*scale||desc.height!=s.height*scale)throw std::runtime_error("EDRAM image extent mismatch");
+    if(scaled_load&&(store||!scaled_copy_||!ScaledSurfaceCurrent(s)))
+        throw std::logic_error("Full-resolution EDRAM load of a stale surface");
+    if(store&&scaled_copy_&&store_input_scale_!=1&&store_input_scale_!=scaled_scale_)
+        throw std::runtime_error("EDRAM store scale differs from the full-resolution copy");
+    Parameters push{s.width,s.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,s.depth?3u:2u,0,
+        SurfaceStorageFormat(s)|StoreScaleBits(store)|(s.depth&&store?0x80000000u:0),0,s.base*5120,(NativeEdramTiles()*1280),0,0};
+    if(scaled_load) {
+        // One invocation per host pixel.
+        push.width*=scaled_scale_;push.height*=scaled_scale_;push.format|=ScaledCopyBits();
+        const ScaledDispatchScope scope(scaled_dispatch_,true);
+        Dispatch(image,push,false,nullptr,0,NativeEdramBytes());
+        ++scaled_copy_stats_.loads;
+        return;
+    }
+    // With the copy, one store writes packed EDRAM and every host sample.
+    const bool copy=store&&scaled_copy_;
+    if(copy){push.format|=ScaledCopyBits();++scaled_copy_stats_.stores;}
+    {
+        const ScaledDispatchScope scope(scaled_dispatch_,copy);
+        Dispatch(image,push,store,s.depth&&store?&image:nullptr,0,NativeEdramBytes());
+    }
+    if(store) {
+        const ScaledDispatchScope defining(scaled_defining_,bool(scaled_copy_));
+        Define(footprint);
+    }
+}
+void ResolveMemory::EnableScaledCopy(uint32_t scale) {
+    if(scaled_copy_||mutation_serial_)throw std::logic_error("Full-resolution EDRAM copy must be configured once before use");
+    if(scale<2||scale>8||!std::has_single_bit(scale)||capacity_<NativeEdramBytes())
+        throw std::invalid_argument("Invalid full-resolution EDRAM copy scale");
+    const uint64_t bytes=uint64_t(NativeEdramBytes())*scale*scale;
+    const auto& limits=static_cast<VulkanDevice&>(device_).physicalDeviceProperties.limits;
+    if(bytes>limits.maxStorageBufferRange)throw std::runtime_error("Full-resolution EDRAM copy exceeds the storage buffer range");
+    scaled_copy_=device_.createBuffer(RenderBufferDesc::DefaultBuffer(bytes,RenderBufferFlag::STORAGE|RenderBufferFlag::UNORDERED_ACCESS));
+    if(!scaled_copy_)throw std::runtime_error("Cannot allocate the full-resolution EDRAM copy");
+    scaled_scale_=scale;
+}
+void ResolveMemory::ScaledCopyStale(uint32_t address,uint32_t last) {
+    auto it=scaled_current_.lower_bound(address);
+    if(it!=scaled_current_.begin()&&std::prev(it)->second>address)--it;
+    while(it!=scaled_current_.end()&&it->first<last) {
+        const auto [first,end]=*it;it=scaled_current_.erase(it);
+        if(first<address)scaled_current_.emplace(first,address);
+        if(end>last){scaled_current_.emplace(last,end);break;}
+    }
+}
+bool ResolveMemory::ScaledSurfaceCurrent(const SurfaceLayout& s) const {
+    if(!scaled_copy_)return false;
+    for(const auto& [first,last]:SurfaceFootprint(s)) {
+        const auto it=scaled_current_.upper_bound(first);
+        if(it==scaled_current_.begin()||std::prev(it)->second<last)return false;
+    }
+    return true;
+}
+std::shared_ptr<RenderTexture> ResolveMemory::LoadScaledSurfaceShared(const SurfaceLayout& s) {
+    auto desc=RenderTextureDesc::Texture2D(s.width*scaled_scale_,s.height*scaled_scale_,1,RenderFormat::R32G32B32A32_FLOAT);
+    desc.flags|=RenderTextureFlag::STORAGE|RenderTextureFlag::UNORDERED_ACCESS;
+    std::shared_ptr<RenderTexture> image=device_.createTexture(desc);
+    if(batch_)batch_->KeepImage(image,uint64_t(desc.width)*desc.height*16);
+    TransferSurface(*image,s,false,true);return image;
 }
 void ResolveMemory::EnableRawFloatCpuTextures(std::span<const uint32_t> code) {
     if(raw_float_cpu_stats_.configured||mutation_serial_)
@@ -1581,7 +1686,10 @@ bool ResolveMemory::RestoreColorSurface(RenderTexture& target,const SurfaceLayou
     if(!restore_layout_||s.depth||!batch_||!batch_->active())return false;
     (void)SurfaceFootprint(s);
     const auto& desc=static_cast<VulkanTexture&>(target).desc;
-    if(desc.width!=s.width||desc.height!=s.height)throw std::runtime_error("EDRAM image extent mismatch");
+    // A scaled target reads the full-resolution copy.
+    const bool scaled=scaled_copy_&&desc.width==s.width*scaled_scale_&&desc.height==s.height*scaled_scale_;
+    if(!scaled&&(desc.width!=s.width||desc.height!=s.height))throw std::runtime_error("EDRAM image extent mismatch");
+    if(scaled&&!ScaledSurfaceCurrent(s))throw std::logic_error("Full-resolution EDRAM restore of a stale surface");
     auto& pipeline=restore_pipelines_[desc.format];
     if(!pipeline) {
         RenderGraphicsPipelineDesc p;
@@ -1597,32 +1705,35 @@ bool ResolveMemory::RestoreColorSurface(RenderTexture& target,const SurfaceLayou
     }
     // Identical to TransferSurface's load parameters over the whole EDRAM window.
     const uint32_t bytes=NativeEdramBytes();
-    const Parameters push{s.width,s.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,2u,0,
-        SurfaceStorageFormat(s),0,s.base*5120,bytes/4,0,0};
-    if(!restore_descriptors_) {
+    const Parameters push{desc.width,desc.height,0,0,0,0,(s.pitch+79)/80,Surface64(s)?3u:2u,2u,0,
+        SurfaceStorageFormat(s)|(scaled?ScaledCopyBits():0u),0,s.base*5120,bytes/4,0,0};
+    auto& descriptors=scaled?scaled_restore_descriptors_:restore_descriptors_;
+    auto* memory=scaled?scaled_copy_.get():bytes_.get();
+    if(!descriptors) {
         const RenderDescriptorRange range(RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,0,1);
         auto created=device_.createDescriptorSet(RenderDescriptorSetDesc(&range,1));
         if(!created)throw std::runtime_error("Direct color restore descriptor allocation failed");
         const RenderBufferStructuredView window(4,0);
-        created->setBuffer(0,bytes_.get(),bytes,&window);
-        restore_descriptors_=std::move(created);
+        created->setBuffer(0,memory,uint64_t(bytes)*(scaled?scaled_scale_*scaled_scale_:1u),&window);
+        descriptors=std::move(created);
     }
     const RenderTexture* attachment=&target;
     RenderFramebufferDesc fd;fd.colorAttachments=&attachment;fd.colorAttachmentsCount=1;
     auto framebuffer=device_.createFramebuffer(fd);
     if(!framebuffer)throw std::runtime_error("Direct color restore framebuffer creation failed");
     auto* commands=&batch_->BeginStage();
-    auto* descriptor_ptr=restore_descriptors_.get();auto* framebuffer_ptr=framebuffer.get();
+    auto* descriptor_ptr=descriptors.get();auto* framebuffer_ptr=framebuffer.get();
     batch_->Keep(std::move(framebuffer));
-    commands->barriers(RenderBarrierStage::GRAPHICS,RenderBufferBarrier(bytes_.get(),RenderBufferAccess::READ));
+    commands->barriers(RenderBarrierStage::GRAPHICS,RenderBufferBarrier(memory,RenderBufferAccess::READ));
     commands->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(&target,RenderTextureLayout::COLOR_WRITE));
     commands->setFramebuffer(framebuffer_ptr);
-    commands->setViewports(RenderViewport(0,0,float(s.width),float(s.height)));
-    commands->setScissors(RenderRect(0,0,int32_t(s.width),int32_t(s.height)));
+    commands->setViewports(RenderViewport(0,0,float(desc.width),float(desc.height)));
+    commands->setScissors(RenderRect(0,0,int32_t(desc.width),int32_t(desc.height)));
     commands->setGraphicsPipelineLayout(restore_layout_.get());commands->setGraphicsPushConstants(0,&push);
     commands->setGraphicsDescriptorSet(descriptor_ptr,0);commands->setPipeline(pipeline.get());
     commands->drawInstanced(3,1,0,0);
     commands->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(&target,RenderTextureLayout::SHADER_READ));
+    if(scaled)++scaled_copy_stats_.restores;
     ++direct_color_restores_;return true;
 }
 bool ResolveMemory::EnablePackedStencilClear(std::span<const uint32_t> code) {

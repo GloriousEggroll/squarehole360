@@ -22,6 +22,8 @@ namespace gow3::renderer {
 namespace {
 using Json = nlohmann::json;
 constexpr uint32_t kSchema = 1;
+// About 1 KB per recipe in JSON.
+constexpr size_t kMaxManifestBytes = 48u * 1024 * 1024;
 // Only the recorder holds this nonblocking lease. Concurrent readers use the
 // complete atomic manifest; another game instance may simply miss persistence.
 // OS handles release on process exit, so a crash leaves no stale lock token.
@@ -443,9 +445,11 @@ void NativePipelineRecipeCache::Observe(ObservedNativePipeline o) noexcept {
     } catch (...) { /* Cache recording must never change the accepted draw outcome. */
     }
 }
-std::vector<ObservedNativePipeline> NativePipelineRecipeCache::Load() const noexcept {
+namespace {
+std::vector<ObservedNativePipeline> LoadDirectory(const std::filesystem::path &directory_, const std::string &version_,
+                                                  const NativePipelineRecipeCache::Limits &limits_) noexcept {
     try {
-        const auto raw = ReadBounded(directory_ / "recipes.json", 16u * 1024 * 1024);
+        const auto raw = ReadBounded(directory_ / "recipes.json", kMaxManifestBytes);
         const auto manifest = Json::parse(raw);
         if (manifest.at("schema") != kSchema || manifest.at("compiler") != version_)
             return {};
@@ -483,6 +487,79 @@ std::vector<ObservedNativePipeline> NativePipelineRecipeCache::Load() const noex
         return result;
     } catch (...) {
         return {};
+    }
+}
+} // namespace
+std::vector<ObservedNativePipeline> NativePipelineRecipeCache::Load() const noexcept {
+    return LoadDirectory(directory_, version_, limits_);
+}
+size_t NativePipelineRecipeCache::AdoptOlderVersions(const std::filesystem::path &parent,
+                                                     const std::string &version, Limits limits) noexcept {
+    try {
+        if (!Digest(version) || !std::filesystem::is_directory(parent))
+            return 0;
+        std::vector<std::string> older;
+        for (const auto &entry : std::filesystem::directory_iterator(parent)) {
+            const auto name = entry.path().filename().string();
+            if (name != version && Digest(name) && entry.is_directory() && !entry.is_symlink() &&
+                std::filesystem::is_regular_file(entry.path() / "recipes.json") &&
+                !std::filesystem::exists(parent / version / (name + ".adopted")))
+                older.push_back(name);
+        }
+        if (older.empty())
+            return 0;
+        // Newest recordings first, so the limits keep the most recent.
+        std::sort(older.begin(), older.end(), [&](const std::string &a, const std::string &b) {
+            return std::filesystem::last_write_time(parent / a / "recipes.json") >
+                   std::filesystem::last_write_time(parent / b / "recipes.json");
+        });
+        const auto directory = parent / version;
+        std::filesystem::create_directories(directory);
+        const CacheWriterLease lease(directory / "writer.lock");
+        std::vector<NativeFsiPipelineRecipe> stored;
+        std::set<NativeFsiPipelineRecipe> unique;
+        std::set<std::string> sources;
+        for (auto &item : LoadDirectory(directory, version, limits)) {
+            sources.insert(item.recipe.vertex);
+            if (item.recipe.pixel)
+                sources.insert(*item.recipe.pixel);
+            unique.insert(item.recipe);
+            stored.push_back(std::move(item.recipe));
+        }
+        size_t added = 0;
+        for (const auto &name : older) {
+            for (auto &item : LoadDirectory(parent / name, name, limits)) {
+                if (stored.size() >= limits.recipes)
+                    break;
+                if (unique.contains(item.recipe))
+                    continue;
+                const size_t extra = size_t(!sources.contains(item.recipe.vertex)) +
+                                     size_t(item.recipe.pixel && !sources.contains(*item.recipe.pixel));
+                if (sources.size() + extra > limits.sources)
+                    continue;
+                const auto write = [&](const std::string &hash, const PipelineShaderSource &bytes) {
+                    if (sources.insert(hash).second)
+                        WriteAtomic(directory / (hash + ".bin"), *bytes);
+                };
+                write(item.recipe.vertex, item.vertex);
+                if (item.recipe.pixel)
+                    write(*item.recipe.pixel, item.pixel);
+                unique.insert(item.recipe);
+                stored.push_back(std::move(item.recipe));
+                ++added;
+            }
+        }
+        Json manifest{{"schema", kSchema}, {"compiler", version}, {"recipes", Json::array()}};
+        for (const auto &item : stored)
+            manifest["recipes"].push_back(ToJson(item));
+        const auto text = manifest.dump();
+        WriteAtomic(directory / "recipes.json",
+                    std::span(reinterpret_cast<const uint8_t *>(text.data()), text.size()));
+        for (const auto &name : older)
+            std::ofstream(directory / (name + ".adopted"), std::ios::trunc);
+        return added;
+    } catch (...) {
+        return 0;
     }
 }
 void NativePipelineRecipeCache::Worker() noexcept {
@@ -539,7 +616,8 @@ void NativePipelineRecipeCache::Worker() noexcept {
                 size_t scanned = 0;
                 if (std::filesystem::exists(directory_))
                     for (const auto &file : std::filesystem::directory_iterator(directory_)) {
-                        if (++scanned > 4096)
+                        // Sources plus the manifest, lock and temporaries.
+                        if (++scanned > limits_.sources + 64)
                             throw std::runtime_error(
                                 "Observed cache directory exceeds its entry bound");
                         if (OwnedTemporary(file.path().filename().string())) {

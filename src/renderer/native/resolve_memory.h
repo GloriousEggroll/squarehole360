@@ -1,4 +1,5 @@
 #pragma once
+#include <bit>
 #include <array>
 #include "texture_data.h"
 #include "cpu_upload_receipts.h"
@@ -274,6 +275,11 @@ public:
     };
     const RawFloatCpuStatistics& raw_float_cpu_statistics() const {return raw_float_cpu_stats_;}
     void StoreSurface(plume::RenderTexture&,const SurfaceLayout&);
+    // Stores read their image at this many pixels per guest pixel (1 or a
+    // power of two up to 64): internal resolution scaling stores host
+    // images directly, one sample per guest pixel. Loads are unaffected.
+    void SetStoreInputScale(uint32_t scale) {store_input_scale_=scale;}
+    uint32_t store_input_scale() const noexcept {return store_input_scale_;}
     // Exact full-surface D24FS8 zero clear. Caller commits dirty working aliases first.
     void ClearPackedDepthZero(const SurfaceLayout&);
     // Optional startup-only fused UNORM24 atlas load/restore/clear/store replacement.
@@ -291,13 +297,28 @@ public:
 
     std::unique_ptr<plume::RenderTexture> LoadSurface(const SurfaceLayout&);
     std::shared_ptr<plume::RenderTexture> LoadSurfaceShared(const SurfaceLayout&);
+    // Full-resolution EDRAM (internal resolution scaling). Startup only: a
+    // second buffer keeps scale x scale samples of every word, so scaled
+    // surfaces that alias each other exchange host pixels instead of guest
+    // pixels. Surface stores write both (a guest-size image repeats its
+    // samples); any other write to EDRAM makes those bytes of the copy stale.
+    void EnableScaledCopy(uint32_t scale);
+    uint32_t scaled_copy_scale() const noexcept {return scaled_copy_?scaled_scale_:1;}
+    // Every byte of the surface was last written by a surface store.
+    bool ScaledSurfaceCurrent(const SurfaceLayout&) const;
+    // LoadSurfaceShared from the copy: an image scaled_copy_scale() times the
+    // surface size. Requires ScaledSurfaceCurrent.
+    std::shared_ptr<plume::RenderTexture> LoadScaledSurfaceShared(const SurfaceLayout&);
+    struct ScaledCopyStatistics {uint64_t stores=0,loads=0,restores=0;};
+    const ScaledCopyStatistics& scaled_copy_statistics() const {return scaled_copy_stats_;}
     // Startup only. Decode packed color straight into its attachment with one
     // fullscreen draw (the load shader built as a fragment shader).
     void EnableDirectColorRestore(std::span<const uint32_t> vertex,std::span<const uint32_t> pixel);
     // Same values as LoadSurfaceShared followed by an identity Resolve into
     // the target. Recorded only inside an active transfer batch; false means
     // not configured, a depth surface or no batch, and the caller keeps the
-    // load-and-copy path.
+    // load-and-copy path. A target scaled_copy_scale() times the surface size
+    // reads the full-resolution copy (ScaledSurfaceCurrent required).
     bool RestoreColorSurface(plume::RenderTexture& target,const SurfaceLayout&);
     uint64_t direct_color_restores() const {return direct_color_restores_;}
     // Transfer-only source scratch: pixels outside rectangle are undefined.
@@ -421,6 +442,18 @@ private:
     // ranges immediately; recursive transfer splitting retains only endpoints.
     const Ranges& Footprint(const TextureLayout&,const plume::RenderRect&,uint32_t address) const;
     void Define(const Ranges&);
+    uint32_t store_input_scale_=1;
+    std::unique_ptr<plume::RenderBuffer> scaled_copy_;
+    uint32_t scaled_scale_=1;
+    // EDRAM byte ranges whose copy is current (merged, exclusive ends).
+    std::map<uint32_t,uint32_t> scaled_current_;
+    bool scaled_dispatch_=false,scaled_defining_=false;
+    std::unique_ptr<plume::RenderDescriptorSet> scaled_restore_descriptors_;
+    ScaledCopyStatistics scaled_copy_stats_;
+    void ScaledCopyStale(uint32_t first,uint32_t last);
+    uint32_t ScaledCopyBits() const {return uint32_t(std::countr_zero(scaled_scale_))<<27;}
+    // log2 of the store input scale in format bits 24-26 (resolve_memory.comp).
+    uint32_t StoreScaleBits(bool store) const {return store?uint32_t(std::countr_zero(store_input_scale_))<<24:0;}
     struct Parameters {
         uint32_t width,height,x,y,packed_x,packed_y,pitch,log_bytes,tiled,endian,format,signs,offset,words;
         int32_t source_x,source_y;
@@ -444,7 +477,7 @@ private:
     void MaterializeDeferredStores(const Ranges& ranges) {
         if(!pending_stores_.empty()&&!ranges.empty())MaterializeDeferredStores(ranges.front().first,ranges.back().second);
     }
-    void TransferSurface(plume::RenderTexture&,const SurfaceLayout&,bool store);
+    void TransferSurface(plume::RenderTexture&,const SurfaceLayout&,bool store,bool scaled_load=false);
     RawFloatCpuStatistics raw_float_cpu_stats_;
     std::unique_ptr<plume::RenderShader> raw_float_cpu_shader_;
     std::unique_ptr<plume::RenderPipelineLayout> raw_float_cpu_layout_;

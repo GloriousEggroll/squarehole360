@@ -1,0 +1,139 @@
+#version 460
+// Ray-traced shadows for the game's dominant light, step 1: traces from every
+// pixel of the scene depth towards the light and stores the visible fraction
+// (1 where nothing was traced). Step 2 (rt_shadow.comp) merges it into the
+// game's light attenuation buffer. With internal resolution scaling one point
+// is traced per step x step pixels (the result is that much smaller).
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1) uniform texture2D depth_texture;  // device depth, reverse Z
+layout(set = 0, binding = 2) uniform texture2D attenuation;
+layout(set = 0, binding = 3, r8) uniform writeonly image2D result;
+
+layout(push_constant, std430) uniform Push {
+    vec4 inverse_view_projection[4];  // guest clip to camera-relative world, one row per output
+    vec4 light;        // w 1: camera-relative position; w 0: direction towards the light
+    uvec2 size;
+    uint frame;
+    uint rays;
+    float softness;    // light radius (cm) for a local light, cone half-angle (radians) for a directional one
+    float sky_depth;
+    uint step;  // pixels per traced point on each axis
+    float max_distance;
+} p;
+
+vec3 Position(ivec2 pixel, float depth) {
+    const vec2 ndc = vec2((float(pixel.x) + 0.5) / float(p.size.x) * 2.0 - 1.0,
+                          1.0 - (float(pixel.y) + 0.5) / float(p.size.y) * 2.0);
+    const vec4 c = vec4(ndc, 1.0 - depth, 1.0);
+    const vec4 w = vec4(dot(p.inverse_view_projection[0], c), dot(p.inverse_view_projection[1], c),
+                        dot(p.inverse_view_projection[2], c), dot(p.inverse_view_projection[3], c));
+    return w.xyz / w.w;
+}
+
+float Depth(ivec2 pixel) {
+    return texelFetch(depth_texture, clamp(pixel, ivec2(0), ivec2(p.size) - 1), 0).r;
+}
+
+uint Hash(uint x) {
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+
+void main() {
+    const ivec2 traced = ivec2(gl_GlobalInvocationID.xy);
+    const int step = int(max(p.step, 1u));
+    const ivec2 pixel = traced * step;
+    if (any(greaterThanEqual(uvec2(pixel), p.size))) return;
+    // Already in the game's shadow: nothing to trace.
+    if (texelFetch(attenuation, pixel, 0).r <= 0.0) {
+        imageStore(result, traced, vec4(0.0));
+        return;
+    }
+    const float depth = Depth(pixel);
+    if (depth <= p.sky_depth) {
+        imageStore(result, traced, vec4(1.0));
+        return;
+    }
+    const vec3 position = Position(pixel, depth);
+    const vec3 left = Position(pixel - ivec2(1, 0), Depth(pixel - ivec2(1, 0)));
+    const vec3 right = Position(pixel + ivec2(1, 0), Depth(pixel + ivec2(1, 0)));
+    const vec3 up = Position(pixel - ivec2(0, 1), Depth(pixel - ivec2(0, 1)));
+    const vec3 down = Position(pixel + ivec2(0, 1), Depth(pixel + ivec2(0, 1)));
+    const vec3 dx = distance(right, position) < distance(position, left) ? right - position : position - left;
+    const vec3 dy = distance(down, position) < distance(position, up) ? down - position : position - up;
+    vec3 normal = normalize(cross(dx, dy));
+    if (any(isnan(normal))) {
+        imageStore(result, traced, vec4(1.0));
+        return;
+    }
+    if (dot(normal, position) > 0.0) normal = -normal;  // face the camera
+
+    const vec3 to_light = p.light.w != 0.0 ? p.light.xyz - position : p.light.xyz;
+    const float light_distance = p.light.w != 0.0 ? length(to_light) : p.max_distance;
+    const vec3 l = normalize(to_light);
+    // Surfaces facing away: the game's shading leaves them unlit anyway.
+    const float facing = dot(normal, l);
+    if (facing <= 0.0) {
+        imageStore(result, traced, vec4(1.0));
+        return;
+    }
+    // Start off the surface, along the normal and towards the light, so the
+    // flat triangles of a smoothly shaded mesh (a character's skin) do not
+    // shadow themselves where the light grazes them.
+    const float distance_to_camera = length(position);
+    const float offset = 1.0 + distance_to_camera * 0.003;
+    const vec3 origin = position + normal * offset + l * offset;
+    const vec3 tangent = normalize(abs(l.z) < 0.9 ? cross(l, vec3(0, 0, 1)) : cross(l, vec3(1, 0, 0)));
+    const vec3 bitangent = cross(l, tangent);
+
+    float visible = 0.0;
+    const uint rays = max(p.rays, 1u);
+    // A fixed pattern per pixel: soft edges are dithered but do not crawl.
+    const uint seed = Hash(uint(traced.x) * 1973u + uint(traced.y) * 9277u);
+    uint ray_count = 0u;
+    for (uint i = 0u; i < rays; ++i) {
+        // Two opposite cells first; the rest only where they disagree
+        // (a penumbra).
+        if (i == 2u && (visible == 0.0 || visible == 2.0)) break;
+        const uint cell = i == 1u ? 3u : i == 3u ? 1u : i;
+        ++ray_count;
+        vec3 direction = l;
+        float t_max = light_distance;
+        if (p.softness > 0.0) {
+            // A point on a disc facing the pixel: the light's area, or the
+            // sun's cone.
+            // Stratified: ray i covers its own cell of the disc (radius
+            // halves by angle sectors), rotated per pixel.
+            const uint h = Hash(seed + cell * 0x9e3779b9u);
+            const float u1 = (float(cell & 1u) + float(h & 0xffffu) / 65536.0) / 2.0;
+            const float u2 = (float(cell >> 1u) + float(h >> 16) / 65536.0) / float(max(rays / 2u, 1u)) +
+                             float(seed & 0xffu) / 256.0;
+            const vec2 disc = sqrt(u1) * vec2(cos(6.2831853 * u2), sin(6.2831853 * u2));
+            if (p.light.w != 0.0) {
+                const vec3 target = p.light.xyz + (tangent * disc.x + bitangent * disc.y) * p.softness;
+                direction = normalize(target - origin);
+                t_max = length(target - origin);
+            } else {
+                direction = normalize(l + (tangent * disc.x + bitangent * disc.y) * p.softness);
+            }
+        }
+        // Stop short of the light: lamps sit in fixtures and among ceiling
+        // geometry that the game does not draw into its shadow maps.
+        if (p.light.w != 0.0) t_max -= max(20.0, 0.15 * t_max);
+        t_max = max(t_max, 0.0);
+        rayQueryEXT query;
+        rayQueryInitializeEXT(query, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, 0xff,
+                              origin, 0.0, direction, t_max);
+        rayQueryProceedEXT(query);
+        if (rayQueryGetIntersectionTypeEXT(query, true) != gl_RayQueryCommittedIntersectionTriangleEXT) visible += 1.0;
+    }
+    visible /= float(ray_count);
+    // Where the light grazes the surface the game's own shading is dim and
+    // the facets of the captured mesh are least reliable.
+    visible = mix(1.0, visible, smoothstep(0.02, 0.15, facing));
+    imageStore(result, traced, vec4(visible));
+}

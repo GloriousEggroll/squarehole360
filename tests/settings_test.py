@@ -166,40 +166,47 @@ class SettingsTest(unittest.TestCase):
         self.assertIn('gow3_renderer = "xenia"', self.path.read_text())
         self.assertNotIn('reference', self.path.read_text())
 
-    def test_legacy_filtering_is_normalized_on_load_and_save(self):
-        self.assertNotIn('anisotropic_override', BY_KEY)
+    def test_filtering_levels_round_trip_and_others_normalize(self):
+        self.assertIn('anisotropic_override', BY_KEY)
+        self.assertEqual(BY_KEY['anisotropic_override'].default, -1)  # the game's own filtering
         for mode in ('native', 'xenia', 'reference'):
-            for legacy in ('5', '0', '-1', 'true', '"forced"'):
-                with self.subTest(mode=mode, legacy=legacy):
-                    text = f'gow3_renderer = "{mode}"\nanisotropic_override = {legacy}\nfuture_option = 7\n'
+            for saved, expected in (('5', 5), ('2', 2), ('-1', -1), ('0', -1), ('1', -1), ('true', -1), ('"forced"', -1)):
+                with self.subTest(mode=mode, saved=saved):
+                    text = f'gow3_renderer = "{mode}"\nanisotropic_override = {saved}\nfuture_option = 7\n'
                     self.path.write_text(text)
                     values = load(self.path)
-                    self.assertEqual(values['anisotropic_override'], -1)
+                    self.assertEqual(values['anisotropic_override'], expected)
                     self.assertEqual(self.path.read_text(), text)  # Loading does not rewrite the user's file.
                     self.assertEqual(values['gow3_renderer'], 'xenia' if mode == 'reference' else mode)
-                    values['anisotropic_override'] = 5  # An old caller cannot save a forced override either.
+                    values['anisotropic_override'] = 4
                     save(values, self.path, fingerprint(self.path))
-                    self.assertEqual(load(self.path)['anisotropic_override'], -1)
-                    self.assertIn('anisotropic_override = -1', self.path.read_text())
+                    self.assertEqual(load(self.path)['anisotropic_override'], 4)
                     self.assertEqual(load(self.path)['future_option'], 7)
                     self.assertEqual(self.path.with_suffix('.toml.bak').read_text(), text)
-                    self.assertEqual(values['anisotropic_override'], 5)  # Save owns its normalized copy.
 
-    def test_gui_has_no_filtering_override_and_preserves_game_default(self):
+    def test_gui_offers_filtering_with_game_default(self):
         self.path.write_text('gow3_renderer = "native"\nanisotropic_override = 5\n')
         window = SettingsWindow(self.path, hdr_probe=False)
         self.addCleanup(window.close)
-        self.assertNotIn('anisotropic_override', window.widgets)
-        picker = window.widgets['gow3_renderer']
-        for mode in ('native', 'xenia', 'native'):
-            picker.setCurrentIndex(picker.findData(mode))
-            self.assertNotIn('anisotropic_override', {s.key for s in visible_settings(window.read_values())})
-            self.assertEqual(window.read_values()['anisotropic_override'], -1)
-            self.assertTrue(window.save_settings())
-            self.assertEqual(load(self.path)['anisotropic_override'], -1)
+        self.assertIn('anisotropic_override', window.widgets)
+        self.assertEqual(window.read_values()['anisotropic_override'], 5)
         window.defaults()
+        self.assertEqual(window.read_values()['anisotropic_override'], -1)
         self.assertTrue(window.save_settings())
         self.assertEqual(load(self.path)['anisotropic_override'], -1)
+
+    def test_system_link_shows_the_server_only_for_dedicated(self):
+        window = SettingsWindow(self.path, hdr_probe=False)
+        box = window.widgets['network_system_link']
+        self.assertEqual(box.currentData(), 'lan')
+        self.assertTrue(window.widgets['network_lobby_server'].isHidden())
+        box.setCurrentIndex(box.findData('dedicated'))
+        self.assertFalse(window.widgets['network_lobby_server'].isHidden())
+        box.setCurrentIndex(box.findData('lan'))
+        self.assertTrue(window.widgets['network_lobby_server'].isHidden())
+        # A config from before the setting keeps using its server.
+        self.assertEqual(widget_value(BY_KEY['network_system_link'], {'network_lobby_server': 'example.org'}), 'dedicated')
+        self.assertEqual(widget_value(BY_KEY['network_system_link'], {'network_lobby_server': 'example.org', 'network_system_link': 'lan'}), 'lan')
 
     def test_only_native_renderer_options_are_visible(self):
         # The renderer selection and Xenia-only options are for dev/test configs.

@@ -35,6 +35,13 @@ after_instruction = false
 address = 0x8262CE30
 name = "Gow3ConstrainedProjection"
 registers = ["f1", "f2", "f3", "r9"]
+# The unconstrained FPerspectiveMatrix (0x82630FC8) call in the same function,
+# for cameras that do not constrain the aspect (gameplay in later chapters):
+# field of view (gow3_fov). The engine sizes the axes for the aspect itself.
+[[midasm_hook]]
+address = 0x8262CF14
+name = "Gow3UnconstrainedProjection"
+registers = ["f1", "f2", "r28"]
 
 # Literal 1280x720 viewport rectangles (li r,1280 / li r,720).
 [[midasm_hook]]
@@ -218,3 +225,12 @@ address = 0x82B08D3C
 name = "Gow3ObserveMarkerPairEmitted"
 registers = ["r11", "r3", "r8", "r5", "r6"]
 after_instruction = true
+
+# A player's game went away (network.h): expire its connection now rather than
+# after the 45 s ConnectionTimeout. In UNetConnection::Tick, just before the
+# timeout test reads LastReceiveTime.
+[[midasm_hook]]
+address = 0x828CE13C
+name = "Gow3ExpireDepartedConnection"
+registers = ["r31"]
+after_instruction = false

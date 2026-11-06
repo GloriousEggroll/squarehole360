@@ -95,7 +95,6 @@ class GameSettings final : public rex::ui::ImGuiDialog {
         else if (s.type == 'f') table_.insert_or_assign(s.key, std::stod(v));
         else table_.insert_or_assign(s.key, v);
       }
-      table_.insert_or_assign("anisotropic_override", -1);
       auto backup = path_; backup.replace_extension(".toml.bak");
       if (original_exists_) std::filesystem::copy_file(path_, backup, std::filesystem::copy_options::overwrite_existing);
       if (!path_.parent_path().empty()) std::filesystem::create_directories(path_.parent_path());
@@ -113,12 +112,10 @@ class GameSettings final : public rex::ui::ImGuiDialog {
     if (s.type == 's' && s.choices.empty()) return false;
     if (key == "framerate_limit") return values_["gow3_frame_limit_mode"] == "custom";
     if (key == "window_width" || key == "window_height") return values_["fullscreen"] == "false";
-    if (key == "present_frame_generation")
-      return values_["present_effect"] == "fsr3" || values_["present_effect"] == "dlss" ||
-             values_["present_effect"] == "xess";
     if (key == "present_fsr_max_upsampling_passes") return values_["present_effect"] == "fsr";
     if (key == "present_fsr3_ghosting_reduction") return values_["present_effect"] == "fsr3";
-    if (key == "network_frame_rate_lock") return values_["network_enabled"] == "true";
+    if (key == "network_frame_rate_lock" || key == "network_system_link")
+      return values_["network_enabled"] == "true";
     if (key.starts_with("present_fsr_"))
       return values_["present_effect"] == "fsr" || values_["present_effect"] == "fsr3" ||
              values_["present_effect"] == "dlss" || values_["present_effect"] == "xess";
@@ -163,6 +160,8 @@ class GameSettings final : public rex::ui::ImGuiDialog {
           key == "texture_cache_memory_limit_soft" || key == "texture_cache_memory_limit_hard") step = 16;
       if (key == "framerate_limit" || key == "present_hdr_paper_white") step = 1;
       if (key == "present_hdr_peak_nits") step = 10;
+      if (key == "gow3_rt_ao_radius") step = 5;
+      if (key == "gow3_rt_ao_strength" || key == "gow3_rt_shadow_softness") step = .05;
       if (fast) step *= 10;
       double minimum = key == "framerate_limit" ? 1 : s.minimum;
       double changed = std::clamp(std::stod(value) + direction * step, minimum, s.maximum);

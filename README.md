@@ -26,9 +26,8 @@ War 2** and **Gears of War: Judgment** next.
   command recording and driver submission run on their own threads.
 - **Presentation.** Native Wayland with HDR10 and VRR; X11 fallback.
 - **Upscaling.** FSR 1, plus temporal FSR 3.1, DLSS and XeSS fed with the
-  renderer's depth, motion vectors and jitter; FSR 3.1 frame generation; a
-  low-latency mode and AMD Anti-Lag. See the
-  [guide](docs/gears3.md#temporal-upscaling-frame-generation-and-latency-native).
+  renderer's depth, motion vectors and jitter; a low-latency mode and AMD
+  Anti-Lag. See the [guide](docs/gears3.md#temporal-upscaling-and-latency-native).
 
 [docs/renderer-vs-xenia.md](docs/renderer-vs-xenia.md) compares this approach
 with Xenia. [docs/direct-renderer-plan.md](docs/direct-renderer-plan.md)
@@ -55,8 +54,8 @@ The GPU's command processor, not its shaders, is now the limit.
 - Clang, CMake 3.25+, Ninja, Python 3.11+
 - A modern Vulkan GPU and driver (developed and tested on an AMD RX 9070 XT
   with RADV)
-- Wine, to compile the FidelityFX (FSR 3.1) shaders; without it FSR 3.1 and
-  frame generation are left out of the build
+- Wine, to compile the FidelityFX (FSR 3.1) shaders; without it FSR 3.1 is
+  left out of the build
 - Optional: jemalloc and OpenSSL development packages (used automatically);
   PySide6 and tomli-w for the standalone settings editor; the NVIDIA DLSS and
   Intel XeSS SDKs, downloaded from their official releases by
@@ -128,7 +127,7 @@ tools/package-macos.sh                 # dist/squarehole360-macos-arm64.tar.gz
 
 The package carries MoltenVK, the Vulkan loader, OpenSSL and its own Python,
 so players need no Homebrew. Run `tools/run-macos.sh`; the settings editor is
-`tools/settings-macos.sh`. FSR 3.1, frame generation, DLSS and XeSS are not
+`tools/settings-macos.sh`. FSR 3.1, DLSS and XeSS are not
 available on macOS.
 
 Settings live in `config/gow3.toml`. You can change them in the standalone

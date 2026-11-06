@@ -1,4 +1,5 @@
 #include "renderer/native/edram_extent.h"
+#include "renderer/native/render_scale.h"
 #include "renderer/native/edram_inventory.h"
 #include <unordered_map>
 #include <condition_variable>
@@ -148,6 +149,7 @@
 #include "raw_float_texture_spv.h"
 #include "raw_float_texture.h"
 #include "temporal_inputs.h"
+#include "ray_traced_ao.h"
 #include <rex/logging.h>
 #include "temporal_inputs_spv.h"
 #include "restore_depth_spv.h"
@@ -502,6 +504,9 @@ using TextureBindingKey=std::array<uint32_t,8>;
 using TextureBindingCache=std::map<TextureBindingKey,TextureBinding>;
 struct Image {
     std::shared_ptr<RenderTexture> texture; Json identity;uint64_t version=0;bool dirty=false;std::bitset<kNativeEdramMaxTiles> tiles;
+    // Bounding range of `tiles` (first > last when empty): a cheap reject
+    // before the 8192-bit overlap test, run per surface for every draw.
+    uint32_t tile_first=UINT32_MAX,tile_last=0;
     // Pre-encode host floats after a fused clear. This is clean read state,
     // never a dirty working image or a source for a packed commit.
     ResolveMemory::AtlasDepthClearReceipt atlas_clear_receipt;
@@ -739,7 +744,18 @@ struct SceneExecutor::State {
         continued=0,boundaries=0,groups=0,maximum_group_draws=0,sampled_barriers_avoided=0,queried_selected=0,query_controls_preserved=0;} fsi_draw_pass_stats_;
     bool open_fsi_draw_pass_=false;
     uint64_t async_shader_skipped_draws_=0,invalid_texture_skipped_draws_=0,viewport_skipped_draws_=0,
-        up_geometry_skipped_draws_=0;
+        up_geometry_skipped_draws_=0,indexed_geometry_skipped_draws_=0;
+    // Motion blur toggle: the velocity pass target (EDRAM base, this frame),
+    // the guest address its resolve wrote, and whether blur is off.
+    int64_t velocity_pass_base_=-1;
+    uint32_t velocity_texture_address_=0;
+    bool motion_blur_off_=false;
+    uint64_t motion_blur_patched_draws_=0;
+    // The velocity pass scale (PS c11, big-endian) of the last draw that had
+    // one, and draws given it because the game wrote them as not moving.
+    std::array<uint8_t,16> velocity_scale_c11_{};
+    bool velocity_scale_known_=false;
+    uint64_t velocity_scale_restored_draws_=0;
     uint64_t draws_seen_=0;
     template<class Op>std::optional<DrawViewport> UnrepresentableViewport(const Op& o) {
         const auto payload=ViewPayload(o.State());
@@ -884,6 +900,12 @@ struct SceneExecutor::State {
     std::unique_ptr<NativeFusedPackedAtlasResolve> fused_packed_atlas_resolve_;
     std::unique_ptr<NativeSynchronousGpuTimings> presentation_gpu_timings_;
     std::map<std::string,Image> surfaces_,resolved_;
+    // Ray-traced ambient occlusion (ray_traced_ao.h): frame tracking and the
+    // HUD point mirror the temporal inputs below, independently of upscaling.
+    std::unique_ptr<NativeRayTracedAo> rt_ao_;
+    bool rt_frame_open_=false,rt_scene_drawn_=false;
+    int64_t rt_tonemap_base_=-1,rt_shadow_base_=-1;
+    uint32_t rt_width_=0,rt_height_=0;
     // Temporal upscaling inputs; frame_open_ is set by the frame's first draw.
     std::unique_ptr<NativeTemporalInputs> temporal_;
     bool temporal_frame_open_=false;
@@ -901,7 +923,17 @@ struct SceneExecutor::State {
     // Working-image <-> packed EDRAM conversions (hardware render targets).
     struct SurfaceConversionStats {uint64_t commits=0,commit_pixels=0,restores=0,restore_pixels=0,first_restores=0;
         std::map<std::string,uint64_t> restore_keys,commit_keys;} surface_conversions_;
-    struct HardwarePassStats {uint64_t started=0,continued=0;} hardware_pass_stats_;
+    struct HardwarePassStats {uint64_t started=0,continued=0,query_controls_preserved=0;} hardware_pass_stats_;
+    // Hardware render targets: a logical query control records no GPU command
+    // (host query reset; each queried draw brackets its own slot), so the open
+    // draw group and its render pass can continue across it. The query's
+    // all-work frontier then includes the group, which seals at its draw limit
+    // or the next ordinary boundary.
+    bool HardwarePassQueryControlPreserved(bool deferred_query) {
+        if(!deferred_query||config_.native_fsi||!config_.hardware_pass_queries||!queries_->host_reset_enabled()||
+           !open_draw_command_group_)return false;
+        ++hardware_pass_stats_.query_controls_preserved;return true;
+    }
     // Hardware render targets: framebuffers by (color, depth) working image.
     // Declared after surfaces_ so they are destroyed before their images.
     std::map<std::pair<const RenderTexture*,const RenderTexture*>,std::unique_ptr<RenderFramebuffer>> hardware_framebuffers_;
@@ -1578,6 +1610,98 @@ struct SceneExecutor::State {
                 (info&0x30000u)==0x10000u?2u:4u,depth?"depth":"color",width,height,info&16383u,base,format);
         }
     }
+    // Internal resolution scaling (render_scale.h): screen-sized surfaces
+    // (half the 720p frame and up, and shadow maps) get host images
+    // NativeRenderScale() times their guest size; smaller ones (colour
+    // grading tables, the quarter-size bloom chain) stay at guest size. Their
+    // contents are computed per guest texel, so enlarged they only repeat
+    // texels, and filtering between repeats turns into a staircase (speckles
+    // where the scene's fine noise crosses the steps). Guest rectangles and
+    // viewports are scaled where they reach host images.
+    static uint32_t SurfaceScaleFor(uint32_t width,uint32_t height) {
+        return width>=640&&height>=352?NativeRenderScale():1;
+    }
+    static uint32_t SurfaceScale(const SurfaceLayout& s) {return SurfaceScaleFor(s.width,s.height);}
+    // The scale of an existing host image for a guest width.
+    static uint32_t ImageScale(const RenderTexture& image,uint32_t guest_width) {
+        const uint32_t width=static_cast<const VulkanTexture&>(image).desc.width;
+        return guest_width&&width>=guest_width*2&&width%guest_width==0?width/guest_width:1;
+    }
+    static RenderRect HostRect(const RenderRect& r,uint32_t scale) {
+        const int32_t s=int32_t(scale);
+        return s==1?r:RenderRect(r.left*s,r.top*s,r.right*s,r.bottom*s);
+    }
+    static RenderViewport HostViewport(RenderViewport v,uint32_t scale) {
+        const float s=float(scale);
+        v.x*=s;v.y*=s;v.width*=s;v.height*=s;
+        return v;
+    }
+    // A guest-sized copy of a scaled colour image (shrunk by a blit), for
+    // resolves whose source is in guest pixels. Null at scale 1. The copy
+    // lives until the current transfer batch retires (batched work) or is
+    // used synchronously.
+    std::shared_ptr<RenderTexture> GuestSizedCopy(RenderTexture& host,uint32_t scale) {
+        if(scale==1)return nullptr;
+        const auto& desc=static_cast<VulkanTexture&>(host).desc;
+        const uint32_t width=desc.width/scale,height=desc.height/scale;
+        auto copy=GuestSizedImage(width,height,desc.format,(desc.flags&RenderTextureFlag::DEPTH_TARGET)!=0);
+        transfers_->Blit(host,*copy);
+        ++scaled_surface_stats_.shrinks;
+        return copy;
+    }
+    // Guest-sized scratch images, reused once nothing else holds them (the
+    // transfer batch keeps each until its work retires).
+    std::vector<std::shared_ptr<RenderTexture>> guest_sized_pool_;
+    std::shared_ptr<RenderTexture> GuestSizedImage(uint32_t width,uint32_t height,RenderFormat format,bool depth) {
+        std::shared_ptr<RenderTexture> image;
+        for(auto& candidate:guest_sized_pool_) {
+            const auto& d=static_cast<const VulkanTexture&>(*candidate).desc;
+            if(candidate.use_count()==1&&d.width==width&&d.height==height&&d.format==format&&
+               ((d.flags&RenderTextureFlag::DEPTH_TARGET)!=0)==depth) {image=candidate;break;}
+        }
+        if(!image) {
+            image=std::shared_ptr<RenderTexture>(device_->createTexture(depth?
+                RenderTextureDesc::DepthTarget(width,height,format):RenderTextureDesc::ColorTarget(width,height,format)));
+            if(!image)throw std::runtime_error("Cannot allocate a guest-sized surface copy");
+            if(guest_sized_pool_.size()>=64)
+                std::erase_if(guest_sized_pool_,[](const auto& pooled){return pooled.use_count()==1;});
+            guest_sized_pool_.push_back(image);
+        }
+        if(transfer_batch_)transfer_batch_->KeepImage(image,uint64_t(width)*height*8);
+        return image;
+    }
+    // EDRAM keeps guest pixels: a scaled image is stored one sample per
+    // guest pixel (the store reads it at the scale; no copy, and no blit
+    // into depth/stencil images, which drivers need not support).
+    struct ScaledStore {
+        ResolveMemory& memory;
+        ScaledStore(ResolveMemory& m,uint32_t scale):memory(m){memory.SetStoreInputScale(scale);}
+        ~ScaledStore(){memory.SetStoreInputScale(1);}
+    };
+    void StoreHostSurface(RenderTexture& image,const SurfaceLayout& layout) {
+        const ScaledStore scaled(*edram_memory_,ImageScale(image,layout.width));
+        edram_memory_->StoreSurface(image,layout);
+    }
+    struct ScaledSurfaceStats {uint64_t shrinks=0,enlargements=0,scaled_bindings=0,scaled_aliases=0,
+        full_restores=0,guest_restores=0,full_quantized=0,held_partial_copies=0;} scaled_surface_stats_;
+    // A guest-sized decode of resolved bytes (a format alias, read through
+    // guest memory) sampled by scaled draws: enlarge it (nearest) so host
+    // pixel centres still land on exact texels. Sampled with filtering at
+    // a quarter-texel offset, encoded data (7e3 bits read as UNorm 10) blends
+    // into garbage, worst near black.
+    template<class Generation>void ScaleAliasGeneration(Generation& generation,const TextureLayout& layout) {
+        const uint32_t scale=SurfaceScaleFor(layout.width,layout.height);
+        if(scale==1||!generation.texture||layout.dimension!=1||layout.layers!=1)return;
+        const auto& desc=static_cast<VulkanTexture&>(*generation.texture).desc;
+        if(desc.width!=layout.width||desc.height!=layout.height||(desc.flags&RenderTextureFlag::DEPTH_TARGET))return;
+        std::shared_ptr<RenderTexture> scaled(device_->createTexture(
+            RenderTextureDesc::ColorTarget(layout.width*scale,layout.height*scale,desc.format)));
+        if(!scaled)throw std::runtime_error("Cannot allocate a scaled texture alias");
+        if(transfer_batch_)transfer_batch_->KeepImage(generation.texture,generation.bytes);
+        transfers_->Blit(*generation.texture,*scaled);
+        generation.texture=std::move(scaled);generation.bytes*=uint64_t(scale)*scale;
+        ++scaled_surface_stats_.scaled_aliases;
+    }
     SurfaceLayout SurfaceStorage(const Json& s) {
         const unsigned info=s.at("surface_info").get<unsigned>();
         AdmitMultisampled(s.at("width"),s.at("height"),info,s.at("edram_base"),s.at("format"),s.at("depth"));
@@ -1602,16 +1726,29 @@ struct SceneExecutor::State {
         return SurfaceAt(found->second,SurfaceStorage(s),[&]{return s.ToJson();},write,nullptr,nullptr);
     }
     // Pure function of the layout; a draw asks for it per bound surface.
-    std::map<std::array<uint32_t,6>,std::bitset<kNativeEdramMaxTiles>> surface_tiles_memo_;
-    const std::bitset<kNativeEdramMaxTiles>& SurfaceTiles(const SurfaceLayout& s) {
+    struct SurfaceTileSet {std::bitset<kNativeEdramMaxTiles> bits;std::pair<uint32_t,uint32_t> span{UINT32_MAX,0};};
+    std::map<std::array<uint32_t,6>,SurfaceTileSet> surface_tiles_memo_;
+    const SurfaceTileSet& SurfaceTileEntry(const SurfaceLayout& s) {
         const std::array<uint32_t,6> key{s.width,s.height,s.pitch,s.base,s.format,uint32_t(s.depth)};
         if(const auto found=surface_tiles_memo_.find(key);found!=surface_tiles_memo_.end())return found->second;
-        std::bitset<kNativeEdramMaxTiles> tiles;
+        SurfaceTileSet tiles;
         // Both 32-bit half-tiles and 64-bit tiles fit within forty pixels.
-        for(unsigned y=0;y<s.height;y+=16)for(unsigned x=0;x<s.width;x+=40)
-            tiles.set(SurfaceByteOffset(s,x,y)/5120);
+        for(unsigned y=0;y<s.height;y+=16)for(unsigned x=0;x<s.width;x+=40) {
+            const uint32_t tile=SurfaceByteOffset(s,x,y)/5120;tiles.bits.set(tile);
+            tiles.span.first=std::min(tiles.span.first,tile);tiles.span.second=std::max(tiles.span.second,tile);
+        }
         if(surface_tiles_memo_.size()>=1024)surface_tiles_memo_.clear();
-        return surface_tiles_memo_.emplace(key,tiles).first->second;
+        return surface_tiles_memo_.emplace(key,std::move(tiles)).first->second;
+    }
+    const std::bitset<kNativeEdramMaxTiles>& SurfaceTiles(const SurfaceLayout& s) {return SurfaceTileEntry(s).bits;}
+    std::pair<uint32_t,uint32_t> SurfaceTileSpan(const SurfaceLayout& s) {return SurfaceTileEntry(s).span;}
+    void SetSurfaceTiles(Image& image,const SurfaceLayout& s) {
+        const auto& entry=SurfaceTileEntry(s);
+        image.tiles=entry.bits;image.tile_first=entry.span.first;image.tile_last=entry.span.second;
+    }
+    static bool TilesOverlap(const Image& image,const std::bitset<kNativeEdramMaxTiles>& tiles,std::pair<uint32_t,uint32_t> span) {
+        if(image.tile_first>span.second||span.first>image.tile_last)return false;
+        return (image.tiles&tiles).any();
     }
     bool PrepareReadonlyNoWriteMetadata(const SurfaceLayout& storage) {
         const NativeReadonlyDepthLayoutKey key{storage.width,storage.height,storage.pitch,storage.base,storage.format,uint32_t(storage.depth)};
@@ -1653,8 +1790,9 @@ struct SceneExecutor::State {
     // that SurfaceAt then skips (for example a validated full overwrite).
     bool SurfaceConversionPending(const std::string& key,const SurfaceLayout& storage) {
         const auto& tiles=SurfaceTiles(storage);
+        const auto tile_span=SurfaceTileSpan(storage);
         if(surfaces_maybe_dirty_)for(const auto& [other,image]:surfaces_)
-            if(other!=key&&image.dirty&&(image.tiles&tiles).any())return true;
+            if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key)return true;
         const auto found=surfaces_.find(key);
         if(found==surfaces_.end()||!found->second.texture)return edram_memory_->SurfaceVersion(storage)!=0;
         const auto& entry=found->second;
@@ -1673,6 +1811,9 @@ struct SceneExecutor::State {
                 (config_.gpu_batch_attribution||config_.gpu_physical_timestamps)?&tag:nullptr);
             return *result;
         }
+        // Scaled images restore whole surfaces (through a guest-sized image).
+        const uint32_t surface_scale=SurfaceScale(storage);
+        if(surface_scale!=1)depth_read_region=nullptr;
         if(depth_read_region&&(write||overwrite||!storage.depth||depth_read_region->isEmpty()||
            depth_read_region->left<0||depth_read_region->top<0||
            depth_read_region->right>int32_t(storage.width)||depth_read_region->bottom>int32_t(storage.height)))
@@ -1682,26 +1823,29 @@ struct SceneExecutor::State {
         std::vector<std::pair<std::string,uint64_t>> inventory_commits;
         // Commit dirty images before a different interpretation can read or
         // overwrite their tiles. Base addresses need not be equal to alias.
-        for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
+        const auto tile_span=SurfaceTileSpan(storage);
+        for(auto& [other,image]:surfaces_)if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key) {
             const auto previous=SurfaceStorage(image.identity);
             ++surface_conversions_.commits;surface_conversions_.commit_pixels+=uint64_t(previous.width)*previous.height;
             if(edram_inventory::Enabled())inventory_commits.emplace_back(other,uint64_t(previous.width)*previous.height);
             if(surface_conversions_.commit_keys.size()<64||surface_conversions_.commit_keys.contains(other))
                 ++surface_conversions_.commit_keys[other+"->"+key];
-            edram_memory_->StoreSurface(*image.texture,previous);
+            StoreHostSurface(*image.texture,previous);
             image.version=edram_memory_->SurfaceVersion(previous);image.dirty=false;
         }
         auto& entry=surfaces_[key];
         if(!entry.texture) {
             entry.identity=identity();
             const auto format=SurfaceFormat(entry.identity,!config_.native_fsi);
-            entry.texture=device_->createTexture(storage.depth?RenderTextureDesc::DepthTarget(storage.width,storage.height,format):
-                RenderTextureDesc::ColorTarget(storage.width,storage.height,format));
-            entry.tiles=tiles;
+            const uint32_t scale=surface_scale;
+            entry.texture=device_->createTexture(storage.depth?
+                RenderTextureDesc::DepthTarget(storage.width*scale,storage.height*scale,format):
+                RenderTextureDesc::ColorTarget(storage.width*scale,storage.height*scale,format));
+            SetSurfaceTiles(entry,storage);
         }
         const auto version=edram_memory_->SurfaceVersion(storage);
         if(entry.atlas_clear_receipt.source) {
-            if(!entry.dirty&&NativeFusedAtlasDepthClearReceiptCurrent(true,
+            if(surface_scale==1&&!entry.dirty&&NativeFusedAtlasDepthClearReceiptCurrent(true,
                     entry.atlas_clear_receipt.packed_version,version)) {
                 // Re-own this image for the NEW restore packet: its original
                 // fused-compute packet may already have retired. Keep the full
@@ -1746,16 +1890,41 @@ struct SceneExecutor::State {
             if(!entry.version)++surface_conversions_.first_restores;
             if(surface_conversions_.restore_keys.size()<64||surface_conversions_.restore_keys.contains(key))
                 ++surface_conversions_.restore_keys[key];
-            if(!storage.depth&&edram_memory_->RestoreColorSurface(*entry.texture,storage)) {
+            // A scaled image restores from the full-resolution EDRAM copy
+            // when every byte of it is current there; otherwise from the
+            // guest pixels, at guest size, then enlarged.
+            const bool scaled_copy=surface_scale!=1&&surface_scale==edram_memory_->scaled_copy_scale()&&
+                edram_memory_->ScaledSurfaceCurrent(storage);
+            if(surface_scale!=1) {
+                auto& st=scaled_surface_stats_;
+                ++(scaled_copy?st.full_restores:st.guest_restores);
+                if((st.full_restores+st.guest_restores)%20000==0)
+                    REXLOG_INFO("Native render scale: EDRAM restores {} full resolution, {} guest size; {} fixed-point resolves "
+                                "full resolution; {} partial resolves copied; {} shrinks, {} enlargements, {} scaled aliases",
+                                st.full_restores,st.guest_restores,st.full_quantized,st.held_partial_copies,
+                                st.shrinks,st.enlargements,st.scaled_aliases);
+            }
+            std::shared_ptr<RenderTexture> guest_sized;
+            if(surface_scale!=1&&!storage.depth&&!scaled_copy) {
+                guest_sized=GuestSizedImage(storage.width,storage.height,
+                    static_cast<VulkanTexture&>(*entry.texture).desc.format,storage.depth);
+            }
+            // Depth/stencil cannot be blitted into: its restore draws enlarge.
+            RenderTexture& restore_target=guest_sized?*guest_sized:*entry.texture;
+            if(!storage.depth&&edram_memory_->RestoreColorSurface(restore_target,storage)) {
                 // One fullscreen decode draw; same values as load + identity Resolve.
             } else {
                 auto restored=depth_read_region?edram_memory_->LoadSurfaceSharedRegion(storage,*depth_read_region):
-                    edram_memory_->LoadSurfaceShared(storage);
-                if(storage.depth)transfers_->RestoreDepth(*restored,*entry.texture,depth_read_region);
+                    scaled_copy?edram_memory_->LoadScaledSurfaceShared(storage):edram_memory_->LoadSurfaceShared(storage);
+                if(storage.depth)transfers_->RestoreDepth(*restored,restore_target,depth_read_region);
                 else {
-                    const RenderRect r(0,0,storage.width,storage.height);
-                    transfers_->Resolve(*restored,*entry.texture,r,r);
+                    const RenderRect r=HostRect(RenderRect(0,0,storage.width,storage.height),scaled_copy?surface_scale:1);
+                    transfers_->Resolve(*restored,restore_target,r,r);
                 }
+            }
+            if(guest_sized) {
+                transfers_->Blit(*guest_sized,*entry.texture);
+                ++scaled_surface_stats_.enlargements;
             }
             if(depth_read_region) {
                 // Only the transfer's rectangle is current. Keeping the old
@@ -2012,6 +2181,8 @@ struct SceneExecutor::State {
             shader_module_timing_.Record(DrawMilliseconds(module_start,DrawClock::now()),operation);
             if(!shader)throw std::runtime_error("Native shader module creation failed");
             found=shaders_.emplace(ShaderCacheIdentity{owned_digest,fsi,variant},CachedShader{std::move(shader),0,bytes.size(),vertex_approved,readonly_vertex_approved,fp24_vertex_approved,early_depth_vertex_approved,early_depth_catalog_vertex_approved,null_constant_approved,packed_pixel_approved,color_module_approved}).first;
+            if(rt_ao_&&!fsi&&!hash.IsNull()&&variant==NativeShaderVariant::Unmodified)
+                rt_ao_->RememberVertexShader(owned_digest,bytes);
             if(config_.native_early_depth_material_retention||config_.packed_color_render_pass_groups)
                 found->second.audited_monotonic_depth=NativeMonotonicDepthModuleCertified(digest,fsi,variant,bytes);
             if(config_.packed_color_blend_pass_groups)
@@ -2364,6 +2535,10 @@ struct SceneExecutor::State {
                             .emplace(ShaderCacheIdentity{std::string(digest), fsi, variant},
                                      CachedShader{std::move(shader), 0, code.size_bytes(),vertex_approved,readonly_vertex_approved,fp24_vertex_approved,early_depth_vertex_approved,early_depth_catalog_vertex_approved,null_constant_approved,packed_pixel_approved,color_module_approved})
                             .first;
+                // Cached pipelines create most vertex modules at startup;
+                // ray-traced capture needs them as well.
+                if(rt_ao_&&!fsi&&variant==NativeShaderVariant::Unmodified)
+                    rt_ao_->RememberVertexShader(digest,{reinterpret_cast<const uint8_t*>(code.data()),code.size_bytes()});
                 if(config_.native_early_depth_material_retention||config_.packed_color_render_pass_groups)
                     found->second.audited_monotonic_depth=NativeMonotonicDepthModuleCertified(digest,fsi,variant,
                         {reinterpret_cast<const uint8_t*>(code.data()),code.size_bytes()});
@@ -4121,9 +4296,9 @@ public:
             throw std::invalid_argument("Native stale alias budget exceeds 128 MiB");
         // Hardware render targets may keep every recorded pipeline resident.
         const bool hardware_bounds=!config_.native_fsi&&!config_.fsi_state_cache_headroom&&
-            config_.max_shader_cache_entries>=2&&config_.max_shader_cache_entries<=4096&&
-            config_.max_shader_cache_bytes&&config_.max_shader_cache_bytes<=256u*1024*1024;
-        if(!config_.max_pipeline_cache_entries||config_.max_pipeline_cache_entries>(config_.native_fsi?2048u:8192u)||
+            config_.max_shader_cache_entries>=2&&config_.max_shader_cache_entries<=8192&&
+            config_.max_shader_cache_bytes&&config_.max_shader_cache_bytes<=512u*1024*1024;
+        if(!config_.max_pipeline_cache_entries||config_.max_pipeline_cache_entries>(config_.native_fsi?2048u:16384u)||
            (!hardware_bounds&&!NativeFsiMaterialShaderCacheBoundsValid(config_.fsi_state_cache_headroom,
                config_.fsi_state_material_composition,config_.specialize_fsi_pipeline_state,
                config_.max_shader_cache_entries,config_.max_shader_cache_bytes)))
@@ -4560,6 +4735,7 @@ public:
             resolve_memory_->EnableCompactLoadFormats(memory_load_r32_spv,memory_load_rg32_spv,
                 config_.storage_image_extended_formats_enabled);
         edram_memory_=std::make_unique<ResolveMemory>(*device_,*queue_,memory_store_spv,memory_load_spv,NativeEdramBytes(),0,transfer_batch_.get(),false,config_.block_page_versions,false,false,config_.reuse_defined_ranges);
+        if(NativeRenderScale()!=1&&!config_.native_fsi)edram_memory_->EnableScaledCopy(NativeRenderScale());
         edram_memory_->SetDescriptorPoolEnabled(config_.recycle_resolve_descriptors);
         edram_memory_->SetIdentityViewReuseEnabled(config_.reuse_resolve_identity_views);
         if(!config_.native_fsi&&transfer_batch_)edram_memory_->EnableDirectColorRestore(fullscreen_spv,memory_restore_frag_spv);
@@ -4604,6 +4780,10 @@ public:
         }catch(const std::exception&) {/* No command exists: optional startup resource refusal uses ordinary Native. */}
         const RenderPushConstantRange push(0,0,0,24,RenderShaderStageFlag::VERTEX|RenderShaderStageFlag::PIXEL);
         layout_=device_->createPipelineLayout(RenderPipelineLayoutDesc(&push,1,descriptor_descs_.data(),config_.native_fsi?5:4));
+        if(config_.ray_traced_ao) {
+            rt_ao_=std::make_unique<NativeRayTracedAo>(*device_,*layout_);
+            if(!rt_ao_->supported())rt_ao_.reset();
+        }
         if(config_.native_fsi) {
             report["raster_operations"]="ordered native packed EDRAM";
             report["limitations"][1]="Single-sample interlock supports packed fixed/7e3/depth/stencil and polygon offset; gamma, extended half precision and full early-depth ordering remain unsupported";
@@ -4781,7 +4961,7 @@ public:
             {"full_extent_pixels",atlas_depth_region_stats_.full_extent_pixels},
             {"current_source_reads",atlas_depth_region_stats_.current_source_reads},
             {"counter_scope","Source restoration only; full-extent pixels are reference extents for these restorations, not measured OFF work or exclusive timing. Full allocations and all destination/consumer stages remain."}};
-        report["hardware_render_passes"]={{"started",hardware_pass_stats_.started},{"continued",hardware_pass_stats_.continued}};
+        report["hardware_render_passes"]={{"started",hardware_pass_stats_.started},{"continued",hardware_pass_stats_.continued},{"query_controls_preserved",hardware_pass_stats_.query_controls_preserved}};
         {
             Json layouts=Json::array();
             for(const auto& l:msaa_fallback_.layouts)layouts.push_back({{"width",l[0]},{"height",l[1]},
@@ -5842,9 +6022,10 @@ public:
         frame_surfaces_.insert(key);
         // Same ordered alias commits as Surface(), before observing provenance.
         // Do not add a blanket flush of unrelated dirty working images.
-        for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
+        const auto tile_span=SurfaceTileSpan(storage);
+        for(auto& [other,image]:surfaces_)if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key) {
             const auto previous=SurfaceStorage(image.identity);
-            edram_memory_->StoreSurface(*image.texture,previous);
+            StoreHostSurface(*image.texture,previous);
             image.version=edram_memory_->SurfaceVersion(previous);image.dirty=false;
         }
         const auto version=edram_memory_->SurfaceVersion(storage);
@@ -5872,7 +6053,7 @@ public:
         const bool inserted=found==surfaces_.end();
         if(inserted) {
             found=surfaces_.try_emplace(key).first;
-            found->second.identity=identity;found->second.tiles=tiles;
+            found->second.identity=identity;SetSurfaceTiles(found->second,storage);
         }
         auto& entry=found->second;
         ResolveMemory::AtlasDepthClearReceipt receipt;
@@ -5929,9 +6110,10 @@ public:
         frame_surfaces_.insert(key);
         // Verbatim Surface() order: commit dirty overlapping aliases before
         // observing the packed publication token; no unrelated flush is added.
-        for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
+        const auto tile_span=SurfaceTileSpan(storage);
+        for(auto& [other,image]:surfaces_)if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key) {
             const auto previous=SurfaceStorage(image.identity);
-            edram_memory_->StoreSurface(*image.texture,previous);
+            StoreHostSurface(*image.texture,previous);
             image.version=edram_memory_->SurfaceVersion(previous);image.dirty=false;
         }
         const auto version=edram_memory_->SurfaceVersion(storage);
@@ -5989,9 +6171,10 @@ public:
         frame_surfaces_.insert(key);
         // Verbatim Surface() order: commit dirty overlapping aliases before
         // observing the packed publication token; no unrelated flush is added.
-        for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
+        const auto tile_span=SurfaceTileSpan(storage);
+        for(auto& [other,image]:surfaces_)if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key) {
             const auto previous=SurfaceStorage(image.identity);
-            edram_memory_->StoreSurface(*image.texture,previous);
+            StoreHostSurface(*image.texture,previous);
             image.version=edram_memory_->SurfaceVersion(previous);image.dirty=false;
         }
         const auto version=edram_memory_->SurfaceVersion(storage);
@@ -6074,6 +6257,10 @@ public:
             return &Surface(surfaces.at(k),true,discard_full_color?&r:nullptr);
         };
         RenderTexture* depth=flags&0x30?attachment("10"):nullptr;
+        auto clear_scale=[&](const std::string& k) {
+            const auto& surface=surfaces.at(k);
+            return SurfaceScaleFor(surface.at("width").get<uint32_t>(),surface.at("height").get<uint32_t>());
+        };
         auto color=o.at("color").is_null()?std::array<float,4>{}:o.at("color").get<std::array<float,4>>();
         // Depth is fetched above without discard, so only color attachments can
         // skip their restore; with hardware targets that holds for combined clears.
@@ -6097,10 +6284,11 @@ public:
         // by the guest D3D implementation as well.
         for(unsigned i=0;i<4;++i)if((flags&(1u<<i))&&surfaces.contains(std::to_string(6+i))) {
             ++mutation_serial_;
-            transfers_->Clear(attachment(std::to_string(6+i)),depth,true,!did_depth&&(flags&0x10),!did_depth&&(flags&0x20),r,
+            transfers_->Clear(attachment(std::to_string(6+i)),depth,true,!did_depth&&(flags&0x10),!did_depth&&(flags&0x20),
+                HostRect(r,clear_scale(std::to_string(6+i))),
                 {color[0],color[1],color[2],color[3]},o.at("depth"),o.at("stencil"));did_depth=true;
         }
-        if(depth&&!did_depth){++mutation_serial_;transfers_->Clear(nullptr,depth,false,flags&0x10,flags&0x20,r,{},o.at("depth"),o.at("stencil"));}
+        if(depth&&!did_depth){++mutation_serial_;transfers_->Clear(nullptr,depth,false,flags&0x10,flags&0x20,HostRect(r,clear_scale("10")),{},o.at("depth"),o.at("stencil"));}
         transfer_report_dirty_=true;++diagnostic_counters_.clears;
     }
     std::shared_ptr<RenderTexture> DirectAtlasDepthResolveSource(const Json& o,const Json& source,
@@ -6142,9 +6330,10 @@ public:
         frame_surfaces_.insert(key);
         // Identical ordering to Surface(): commit only dirty overlapping aliases
         // before observing full packed provenance. Do not flush unrelated work.
-        for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
+        const auto tile_span=SurfaceTileSpan(storage);
+        for(auto& [other,image]:surfaces_)if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key) {
             const auto previous=SurfaceStorage(image.identity);
-            edram_memory_->StoreSurface(*image.texture,previous);
+            StoreHostSurface(*image.texture,previous);
             image.version=edram_memory_->SurfaceVersion(previous);image.dirty=false;
         }
         const auto version=edram_memory_->SurfaceVersion(storage);
@@ -6218,9 +6407,10 @@ public:
         const auto key=SurfaceKey(source);const auto tiles=SurfaceTiles(storage);
         frame_surfaces_.insert(key);
         // Preserve Surface()'s ordering and only its dirty overlapping commits.
-        for(auto& [other,image]:surfaces_)if(other!=key&&image.dirty&&(image.tiles&tiles).any()) {
+        const auto tile_span=SurfaceTileSpan(storage);
+        for(auto& [other,image]:surfaces_)if(image.dirty&&TilesOverlap(image,tiles,tile_span)&&other!=key) {
             const auto previous=SurfaceStorage(image.identity);
-            edram_memory_->StoreSurface(*image.texture,previous);
+            StoreHostSurface(*image.texture,previous);
             image.version=edram_memory_->SurfaceVersion(previous);image.dirty=false;
         }
         const auto version=edram_memory_->SurfaceVersion(storage);
@@ -6257,7 +6447,9 @@ public:
             case 6:case 22:case 23:case 25:case 26:case 27:case 28:case 29:case 30:case 31:case 32:case 36:case 37:case 38:break;
             // 54 stores packed 7e3 bits that read back up to ~0.002 apart; it
             // stays a candidate for verification only.
-            case 54:if(config_.verify_direct_resolve_textures)break;return false;
+            // At internal resolution scaling the decode would also lose the
+            // scale, which is far worse than the 7e3 rounding.
+            case 54:if(config_.verify_direct_resolve_textures||NativeRenderScale()!=1)break;return false;
             default:return false;
         }
         return layout.dimension==1&&layout.layers==1&&!layout.max_mip&&!layout.min_mip&&
@@ -6370,6 +6562,21 @@ public:
             if(config_.gpu_batch_attribution||config_.gpu_physical_timestamps){tag.kind=NativeGpuWorkKind::Resolve;try{tag.event=o.at("event");tag.frame=o.at("frame");}catch(...){}}
             RunTransferScope([&]{Resolve(o);},o.at("event"),(config_.gpu_batch_attribution||config_.gpu_physical_timestamps)?&tag:nullptr);return;
         }
+        if(rt_ao_&&rt_ao_->WantsShadows()&&rt_shadow_base_>=0&&o.at("source_slot")!=4) {
+            // The light attenuation buffer is resolved for the base pass.
+            const auto& source=o.at("surfaces").at(std::to_string(6+o.at("source_slot").get<unsigned>()));
+            const auto storage=SurfaceStorage(source);
+            if(!storage.depth&&int64_t(storage.base)==rt_shadow_base_&&storage.width==rt_width_&&storage.height==rt_height_)
+                RayTracedReplace(source,[&](RenderCommandList& commands,RenderTexture& surface,RenderTexture& depth,const auto& keep) {
+                    return rt_ao_->ApplyShadows(commands,surface,depth,keep);
+                });
+        }
+        if(rt_ao_&&rt_ao_->WantsApply()&&rt_scene_drawn_&&rt_tonemap_base_>=0&&o.at("source_slot")!=4) {
+            const auto& source=o.at("surfaces").at(std::to_string(6+o.at("source_slot").get<unsigned>()));
+            const auto storage=SurfaceStorage(source);
+            if(!storage.depth&&int64_t(storage.base)==rt_tonemap_base_&&storage.width==rt_width_&&storage.height==rt_height_)
+                RayTracedAoApply(source);
+        }
         if(o.at("level")!=0||(o.at("flags").get<unsigned>()&0x2300))throw std::runtime_error("Unsupported resolve flags/mip");
         const auto& identity=o.at("destination");const auto key=TextureKey(identity); const std::string base=identity.at("base");
         frame_resolved_.insert(key);
@@ -6392,9 +6599,12 @@ public:
         // They are never replaced with CPU snapshots or a fabricated clear.
         if(!full&&!resolve_memory_->FullyDefined(layout,address))report["uninitialized_resolve_regions"].push_back({{"event",o.at("event")},{"identity",identity},{"written_rectangle",o.at("destination_rectangle")}});
         auto& dest=resolved_[key];
+        // The image a copy-on-write replaced, while it still equals memory.
+        std::shared_ptr<RenderTexture> held_current;
         if(dest.texture&&size_t(dest.texture.use_count())>1+resolve_memory_->PendingStoreReferences(dest.texture.get())) {
             // Sampled generations own the previous image and require it to stay
             // immutable. Write another one; a partial resolve first restores it.
+            if(!full&&dest.version&&dest.version==resolve_memory_->Version(layout,address))held_current=dest.texture;
             auto held=std::move(dest.texture);dest.version=0;++direct_resolve_stats_.copy_on_write;
             for(auto& spare:dest.spares)if(spare&&spare.use_count()==1) {
                 dest.texture=std::move(spare);++direct_resolve_stats_.spare_reuses;break;
@@ -6402,16 +6612,43 @@ public:
             std::erase_if(dest.spares,[](const auto& spare){return !spare;});
             if(dest.spares.size()<4)dest.spares.push_back(std::move(held));
         }
+        // Resolved images keep their source surface's scale for sampling; the
+        // guest-memory copy (resolve_memory_) stays in guest pixels.
+        const uint32_t scale=[&] {
+            const auto& from=o.at("surfaces").at(std::to_string(6+o.at("source_slot").get<unsigned>()));
+            // A 4x MSAA colour source reads its single-sample surface twice
+            // the size (see the averaging below), which sets the scale.
+            const uint32_t multiple=o.at("source_slot")!=4&&
+                (from.at("surface_info").get<uint32_t>()&0x30000u)==0x20000u?2:1;
+            return SurfaceScaleFor(from.at("width").get<uint32_t>()*multiple,from.at("height").get<uint32_t>()*multiple);
+        }();
+        if(dest.texture&&ImageScale(*dest.texture,layout.width)!=scale) {dest.texture.reset();dest.version=0;}
         if(!dest.texture) {
-            dest.texture=device_->createTexture(RenderTextureDesc::ColorTarget(layout.width,layout.height,NativeTextureFormat(layout)));
+            dest.texture=device_->createTexture(RenderTextureDesc::ColorTarget(layout.width*scale,layout.height*scale,
+                NativeTextureFormat(layout)));
             dest.identity=identity;
         }
-        if(!full&&dest.version!=resolve_memory_->Version(layout,address)&&resolve_memory_->AnyDefined(layout,address)) {
+        if(held_current&&ImageScale(*held_current,layout.width)==scale&&
+           static_cast<VulkanTexture&>(*held_current).desc.format==static_cast<VulkanTexture&>(*dest.texture).desc.format) {
+            // A partial resolve over an image a draw still samples: copy that
+            // image (at its scale) rather than decoding guest memory, which
+            // would lose the scale.
+            if(transfer_batch_)transfer_batch_->KeepImage(held_current,static_cast<const VulkanTexture&>(*held_current).allocationInfo.size);
+            const RenderRect whole=HostRect(RenderRect(0,0,layout.width,layout.height),scale);
+            resolve_memory_->ReleaseDeferredImage(*dest.texture,{});
+            transfers_->Resolve(*held_current,*dest.texture,whole,whole);
+            if(scale!=1)++scaled_surface_stats_.held_partial_copies;
+        } else if(!full&&dest.version!=resolve_memory_->Version(layout,address)&&resolve_memory_->AnyDefined(layout,address)) {
             // Run any pending store of this image before replacing its contents.
             resolve_memory_->ReleaseDeferredImage(*dest.texture,{});
             auto restored=resolve_memory_->LoadShared(layout,address);
             const RenderRect whole(0,0,layout.width,layout.height);
-            transfers_->Resolve(*restored,*dest.texture,whole,whole);
+            if(scale==1)transfers_->Resolve(*restored,*dest.texture,whole,whole);
+            else {
+                auto guest=GuestSizedCopy(*dest.texture,scale);
+                transfers_->Resolve(*restored,*guest,whole,whole);
+                transfers_->Blit(*guest,*dest.texture);++scaled_surface_stats_.enlargements;
+            }
             if(detailed_reports_)report["texture_alias_restores"].push_back({{"event",o.at("event")},{"identity",identity}});
         }
         const unsigned slot=o.at("source_slot");const auto& source=o.at("surfaces").at(std::to_string(6+slot));
@@ -6439,6 +6676,7 @@ public:
            o.at("copy_dest_swap")!=ResolveDestinationSwap(fetch,slot))
             throw std::runtime_error("Resolve destination swap disagrees with captured guest resource");
         std::shared_ptr<RenderTexture> quantized_source,atlas_rgba_source,packed_color_source;
+        bool quantized_scaled=false;
         auto atlas_rgba_kind=NativeDirectAtlasDepthResolveSource::Refuse;
         bool fused_atlas_resolve=false;
         const unsigned source_format=source.at("format");
@@ -6487,6 +6725,7 @@ public:
                 &Surface(source,false,nullptr,source_region?&src:nullptr);
             selected_atlas_region=source_region;
         }
+        RenderTexture* const host_src_image=src_image;
         // A 4x MSAA colour surface stores 2x2 samples per pixel, so its EDRAM
         // holds a single-sample surface twice as wide and high at the same base
         // (Gears points a 4x 640x360 surface at the 1280x720 scene to get a
@@ -6511,11 +6750,15 @@ public:
                 full=&Surface(single,false);
             }
             const auto& full_desc=static_cast<VulkanTexture&>(*full).desc;
-            msaa_average=device_->createTexture(RenderTextureDesc::ColorTarget(width,height,full_desc.format));
+            msaa_average=device_->createTexture(RenderTextureDesc::ColorTarget(width*scale,height*scale,full_desc.format));
             if(!msaa_average)throw std::runtime_error("Cannot allocate MSAA resolve image");
-            if(transfer_batch_)transfer_batch_->KeepImage(msaa_average,uint64_t(width)*height*8);
-            transfers_->Resolve(*full,*msaa_average,RenderRect(src.left*2,src.top*2,src.right*2,src.bottom*2),src,0,
-                PassTransfer::Conversion::Average2x2);
+            if(transfer_batch_)transfer_batch_->KeepImage(msaa_average,uint64_t(width)*height*scale*scale*8);
+            // The full surface's scale (screen-sized); the average comes out
+            // at the same scale.
+            const uint32_t full_scale=ImageScale(*full,width*2);
+            if(full_scale!=scale)throw std::runtime_error("4x MSAA resolve source and its full surface differ in scale");
+            transfers_->Resolve(*full,*msaa_average,HostRect(RenderRect(src.left*2,src.top*2,src.right*2,src.bottom*2),scale),
+                HostRect(src,scale),0,PassTransfer::Conversion::Average2x2);
             src_image=msaa_average.get();
             ++msaa_fallback_.averaged_resolves;
         }
@@ -6531,8 +6774,13 @@ public:
             // This does not replace per-fragment destination quantization.
             const auto storage=SurfaceStorage(source);
             if(!direct_fixed_source&&surfaces_.at(SurfaceKey(source)).dirty)
-                edram_memory_->StoreSurface(*src_image,storage);
-            quantized_source=edram_memory_->LoadSurfaceShared(storage);
+                StoreHostSurface(*host_src_image,storage);
+            // Scaled: from the full-resolution EDRAM copy when it is current.
+            quantized_scaled=scale!=1&&SurfaceScale(storage)==scale&&scale==edram_memory_->scaled_copy_scale()&&
+                edram_memory_->ScaledSurfaceCurrent(storage);
+            quantized_source=quantized_scaled?edram_memory_->LoadScaledSurfaceShared(storage):
+                edram_memory_->LoadSurfaceShared(storage);
+            if(quantized_scaled)++scaled_surface_stats_.full_quantized;
             if(detailed_reports_)report["fixed_source_resolves"].push_back(o.at("event"));
             if(direct_fixed_source) {
                 transfer_report_dirty_=true;
@@ -6543,7 +6791,16 @@ public:
         if(o.contains("copy_dest_swap")&&o.at("copy_dest_swap")!=destination_swap)
             throw std::runtime_error("Resolve destination swap disagrees with captured guest resource");
         resolve_memory_->ReleaseDeferredImage(*dest.texture,ResolveMemory::StoreFootprintKey(layout,dst,address));
-        if(!fused_atlas_resolve)transfers_->Resolve(quantized_source?*quantized_source:*src_image,*dest.texture,src,dst,o.at("exponent_bias"),conversion,
+        if(fused_atlas_resolve) {
+        } else if(scale!=1&&quantized_source&&!quantized_scaled) {
+            // The EDRAM-quantized source is in guest pixels: resolve at guest
+            // size over a shrunk copy of the destination, then enlarge it.
+            auto guest=GuestSizedCopy(*dest.texture,scale);
+            transfers_->Resolve(*quantized_source,*guest,src,dst,o.at("exponent_bias"),conversion,destination_swap?0x60a:0x688);
+            transfers_->Blit(*guest,*dest.texture);++scaled_surface_stats_.enlargements;
+        } else transfers_->Resolve(quantized_source?*quantized_source:*src_image,*dest.texture,
+            quantized_source&&!quantized_scaled?src:HostRect(src,scale),quantized_source&&!quantized_scaled?dst:HostRect(dst,scale),
+            o.at("exponent_bias"),conversion,
             destination_swap?0x60a:0x688);
         if(destination_swap&&detailed_reports_)report["resolve_destination_swaps"].push_back(o.at("event"));
         if(atlas_rgba_source) {
@@ -6565,6 +6822,14 @@ public:
             }
             stats.source_pixels+=kNativeDirectAtlasDepthResolvePixels;
             stats.resolve_pixels+=uint64_t(src.right-src.left)*uint64_t(src.bottom-src.top);
+        } else if(scale!=1) {
+            // Guest memory takes guest pixels: the store reads the scaled
+            // images one sample per guest pixel (depth: stencil from the
+            // scaled source surface).
+            const ScaledStore scaled(*resolve_memory_,scale);
+            if(slot==4)resolve_memory_->StoreDepth(*dest.texture,layout,dst,address,*host_src_image,
+                src.left-dst.left,src.top-dst.top);
+            else resolve_memory_->Store(*dest.texture,layout,dst,address);
         } else if(slot==4)resolve_memory_->StoreDepth(*dest.texture,layout,dst,address,*src_image,src.left-dst.left,src.top-dst.top);
         else if(config_.deferred_resolve_stores&&DirectResolveFormat(layout)&&layout.format!=54&&
                 resolve_memory_->DeferStore(dest.texture,layout,dst,address)) {
@@ -6575,11 +6840,21 @@ public:
         if(config_.direct_resolve_textures) {
             if(DirectResolveFormat(layout)&&!atlas_rgba_source&&(slot!=4||layout.format==22||layout.format==23)) {
                 direct_resolve_targets_[address]=DirectResolveTarget{key,layout};
-                if(config_.verify_direct_resolve_textures)VerifyDirectResolve(*dest.texture,layout,address,key);
+                if(config_.verify_direct_resolve_textures&&scale==1)VerifyDirectResolve(*dest.texture,layout,address,key);
             } else direct_resolve_targets_.erase(address);
         }
         if(temporal_&&slot==4&&conversion==PassTransfer::Conversion::DepthFloat24)
             temporal_->ObserveDepthResolve(dest.texture.get());
+        if(rt_ao_&&slot==4&&conversion==PassTransfer::Conversion::DepthFloat24)
+            rt_ao_->ObserveDepthResolve(dest.texture.get());
+        if(slot!=4&&velocity_pass_base_>=0&&SurfaceStorage(source).base==uint32_t(velocity_pass_base_)) {
+            velocity_texture_address_=address;velocity_pass_base_=-1;
+            const bool off=config_.motion_blur&&!config_.motion_blur();
+            if(off!=motion_blur_off_)
+                REXLOG_INFO("Native renderer: motion blur {} (velocity buffer at {:08X}; {} draws changed so far)",
+                            off?"off":"on",address,motion_blur_patched_draws_);
+            motion_blur_off_=off;
+        }
         if(temporal_&&slot!=4&&temporal_velocity_base_>=0&&
            SurfaceStorage(source).base==uint32_t(temporal_velocity_base_)) {
             if(config_.temporal_object_motion)temporal_->ObserveVelocityResolve(dest.texture.get(),destination_swap);
@@ -6656,7 +6931,26 @@ public:
                         vertices?"indices":"vertices");
                 return;
             }
+        } else if(function=="DrawIndexedVertices") {
+            // Likewise an indexed draw without its index buffer header (30)
+            // or indices (31): seen once in Act 2, where it used to stop the
+            // renderer and, with no fallback, the game. The capture logs why
+            // (see GeometryBlocks); a draw of zero indices draws nothing.
+            bool header=false,indices=false;
+            o.Geometry(false,[&](const DrawGeometryInput& g) {
+                if(g&&g.Kind()==30)header=true;
+                if(g&&g.Kind()==31)indices=true;
+            });
+            if(!header||!indices) {
+                const auto args=o.Args();
+                if(args[3]&&indexed_geometry_skipped_draws_++<8)
+                    REXLOG_WARN("Native renderer: skipped DrawIndexedVertices draw {} without captured {} "
+                                "(primitive {}, start {}, {} indices)",o.Event(),header?"indices":"index buffer",
+                                args[1],args[2],args[3]);
+                return;
+            }
         }
+        if(rt_ao_)RayTracedAoBeforeDraw(o);
         if(temporal_)TemporalBeforeDraw(o);
         std::optional<RetainedPhaseTimingContext> timing_context;
         if(RetainedPhaseGpuTimingEnabled())timing_context.emplace(*this,o);
@@ -6735,6 +7029,8 @@ public:
         auto state=DecodeDrawState(decoded_words,extent_width,extent_height,rectangle?8:lines?2:4,config_.native_fsi);
         NativeFsiShaderConstants fsi_shared;auto& shared=fsi_shared.shared;
         shared.half_pixel=state.half_pixel;shared.alpha_threshold=state.alpha_reference;
+        const uint32_t draw_scale=SurfaceScaleFor(extent_width,extent_height);
+        shared.render_scale_log2=uint32_t(std::countr_zero(draw_scale));
         if(config_.native_fsi) {
             auto& raster=fsi_shared.raster;
             raster.blend_constant=state.blend_constant;
@@ -6769,7 +7065,7 @@ public:
             if(surfaces_maybe_dirty_) {
                 for(auto& [key,image]:surfaces_)if(image.dirty) {
                     FlushPendingDraws();
-                    const auto layout=SurfaceStorage(image.identity);edram_memory_->StoreSurface(*image.texture,layout);
+                    const auto layout=SurfaceStorage(image.identity);StoreHostSurface(*image.texture,layout);
                     image.version=edram_memory_->SurfaceVersion(layout);image.dirty=false;
                 }
                 surfaces_maybe_dirty_=false;
@@ -6847,6 +7143,7 @@ public:
         // Operation-owned CPU index bytes are borrowed; see ViewPayload.
         const OwnedPayload::Snapshot* index_borrowed=nullptr;
         std::string_view index_digest;
+        uint64_t index_address=0;
         if(function=="DrawPrimitive"||function=="BeginVertices")
             index_parameters.first_index=up?0u:args[2];
         else {
@@ -6861,7 +7158,7 @@ public:
             }
             const auto& g=geometry_block(up?97:31);
             if(g.GpuMemory()) {
-                index_parameters.source=IndexGeometrySource::GpuMemory;
+                index_parameters.source=IndexGeometrySource::GpuMemory;index_address=g.Address();
                 index_payload.emplace(ReadPhysical(g.Address(),g.Bytes()));
             } else {
                 index_parameters.source=IndexGeometrySource::CpuPayload;
@@ -6879,6 +7176,15 @@ public:
         const IndexGeometryLookup index_key{index_parameters,index_digest};
         count=IndexGeometryCount(index_source,index_parameters);
         const size_t index_bytes=size_t(count)*4;
+        // Ray-traced AO: the same mesh in its depth and velocity draws (same
+        // vertex and index buffers and range; the shaders differ).
+        uint64_t rt_mesh=0;
+        if(rt_ao_&&rt_ao_->capturing()) {
+            const auto mix=[&](uint64_t v) {rt_mesh^=v+0x9e3779b97f4a7c15ull+(rt_mesh<<6)+(rt_mesh>>2);};
+            mix(std::hash<std::string_view>{}(index_digest));mix(index_address);mix(shared.vertex_streams[0].address);
+            mix(count);mix(index_parameters.first_index);mix(uint64_t(uint32_t(state.index_offset)));
+            rt_mesh|=1;
+        }
         size_t index_upload_bytes=0;
         auto* cached_indices=index_cache_.Find(index_key,index_source,index_owner);
         RenderBuffer* index_buffer=cached_indices?cached_indices->get():nullptr;
@@ -7210,10 +7516,14 @@ public:
                         // CPU wait. Optional volume assembly uses the same FIFO.
                         NativeGpuWorkTag tag;
                         if(config_.gpu_batch_attribution||config_.gpu_physical_timestamps){tag.kind=NativeGpuWorkKind::AliasLoad;try{tag.event=o.Event();tag.frame=o.Frame();}catch(...){}}
-                        RunTransferScope([&]{next->texture=resolve_memory_->LoadShared(layout,address);},0,(config_.gpu_batch_attribution||config_.gpu_physical_timestamps)?&tag:nullptr);
+                        RunTransferScope([&]{
+                            next->texture=resolve_memory_->LoadShared(layout,address);
+                            ScaleAliasGeneration(*next,layout);
+                        },0,(config_.gpu_batch_attribution||config_.gpu_physical_timestamps)?&tag:nullptr);
                     } else {
                         ++texture_timing_.alias_loads;
                         next->texture=resolve_memory_->Load(layout,address);
+                        ScaleAliasGeneration(*next,layout);
                     }
                     // Loading can relieve FIFO pressure and retire old draws.
                     // Charge only owners still present after that exact fence.
@@ -7299,6 +7609,13 @@ public:
                 descriptors[3]->setSampler(slot,binding.sampler.get());
             }
             shared.textures_2d[slot]=shared.textures_3d[slot]=shared.textures_cube[slot]=shared.samplers[slot]=slot;
+            // A resolved image kept at the render scale: bit 30 of its 2D
+            // index tells the shader helpers (shader_common.h) to report and
+            // address it in guest texels.
+            if(const uint32_t scale=NativeRenderScale();scale==2&&image_set==0&&
+               sampled_image.desc.width==layout.width*scale&&sampled_image.desc.height==layout.height*scale) {
+                shared.textures_2d[slot]|=1u<<30;++scaled_surface_stats_.scaled_bindings;
+            }
             shared.texture_properties[slot]=binding.properties;
             if(time_cpu_stages_)texture_timing_.binding+=DrawMilliseconds(binding_start,DrawClock::now());
         });
@@ -7330,19 +7647,104 @@ public:
         // Only vertex constants c0-c3 change, so the upload takes them from a
         // patched 64-byte block instead of a copy of the whole state.
         std::span<const uint8_t> constant_source=raw;
+        // The velocity pass (see NativeTemporalIsVelocityDraw), with or
+        // without an upscaler, for the motion blur toggle.
+        if(color&&config_.motion_blur&&raw.size()>=0x2940&&
+           NativeTemporalIsVelocityDraw(raw,extent_width,extent_height,extent_width*2,extent_height*2))
+            velocity_pass_base_=storage(0).base;
+        std::vector<uint8_t> motion_blur_constants;
+        if(motion_blur_off_&&velocity_texture_address_&&raw.size()>=0x1780+32*16) {
+            bool reads_velocity=false;
+            o.Textures([&](const DrawTextureInput& t) {
+                const auto fetch=t.Fetch();
+                if((fetch[0]&3)==2&&((fetch[1]&0xFFFFF000u)&0x1FFFFFFFu)==(velocity_texture_address_&0x1FFFFFFFu))
+                    reads_velocity=true;
+            });
+            if(reads_velocity) {
+                // Zero the blur's velocity scale (screen pixels per unit of
+                // velocity, which the game scales with frame time): the tile
+                // pass keeps it in PS c12.xy, the gather pass in c11. Every
+                // other effect of these post-process draws stays.
+                const auto ps=o.Shader(true);
+                const bool tile=!ps.IsNull()&&ps.Digest().starts_with("8e22319c9d5282c3");
+                const bool gather=!ps.IsNull()&&ps.Digest().starts_with("f5e7c3c56f8df25e");
+                if(tile||gather) {
+                    motion_blur_constants.assign(raw.begin(),raw.end());
+                    const size_t offset=0x1780+(tile?12:11)*16;
+                    std::memset(motion_blur_constants.data()+offset,0,tile?8:16);
+                    constant_source=motion_blur_constants;
+                    ++motion_blur_patched_draws_;
+                }
+            }
+        }
         std::array<uint8_t,64> jittered_c0_c3;
         const uint8_t* constant_first_block=nullptr;
         if(temporal_&&temporal_->active()&&raw.size()>=0x2780&&
            std::bit_cast<float>(BE(raw,0x2918))==-1.f&&std::bit_cast<float>(BE(raw,0x291c))==1.f&&
            temporal_->ObserveSceneDraw(raw)) {
             if(color&&NativeTemporalIsVelocityDraw(raw,extent_width,extent_height,temporal_width_,temporal_height_)) {
-                temporal_->ObserveVelocityDraw(raw);
+                // The game writes the player (and cutscene characters played
+                // as the player) with a zero velocity scale, so its motion
+                // blur leaves them sharp. The upscaler then took them for
+                // still and blended old frames over their movement: give
+                // those draws the scale of the frame's other velocity draws
+                // (with motion blur on, they now blur too).
+                constexpr size_t kC11=0x1780+11*16;
+                // The velocity shader (PS 22f954ec98dd…) writes
+                // clampLength(c11.zw * (current - previous) + c11.xy * w terms) / w
+                // with c11.xy = c11.zw, at most one unit (about 20 pixels a
+                // frame): fast close-ups exceeded it and their clamped vectors
+                // smeared. With motion blur off nothing else reads the buffer,
+                // so record at a third of the scale (all four components; the
+                // decoder takes the scale from these constants) for three
+                // times the range, in ~0.5 px steps instead of ~0.16.
+                constexpr float kVelocityRange=1.0f/3.0f;
+                if(raw.size()>=kC11+16) {
+                    const bool zero=BE(raw,kC11)==0&&BE(raw,kC11+4)==0;
+                    const bool restore=zero&&velocity_scale_known_;
+                    if(!zero) {
+                        std::memcpy(velocity_scale_c11_.data(),raw.data()+kC11,16);
+                        velocity_scale_known_=true;
+                    }
+                    if(restore||(!zero&&motion_blur_off_)) {
+                        if(motion_blur_constants.empty())motion_blur_constants.assign(raw.begin(),raw.end());
+                        auto* c11=motion_blur_constants.data()+kC11;
+                        if(restore) {
+                            std::memcpy(c11,velocity_scale_c11_.data(),16);
+                            if(velocity_scale_restored_draws_++==0)
+                                REXLOG_INFO("Native renderer: player velocity restored for the temporal upscaler");
+                        }
+                        if(motion_blur_off_)for(unsigned k=0;k<4;++k) {
+                            const float scaled=std::bit_cast<float>(BE(motion_blur_constants,kC11+k*4))*kVelocityRange;
+                            const uint32_t bits=std::byteswap(std::bit_cast<uint32_t>(scaled));
+                            std::memcpy(c11+k*4,&bits,4);
+                        }
+                        constant_source=motion_blur_constants;
+                    }
+                }
+                temporal_->ObserveVelocityDraw(constant_source);
                 temporal_velocity_base_=storage(0).base;
             }
             std::memcpy(jittered_c0_c3.data(),raw.data()+kGuestFloatConstantOffset,jittered_c0_c3.size());
             NativeTemporalApplyJitterToFirstVertexConstants(jittered_c0_c3,temporal_->jitter());
             constant_first_block=jittered_c0_c3.data();
         }
+        // Ray-traced AO captures opaque scene geometry: full-frame scene-view
+        // draws that write depth without alpha test (rt_ao_->CaptureDraw).
+        const uint32_t rt_color_control=raw.size()>=0x2940?BE(raw,0x293c):0;
+        const bool rt_capture=rt_ao_&&rt_ao_->capturing()&&!rectangle&&!state.discard&&raw.size()>=0x2940&&
+            std::bit_cast<float>(BE(raw,0x2918))==-1.f&&std::bit_cast<float>(BE(raw,0x291c))==1.f&&
+            extent_width==rt_width_&&extent_height==rt_height_&&(BE(raw,0x2934)&6)==6&&
+            !((rt_color_control&8)&&(rt_color_control&7)!=7)&&!o.Shader(false).IsNull();
+        if(rt_capture)rt_ao_->ObserveCamera(raw);
+        if(rt_ao_&&rt_ao_->capturing()&&color&&NativeTemporalIsVelocityDraw(raw,extent_width,extent_height,rt_width_,rt_height_))
+            rt_ao_->ObserveMovingMesh(rt_mesh);
+        // Ray-traced shadows: the dominant light's shadow projections write
+        // only red into the frame-sized light attenuation buffer.
+        if(rt_ao_&&rt_ao_->capturing()&&raw.size()>=0x2940&&color&&(BE(raw,0x28dc)&15)==1&&!(BE(raw,0x2934)&4)&&
+           extent_width==rt_width_&&extent_height==rt_height_&&!o.Shader(true).IsNull()&&
+           rt_ao_->ObserveShadowProjection(raw))
+            rt_shadow_base_=int64_t(storage(0).base);
         RenderBuffer* constants=nullptr;ShaderPushConstants addresses{};
         bool pinned_null_constants_selected=false;
         const auto upload_constants=[&](bool pinned_null) {
@@ -8546,8 +8948,8 @@ public:
         }
         if(!packed_pass_continued&&!readonly_pass_continued&&!color_pass_continued&&!phase_pass_continued&&!hardware_pass_continued&&!fsi_pass_continued)
             commands->setFramebuffer(framebuffer);
-        commands->setViewports(state.viewport);
-        commands->setScissors(state.discard?RenderRect(0,0,1,1):state.scissor);
+        commands->setViewports(HostViewport(state.viewport,draw_scale));
+        commands->setScissors(state.discard?RenderRect(0,0,1,1):HostRect(state.scissor,draw_scale));
         commands->setGraphicsPipelineLayout(layout_.get());commands->setGraphicsPushConstants(0,&addresses);
         const uint32_t all_descriptor_sets=(1u<<descriptor_count)-1;
         uint32_t required_descriptor_sets=all_descriptor_sets;
@@ -8627,6 +9029,8 @@ public:
             }catch(...) {fragment_census_->RejectMetadata();}
 #endif
             commands->drawIndexedInstanced(count,1,0,state.index_offset,0);
+            if(rt_capture)rt_ao_->CaptureDraw(*commands,o.Shader(false).Digest(),p.primitiveTopology,count,state.index_offset,*pipeline,
+                (BE(raw,0x28dc)&0xffffu)==0,rt_mesh);
 #ifdef GOW3_NATIVE_FRAGMENT_CENSUS_REPLAY
             if(fragment_scope)fragment_scope->End();
 #endif
@@ -8993,6 +9397,79 @@ public:
             readonly_query_read_physical_=edram_memory_->physical_serial();
         } else readonly_query_read_owner_.reset();
     }
+    // Ray-traced AO: the first draw of a frame opens it; before the first HUD
+    // draw (found as in TemporalBeforeDraw) the occlusion is traced and the
+    // scene colour target is replaced in EDRAM with its darkened copy, so the
+    // HUD, the presented frame and the upscaler's HUD-less copy all build on it.
+    void RayTracedAoBeforeDraw(const DrawInput& o) {
+        if(!rt_frame_open_) {
+            rt_frame_open_=true;rt_scene_drawn_=false;rt_tonemap_base_=-1;
+            // Host pixels: its images follow the scaled surfaces and resolves.
+            rt_ao_->BeginFrame(rt_width_*SurfaceScaleFor(rt_width_,rt_height_),rt_height_*SurfaceScaleFor(rt_width_,rt_height_),
+                config_.ray_traced_ao_settings?config_.ray_traced_ao_settings():NativeRtAoSettings{});
+        }
+        if(!rt_ao_->capturing())return;
+        const auto payload=ViewPayload(o.State());const auto state=payload.bytes();
+        if(state.size()<0x2940)return;
+        if(std::bit_cast<float>(BE(state,0x2918))==-1.f&&std::bit_cast<float>(BE(state,0x291c))==1.f) {
+            rt_scene_drawn_=true;rt_tonemap_base_=-1;
+            return;
+        }
+        if(!rt_ao_->WantsApply())return;
+        const auto surfaces=o.Surfaces();
+        if(!surfaces[0]||o.Shader(true).IsNull()||!(BE(state,0x28dc)&15))return;
+        if(surfaces[0].Width()!=rt_width_||surfaces[0].Height()!=rt_height_)return;
+        bool hud=NativeTemporalIsHudDraw(state,rt_width_,rt_height_);
+        if(!hud&&rt_scene_drawn_) {
+            const int64_t base=SurfaceStorage(surfaces[0]).base;
+            if(rt_tonemap_base_<0) {
+                if(!surfaces[4])rt_tonemap_base_=base;
+            } else hud=rt_tonemap_base_==base;
+        }
+        if(hud)RayTracedAoApply(surfaces[0]);
+    }
+    // Before the first HUD draw, or before the tonemap target's resolve on a
+    // frame without HUD: trace and darken the colour target `target`.
+    template<class Target>void RayTracedAoApply(const Target& target) {
+        // The frame's velocity resolve, while the executor still owns it.
+        NativeRtAoObjectMotion motion;
+        if(temporal_&&temporal_->velocity())
+            for(const auto& [key,image]:resolved_)
+                if(image.texture.get()==temporal_->velocity()) {
+                    motion={temporal_->velocity(),temporal_->velocity_swapped(),temporal_->velocity_scale()};
+                    break;
+                }
+        RayTracedReplace(target,[&](RenderCommandList& commands,RenderTexture& surface,RenderTexture& depth,const auto& keep) {
+            return rt_ao_->Apply(commands,surface,depth,keep,motion);
+        });
+    }
+    // Replaces colour target `target` with the image `produce` makes from it
+    // and the frame's depth resolve.
+    template<class Target,class Produce>void RayTracedReplace(const Target& target,Produce&& produce) {
+        // The depth resolve must still be owned by the executor's cache.
+        RenderTexture* depth=nullptr;
+        for(const auto& [key,image]:resolved_)if(image.texture.get()==rt_ao_->depth())depth=image.texture.get();
+        if(!depth)return;
+        // Interlock keeps the colour in EDRAM; hardware render targets draw the
+        // HUD into this image, which then becomes the written copy.
+        auto& surface=Surface(target,!config_.native_fsi);
+        const auto storage=SurfaceStorage(target);
+        RunTransferScope([&]{
+            auto& commands=transfer_batch_->BeginStage();
+            const std::function<void(std::shared_ptr<void>)> keep=[&](std::shared_ptr<void> lease) {
+                if(transfer_batch_->active())transfer_batch_->KeepLease(std::move(lease));
+            };
+            auto darkened=produce(commands,surface,*depth,keep);
+            if(!darkened)return;
+            if(config_.native_fsi) {edram_memory_->StoreSurface(*darkened,storage);return;}
+            const auto layout=static_cast<VulkanTexture&>(surface).textureLayout;
+            commands.barriers(RenderBarrierStage::COPY,RenderTextureBarrier(darkened.get(),RenderTextureLayout::COPY_SOURCE));
+            commands.barriers(RenderBarrierStage::COPY,RenderTextureBarrier(&surface,RenderTextureLayout::COPY_DEST));
+            commands.copyTexture(&surface,darkened.get());
+            if(layout!=RenderTextureLayout::UNKNOWN)
+                commands.barriers(RenderBarrierStage::GRAPHICS|RenderBarrierStage::COMPUTE,RenderTextureBarrier(&surface,layout));
+        },0);
+    }
     // First draw of a frame opens temporal capture. The colour target is
     // copied before the HUD: at a UE3 Canvas draw into a frame-sized target, or
     // at the next full-frame draw into the target of the tonemap (the first
@@ -9002,7 +9479,10 @@ public:
         if(!temporal_frame_open_) {
             temporal_frame_open_=true;temporal_velocity_base_=-1;
             temporal_scene_drawn_=false;temporal_tonemap_base_=-1;temporal_trace_.clear();
-            temporal_->BeginFrame(temporal_width_,temporal_height_);
+            // Host pixels: the upscaler's inputs, jitter and motion vectors are
+            // at the scaled size of the presented frame.
+            const uint32_t scale=SurfaceScaleFor(temporal_width_,temporal_height_);
+            temporal_->BeginFrame(temporal_width_*scale,temporal_height_*scale);
         }
         if(!temporal_->active())return;
         const auto payload=ViewPayload(o.State());const auto state=payload.bytes();
@@ -9108,6 +9588,18 @@ public:
         const bool direct_output=config_.direct_resolve_textures&&capture_.empty()&&
             (output=DirectResolveTexture(layout,address,resolve_memory_->Version(layout,address)));
         if(!output)output=resolve_memory_->Load(layout,address,&presentation_timing);
+        if(const uint32_t scale=SurfaceScaleFor(layout.width,layout.height);
+           scale!=1&&ImageScale(*output,layout.width)!=scale&&capture_.empty()) {
+            // Internal resolution scaling presents at host size (the
+            // upscaler's scene inputs have that size); a front buffer only
+            // in guest memory is enlarged.
+            const auto& desc=static_cast<VulkanTexture&>(*output).desc;
+            std::shared_ptr<RenderTexture> scaled=PresentationTarget(layout.width*scale,layout.height*scale);
+            transfers_->Blit(*output,*scaled);
+            if(desc.format!=RenderFormat::R32G32B32A32_FLOAT)throw std::runtime_error("Unexpected front buffer decode format");
+            output=std::move(scaled);
+            ++scaled_surface_stats_.enlargements;
+        }
         const auto reference_path=capture_/("gpu-reference-"+std::to_string(o.at("frame").get<unsigned>())+".json");
         if(!capture_.empty()&&fs::exists(reference_path)) {
             std::ifstream metadata(reference_path);Json reference;metadata>>reference;
@@ -9166,6 +9658,7 @@ public:
             NativeSynchronousGpuTimingScope presentation_scope(&presentation_timing,*commands_,
                 NativeSynchronousGpuPhase::PresentTransition,desc.width,desc.height);
             std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> temporal_inputs;
+            if(rt_ao_&&rt_frame_open_)rt_ao_->EndFrame(*commands_);
             if(temporal_&&temporal_frame_open_)temporal_inputs=TemporalFinish(*commands_);
             commands_->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(presented.get(),RenderTextureLayout::SHADER_READ));
             Submit(&presentation_scope);
@@ -9177,6 +9670,7 @@ public:
             temporal_frame_open_=false;
             temporal_width_=layout.width;temporal_height_=layout.height;
         }
+        rt_frame_open_=false;rt_width_=layout.width;rt_height_=layout.height;
         transfer_report_dirty_=true;
         diagnostic_counters_.completed_frames.push_back(o.at("frame"));
         if(detailed_reports_)report["frame_outputs"].push_back({{"frame",o.at("frame")},{"identity",identity},
@@ -9191,7 +9685,7 @@ public:
         }
         frame_staging_.clear();
         for(auto& [key,image]:surfaces_)if(!frame_surfaces_.contains(key)&&image.dirty) {
-            edram_memory_->StoreSurface(*image.texture,SurfaceStorage(image.identity));
+            StoreHostSurface(*image.texture,SurfaceStorage(image.identity));
             image.dirty=false;
         }
         auto retire=[](auto& cache,auto& used) {
@@ -9400,6 +9894,7 @@ public:
             if(deferred_query&&open_readonly_query_pass_)++readonly_query_pass_stats_.query_controls_preserved;
             else if(deferred_query&&open_fsi_draw_pass_&&config_.fsi_draw_pass_queries&&queries_->host_reset_enabled())
                 ++fsi_draw_pass_stats_.query_controls_preserved;
+            else if(HardwarePassQueryControlPreserved(deferred_query)) {}
             else SealDrawCommandGroup();
         }
         if(!deferred_query)FlushPendingDraws();
@@ -9463,6 +9958,7 @@ public:
             if(deferred_query&&open_readonly_query_pass_)++readonly_query_pass_stats_.query_controls_preserved;
             else if(deferred_query&&open_fsi_draw_pass_&&config_.fsi_draw_pass_queries&&queries_->host_reset_enabled())
                 ++fsi_draw_pass_stats_.query_controls_preserved;
+            else if(HardwarePassQueryControlPreserved(deferred_query)) {}
             else SealDrawCommandGroup();
         }
         const bool queue_cpu_write=type=="cpu_memory_write"&&QueueCpuWrite(o);
@@ -9535,13 +10031,28 @@ public:
         // Nothing outside SurfaceAt, frame retirement and diagnostics reads
         // EDRAM; each of those commits what it needs (diagnostics force).
         if(config_.hardware_lazy_commits&&!config_.native_fsi&&!force)return;
+        // Queue the commits in order with the surrounding work, as SurfaceAt
+        // does for alias commits: outside a transfer scope each store submitted
+        // synchronously and drained the whole GPU queue, which with a busy GPU
+        // (ray tracing) showed as 100+ ms frame spikes.
+        // Forced (diagnostic) flushes read the result back, so stay direct.
+        if(surfaces_maybe_dirty_&&!force&&gpu_work_queue_&&transfer_batch_&&!transfer_batch_->in_scope()) {
+            bool dirty=false;
+            for(const auto& [key,image]:surfaces_)if(image.dirty){dirty=true;break;}
+            if(dirty) {
+                NativeGpuWorkTag tag;tag.kind=NativeGpuWorkKind::SurfaceConversion;
+                RunTransferScope([&]{FlushCommittedState(operation_boundary,force);},0,
+                    (config_.gpu_batch_attribution||config_.gpu_physical_timestamps)?&tag:nullptr);
+                return;
+            }
+        }
         if(surfaces_maybe_dirty_)for(auto& [key,image]:surfaces_)if(image.dirty) {
             // A real image commit retains the original close before any store
             // or completion. Surface alias and non-FSI behavior are unchanged.
             SealDrawCommandGroup();
             if(!gpu_work_queue_||!transfer_batch_->active())FlushPendingDraws();
             const auto layout=SurfaceStorage(image.identity);
-            edram_memory_->StoreSurface(*image.texture,layout);
+            StoreHostSurface(*image.texture,layout);
             image.version=edram_memory_->SurfaceVersion(layout);image.dirty=false;
         }
         surfaces_maybe_dirty_=false;

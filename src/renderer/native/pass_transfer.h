@@ -54,6 +54,13 @@ public:
     // initialized. Neither stencil nor depth outside it is read or overwritten.
     void RestoreDepth(plume::RenderTexture& source,plume::RenderTexture& destination,
         const plume::RenderRect* region=nullptr);
+    // Copies all of colour image `source` over all of `destination` (same format) at an
+    // integer ratio of their sizes: internal resolution scaling between the
+    // host images of scaled surfaces and the guest-sized images the EDRAM
+    // and resolve memory paths use. Always the nearest sample: colour images
+    // may hold encoded bits (7e3 float as UNorm 10, packed data), which
+    // averaging would corrupt.
+    void Blit(plume::RenderTexture& source,plume::RenderTexture& destination);
     struct RestoreStatistics {
         uint64_t calls=0,legacy_calls=0,export_calls=0,draws=0,stencil_clears=0,export_failures=0;
     };

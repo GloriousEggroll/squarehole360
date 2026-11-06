@@ -1,4 +1,5 @@
 #pragma once
+#include "ray_traced_ao.h"
 #include "native_overflow_prewarm.h"
 #include "live_draw.h"
 #include "plume_render_interface.h"
@@ -83,6 +84,13 @@ struct SceneExecutorConfig {
     // presenter asks for them (see temporal_inputs.h). `temporal` receives a
     // frame's inputs, or nullptr, right before `present` for that frame.
     bool temporal_inputs=false;
+    // Ray-traced ambient occlusion (ray_traced_ao.h): the device enables ray
+    // queries and transform feedback; the settings are read every frame.
+    bool ray_traced_ao=false;
+    std::function<NativeRtAoSettings()> ray_traced_ao_settings;
+    // False removes the game's motion blur: its tile and gather passes, which
+    // read the velocity buffer, get a zero velocity scale. Read once per frame.
+    std::function<bool()> motion_blur;
     // Diagnostics: log the draws after the last scene-view draw for this many
     // frames in which no HUD was found.
     uint32_t temporal_trace_frames=0;
@@ -316,6 +324,7 @@ struct SceneExecutorConfig {
     bool fsi_draw_pass_groups=false;
     // Also admit occlusion-query draws (requires host query reset).
     bool fsi_draw_pass_queries=false;
+    bool hardware_pass_queries=false;
     // Pinned unchanged primary material draws, disjoint packed color/depth
     // planes and immutable sampled resources. Query/transfer boundaries remain.
     bool packed_color_render_pass_groups=false;

@@ -15,7 +15,9 @@ struct VertexStream {
 struct alignas(16) SharedShaderConstants {
   std::array<uint32_t, 32> textures_2d{}, textures_3d{}, textures_cube{}, samplers{};
   std::array<uint32_t, 8> booleans{};
-  uint32_t reserved_texcoord_swaps = 0;
+  // log2 of the internal resolution scale (render_scale.h): pixel shaders
+  // report guest pixel positions.
+  uint32_t render_scale_log2 = 0;
   std::array<float, 2> half_pixel{};
   float alpha_threshold = 0;
   std::array<float, 4> color_scale{1,1,1,1};
@@ -31,6 +33,7 @@ struct ShaderPushConstants {
 };
 static_assert(sizeof(VertexStream) == 16);
 static_assert(offsetof(SharedShaderConstants, booleans) == 512);
+static_assert(offsetof(SharedShaderConstants, render_scale_log2) == 544);
 static_assert(offsetof(SharedShaderConstants, half_pixel) == 548);
 static_assert(offsetof(SharedShaderConstants, alpha_threshold) == 556);
 static_assert(offsetof(SharedShaderConstants, color_scale) == 560);

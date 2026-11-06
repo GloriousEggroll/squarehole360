@@ -1,0 +1,117 @@
+#version 460
+// Ray-traced ambient occlusion, step 3: accumulates the half-resolution
+// occlusion over frames. The surface point is found in the previous frame with
+// the camera motion, or where the game's velocity pass drew a moving object,
+// with that object's own motion; history is kept where the previous depth
+// there agrees. History is also clamped to the range of this frame's
+// occlusion around the pixel, so shadows of objects that moved away do not
+// trail behind them.
+// Also stores this frame's half-resolution depth for the next frame and the
+// upsampling in step 4.
+#extension GL_EXT_samplerless_texture_functions : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform texture2D ao_raw;          // half resolution
+layout(set = 0, binding = 1) uniform texture2D depth_texture;   // full resolution
+layout(set = 0, binding = 2) uniform texture2D history_in;      // r: occlusion, g: frames
+layout(set = 0, binding = 3) uniform texture2D previous_depth;  // half resolution
+layout(set = 0, binding = 4, rg16f) uniform writeonly image2D history_out;
+layout(set = 0, binding = 5, r32f) uniform writeonly image2D depth_out;
+// UE3 velocity buffer at half resolution (see temporal_inputs.comp): 0 where
+// nothing moving was drawn, else clampLength(motion * scale) * 0.5 + 0.5.
+layout(set = 0, binding = 6) uniform texture2D object_velocity;
+
+layout(push_constant, std430) uniform Push {
+    vec4 inverse_view_projection[4];  // guest clip to camera-relative world, one row per output
+    vec4 reprojection[4];             // camera-relative world to previous clip, one row per output
+    uvec2 size;                       // full resolution
+    uint history_valid;
+    float sky_depth;
+    float max_frames;
+    uint flags;           // 1: object velocity; 2: in blue/green (resolve swapped red and blue);
+                          // bits 8-15: trace step (full-resolution pixels per occlusion texel)
+    vec2 velocity_scale;  // full-resolution pixels per encoded unit
+} p;
+
+vec3 Position(ivec2 pixel, float depth) {
+    const vec2 ndc = vec2((float(pixel.x) + 0.5) / float(p.size.x) * 2.0 - 1.0,
+                          1.0 - (float(pixel.y) + 0.5) / float(p.size.y) * 2.0);
+    // The viewport maps NDC z to device depth 1 - z (reverse Z).
+    const vec4 c = vec4(ndc, 1.0 - depth, 1.0);
+    const vec4 w = vec4(dot(p.inverse_view_projection[0], c), dot(p.inverse_view_projection[1], c),
+                        dot(p.inverse_view_projection[2], c), dot(p.inverse_view_projection[3], c));
+    return w.xyz / w.w;
+}
+
+void main() {
+    const uint step = (p.flags >> 8) & 255u;
+    const ivec2 half_size = ivec2((p.size + step - 1u) / step);
+    const ivec2 half_pixel = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(half_pixel, half_size))) return;
+    const ivec2 pixel = min(half_pixel * int(step), ivec2(p.size) - 1);
+    const float depth = texelFetch(depth_texture, pixel, 0).r;
+    imageStore(depth_out, half_pixel, vec4(depth));
+    const float current = texelFetch(ao_raw, half_pixel, 0).r;
+    if (depth <= p.sky_depth) {
+        imageStore(history_out, half_pixel, vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+    vec2 accumulated = vec2(current, 1.0);
+    // Where an object moved by itself, its own screen motion (current minus
+    // previous, full-resolution pixels) finds it in the previous frame.
+    bool object = false;
+    vec2 object_motion = vec2(0.0);
+    if ((p.flags & 1u) != 0u) {
+        const vec4 texel = texelFetch(object_velocity, pixel / 2, 0);
+        const vec2 encoded = (p.flags & 2u) != 0u ? texel.bg : texel.rg;
+        if (any(greaterThan(encoded, vec2(0.5 / 255.0)))) {
+            object = true;
+            object_motion = (round(encoded * 255.0) - 128.0) * (2.0 / 255.0) * p.velocity_scale;
+        }
+    }
+    if (p.history_valid != 0u) {
+        const vec4 position = vec4(Position(pixel, depth), 1.0);
+        const vec4 c = vec4(dot(p.reprojection[0], position), dot(p.reprojection[1], position),
+                            dot(p.reprojection[2], position), dot(p.reprojection[3], position));
+        if (c.w > 0.0 || object) {
+            const vec2 ndc = c.xy / c.w;
+            // A moving object's depth changes with it; compare with its own.
+            const float expected = object ? depth : 1.0 - c.z / c.w;  // device depth
+            // Previous full-resolution pixel centre, in occlusion texels.
+            const vec2 full = object ? vec2(pixel) - object_motion
+                : vec2((ndc.x + 1.0) * 0.5, (1.0 - ndc.y) * 0.5) * vec2(p.size) - 0.5;
+            const vec2 source = full / float(step);
+            const ivec2 base = ivec2(floor(source));
+            const vec2 f = source - vec2(base);
+            float weight = 0.0;
+            vec2 history = vec2(0.0);
+            for (int i = 0; i < 4; ++i) {
+                const ivec2 tap = base + ivec2(i & 1, i >> 1);
+                if (any(lessThan(tap, ivec2(0))) || any(greaterThanEqual(tap, half_size))) continue;
+                const float previous = texelFetch(previous_depth, tap, 0).r;
+                // Reverse-Z device depth is proportional to 1 / distance.
+                if (abs(previous - expected) > (object ? 0.06 : 0.03) * expected) continue;
+                const float w = ((i & 1) != 0 ? f.x : 1.0 - f.x) * ((i >> 1) != 0 ? f.y : 1.0 - f.y);
+                history += texelFetch(history_in, tap, 0).rg * w;
+                weight += w;
+            }
+            if (weight > 0.01) {
+                history /= weight;
+                float low = current, high = current;
+                for (int y = -1; y <= 1; ++y) {
+                    for (int x = -1; x <= 1; ++x) {
+                        const ivec2 tap = clamp(half_pixel + ivec2(x, y), ivec2(0), half_size - 1);
+                        const float value = texelFetch(ao_raw, tap, 0).r;
+                        low = min(low, value);
+                        high = max(high, value);
+                    }
+                }
+                // A little slack keeps the noise of few rays from being clamped.
+                history.r = clamp(history.r, low - 0.1, high + 0.1);
+                const float frames = min(history.g + 1.0, p.max_frames);
+                accumulated = vec2(mix(history.r, current, 1.0 / frames), frames);
+            }
+        }
+    }
+    imageStore(history_out, half_pixel, vec4(accumulated, 0.0, 0.0));
+}

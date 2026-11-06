@@ -1,5 +1,5 @@
 #pragma once
-// Scene inputs for temporal upscaling (FSR 3.1) and frame generation.
+// Scene inputs for temporal upscaling (FSR 3.1, DLSS, XeSS).
 //
 // While the presenter asks for them, every frame:
 // - scene-view draws (reverse-Z viewport) get sub-pixel jitter added to the
@@ -93,6 +93,9 @@ public:
     // swapped channels (velocity then in blue and green).
     void ObserveVelocityResolve(plume::RenderTexture* resolved,bool red_blue_swapped);
     plume::RenderTexture* velocity() const noexcept {return velocity_;}
+    bool velocity_swapped() const noexcept {return velocity_swapped_;}
+    // Screen pixels per encoded unit; zero until a velocity draw gave the scale.
+    const std::array<float,2>& velocity_scale() const noexcept {return velocity_scale_;}
     bool WantsHudSnapshot() const noexcept {return active_&&camera_&&!hud_source_;}
     // Records a copy of `surface` (the HUD's colour target) into `commands`.
     void RecordHudSnapshot(plume::RenderCommandList& commands,plume::RenderTexture& surface);

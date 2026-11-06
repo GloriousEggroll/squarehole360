@@ -13,7 +13,7 @@ namespace {
 constexpr size_t kVertexConstants=0x780;
 constexpr size_t kPixelConstants=0x1780;
 constexpr uint32_t kFlagLateDepth=1,kFlagHud=2,kFlagWorldDepth=4,kFlagVelocity=8,kFlagVelocitySwapped=16,
-    kFlagPreviousDepth=32;
+    kFlagPreviousDepth=32,kFlagPreviousHud=64;
 // Frames handed to the presenter are reused only after this many newer frames,
 // in addition to the presenter having released them.
 constexpr uint64_t kFrameReuseDistance=8;
@@ -67,7 +67,7 @@ std::array<double,3> Column(const NativeTemporalCamera& camera,int column) {
     return {camera.view_projection[0][column],camera.view_projection[1][column],camera.view_projection[2][column]};
 }
 double Dot(const std::array<double,3>& a,const std::array<double,3>& b) {return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];}
-const std::array<RenderDescriptorRange,9> kRanges{{
+const std::array<RenderDescriptorRange,13> kRanges{{
     {RenderDescriptorRangeType::TEXTURE,0,1},
     {RenderDescriptorRangeType::READ_WRITE_BYTE_ADDRESS_BUFFER,1,1},
     {RenderDescriptorRangeType::TEXTURE,2,1},
@@ -76,7 +76,11 @@ const std::array<RenderDescriptorRange,9> kRanges{{
     {RenderDescriptorRangeType::READ_WRITE_TEXTURE,5,1},
     {RenderDescriptorRangeType::READ_WRITE_TEXTURE,6,1},
     {RenderDescriptorRangeType::TEXTURE,7,1},
-    {RenderDescriptorRangeType::TEXTURE,8,1}}};
+    {RenderDescriptorRangeType::TEXTURE,8,1},
+    {RenderDescriptorRangeType::TEXTURE,9,1},
+    {RenderDescriptorRangeType::TEXTURE,10,1},
+    {RenderDescriptorRangeType::READ_WRITE_TEXTURE,11,1},
+    {RenderDescriptorRangeType::READ_WRITE_TEXTURE,12,1}}};
 struct PushConstants {
     std::array<std::array<float,4>,4> reprojection;
     uint32_t width,height,flags;
@@ -107,6 +111,10 @@ struct NativeTemporalInputs::Frame {
     uint32_t width=0,height=0;
     uint64_t last_frame=0;
     std::unique_ptr<RenderTexture> depth,motion,reactive;
+    // HUD transmittance estimate (see temporal_inputs.comp): the frame before
+    // and after the HUD, with the estimate and its confidence in alpha.
+    std::array<std::unique_ptr<RenderTexture>,2> hud_state;
+    bool hud_state_valid=false;
     std::unique_ptr<RenderTexture> dummy_texture;
     // Colour target before the HUD; created on first use in its format.
     std::unique_ptr<RenderTexture> hud;
@@ -191,7 +199,7 @@ std::optional<std::array<float,2>> NativeTemporalVelocityScale(std::span<const u
     // The velocity scale is the same in both directions (square pixels). Some
     // draws of the pass in cutscenes hold something else in c11 (scales of
     // -150000 and 30000 px): taken as the frame's scale, every moving object
-    // got motion vectors far off screen, which frame generation follows.
+    // got motion vectors far off screen, which the upscaler followed.
     if(scale[0]<=0||std::abs(scale[0]-scale[1])>0.02f*scale[0])return std::nullopt;
     return scale;
 }
@@ -263,6 +271,7 @@ NativeTemporalInputs::~NativeTemporalInputs() {
     for(auto& frame:frames_) {
         frame->descriptors.reset();frame->late_depth.reset();frame->hud.reset();
         frame->depth.reset();frame->motion.reset();frame->reactive.reset();frame->dummy_texture.reset();
+        frame->hud_state={};
     }
 }
 
@@ -344,13 +353,17 @@ std::shared_ptr<NativeTemporalInputs::Frame> NativeTemporalInputs::AcquireFrame(
     const auto storage=RenderTextureFlag::STORAGE|RenderTextureFlag::UNORDERED_ACCESS;
     frame->depth=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R32_FLOAT,storage));
     frame->motion=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R16G16_FLOAT,storage));
-    // Red: reactive (current frame over history). Green: HUD coverage.
-    frame->reactive=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R8G8_UNORM,storage));
+    // Red: reactive (current frame over history). Green: HUD coverage. Blue:
+    // HUD transmittance.
+    frame->reactive=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R8G8B8A8_UNORM,storage));
+    for(auto& state:frame->hud_state)
+        state=device_.createTexture(RenderTextureDesc::Texture2D(width_,height_,1,RenderFormat::R16G16B16A16_FLOAT,storage));
     frame->dummy_texture=device_.createTexture(RenderTextureDesc::Texture2D(1,1,1,RenderFormat::R32_FLOAT));
     frame->late_depth=device_.createBuffer(RenderBufferDesc::DefaultBuffer(uint64_t(width_)*height_*4,
         RenderBufferFlag::STORAGE|RenderBufferFlag::UNORDERED_ACCESS));
     frame->descriptors=device_.createDescriptorSet(RenderDescriptorSetDesc(kRanges.data(),uint32_t(kRanges.size())));
-    if(!frame->depth||!frame->motion||!frame->reactive||!frame->dummy_texture||!frame->late_depth||!frame->descriptors)
+    if(!frame->depth||!frame->motion||!frame->reactive||!frame->hud_state[0]||!frame->hud_state[1]||
+       !frame->dummy_texture||!frame->late_depth||!frame->descriptors)
         return nullptr;
     frame->last_frame=frame_id_;
     frames_.push_back(frame);
@@ -379,8 +392,8 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     if(!frame) {history_valid_=false;previous_camera_=camera_;return nullptr;}
 
     // A camera cut (teleport, large turn, or a new shot in a cutscene that the
-    // scene jumps across on screen) invalidates history; frame generation
-    // would otherwise blend two unrelated shots.
+    // scene jumps across on screen) invalidates history; the upscaler would
+    // otherwise blend two unrelated shots.
     bool reset=!history_valid_||!previous_camera_;
     if(!reset) {
         double moved=0;
@@ -391,7 +404,7 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
         const auto w=Column(*camera_,3),pw=Column(*previous_camera_,3);
         const double facing=Dot(w,pw)/std::sqrt(std::max(Dot(w,w)*Dot(pw,pw),1e-24));
         const float screen=NativeTemporalScreenMotion(*camera_,*previous_camera_,projection);
-        // Sensitive on purpose: a missed cut ghosts the generated frame, while a
+        // Sensitive on purpose: a missed cut ghosts the next frames, while a
         // false one only costs one frame of history. Cutscene cuts that moved
         // 0.35-0.6 of the screen used to slip through.
         reset=moved>500.0*500.0||facing<0.85||screen>0.35f;
@@ -415,12 +428,16 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     push.jitter={jitter_.pixels_x,jitter_.pixels_y};
 
     const bool hud=frame->hud&&hud_source_&&hud_final==hud_source_;
+    // The HUD estimate carries across camera cuts: the HUD stays where it is.
+    Frame* previous_hud=hud&&previous_&&previous_!=frame&&previous_->hud_state_valid&&
+        previous_->width==width_&&previous_->height==height_?previous_.get():nullptr;
+    frame->hud_state_valid=hud;
     const bool late=late_depth&&static_cast<const VulkanTexture&>(*late_depth).desc.width==width_&&
         static_cast<const VulkanTexture&>(*late_depth).desc.height==height_&&
         (Format(*late_depth)==VK_FORMAT_D32_SFLOAT_S8_UINT||Format(*late_depth)==VK_FORMAT_D32_SFLOAT);
     push.flags=(late?kFlagLateDepth:0)|(hud?kFlagHud:0)|(world_depth?kFlagWorldDepth:0)|
         (velocity?kFlagVelocity:0)|(velocity&&velocity_swapped_?kFlagVelocitySwapped:0)|
-        (previous_depth?kFlagPreviousDepth:0);
+        (previous_depth?kFlagPreviousDepth:0)|(previous_hud?kFlagPreviousHud:0);
     statistics_.velocity_frames+=velocity!=nullptr;
 
     const BorrowedLayout late_layout(late?late_depth:nullptr),hud_layout(hud?hud_final:nullptr),
@@ -440,7 +457,13 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     RenderTexture* after=hud?hud_final:frame->dummy_texture.get();
     RenderTexture* motion=velocity?velocity:frame->dummy_texture.get();
     RenderTexture* earlier=previous_depth?previous_depth:frame->dummy_texture.get();
-    std::array<RenderTextureBarrier,8> barriers{
+    RenderTexture* earlier_before=previous_hud?previous_hud->hud_state[0].get():frame->dummy_texture.get();
+    RenderTexture* earlier_after=previous_hud?previous_hud->hud_state[1].get():frame->dummy_texture.get();
+    std::array<RenderTextureBarrier,12> barriers{
+        RenderTextureBarrier(earlier_before,RenderTextureLayout::SHADER_READ),
+        RenderTextureBarrier(earlier_after,RenderTextureLayout::SHADER_READ),
+        RenderTextureBarrier(frame->hud_state[0].get(),RenderTextureLayout::GENERAL),
+        RenderTextureBarrier(frame->hud_state[1].get(),RenderTextureLayout::GENERAL),
         RenderTextureBarrier(earlier,RenderTextureLayout::SHADER_READ),
         RenderTextureBarrier(motion,RenderTextureLayout::SHADER_READ),
         RenderTextureBarrier(world,RenderTextureLayout::SHADER_READ),
@@ -465,6 +488,10 @@ std::shared_ptr<const rex::ui::vulkan::TemporalUpscaleInputs> NativeTemporalInpu
     sets->setTexture(6,frame->reactive.get(),RenderTextureLayout::GENERAL);
     sets->setTexture(7,motion,RenderTextureLayout::SHADER_READ);
     sets->setTexture(8,earlier,RenderTextureLayout::SHADER_READ);
+    sets->setTexture(9,earlier_before,RenderTextureLayout::SHADER_READ);
+    sets->setTexture(10,earlier_after,RenderTextureLayout::SHADER_READ);
+    sets->setTexture(11,frame->hud_state[0].get(),RenderTextureLayout::GENERAL);
+    sets->setTexture(12,frame->hud_state[1].get(),RenderTextureLayout::GENERAL);
     commands.setComputePipelineLayout(layout_.get());
     commands.setComputePushConstants(0,&push);
     commands.setComputeDescriptorSet(sets,0);

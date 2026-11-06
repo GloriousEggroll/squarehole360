@@ -1,0 +1,38 @@
+#version 460
+// Ray-traced ambient occlusion, step 1: turns the clip-space vertex positions
+// captured by transform feedback (three per triangle) into camera-relative
+// world positions (the engine's translated world space, camera at the origin)
+// for the acceleration structure build. Unwritten slots hold NaN, which makes
+// their triangles inactive.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+layout(local_size_x = 256) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer ClipPositions {
+    vec4 v[];
+};
+layout(buffer_reference, scalar, buffer_reference_align = 4) writeonly buffer WorldPositions {
+    float v[];
+};
+
+layout(push_constant, std430) uniform Push {
+    vec4 inverse_view_projection[4];  // guest clip to camera-relative world, one row per output
+    ClipPositions clip;
+    WorldPositions world;
+    uint count;
+} p;
+
+void main() {
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= p.count) return;
+    vec4 c = p.clip.v[i];
+    // The vertex shaders flip Y for Vulkan; undo it to match the guest matrix.
+    c.y = -c.y;
+    const vec4 w = vec4(dot(p.inverse_view_projection[0], c), dot(p.inverse_view_projection[1], c),
+                        dot(p.inverse_view_projection[2], c), dot(p.inverse_view_projection[3], c));
+    vec3 position = vec3(uintBitsToFloat(0x7fc00000u));
+    if (abs(w.w) > 1e-20 && !any(isnan(c))) position = w.xyz / w.w;
+    p.world.v[i * 3 + 0] = position.x;
+    p.world.v[i * 3 + 1] = position.y;
+    p.world.v[i * 3 + 2] = position.z;
+}

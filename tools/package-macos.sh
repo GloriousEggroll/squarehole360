@@ -79,9 +79,8 @@ if git rev-parse --git-dir >/dev/null 2>&1; then
 else
   cp config/gow3.toml "$stage/config/gow3.toml"
 fi
-# No FidelityFX (FSR 3.1, frame generation) on macOS: default to FSR 1.
-sed -i '' -e 's/^present_effect = "fsr3"/present_effect = "fsr"/' \
-  -e 's/^present_frame_generation = true/present_frame_generation = false/' "$stage/config/gow3.toml"
+# No FidelityFX (FSR 3.1) on macOS: default to FSR 1.
+sed -i '' -e 's/^present_effect = "fsr3"/present_effect = "fsr"/' "$stage/config/gow3.toml"
 cp tools/run-macos.sh tools/settings-macos.sh tools/import-assets.py tools/setup-wizard.py "$stage/tools/"
 cp -R tools/settings tools/assets "$stage/tools/"
 # The importer reads the global shader cache with this scanner.
@@ -103,7 +102,7 @@ squarehole360 - Gears of War 3, macOS build (Apple silicon, Vulkan on Metal)
 
 Everything needed is included: MoltenVK and the Vulkan loader, OpenSSL, and
 Python with PySide6 in python/ for the wizard and settings. Needs macOS 14 or
-newer on an Apple silicon Mac. FSR 3.1 frame generation, DLSS and XeSS are
+newer on an Apple silicon Mac. FSR 3.1, DLSS and XeSS are
 not available on macOS; FSR 1 and CAS are.
 
 Multiplayer (System Link and internet play): see docs/multiplayer.md.
