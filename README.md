@@ -103,7 +103,7 @@ tools/build-windows.sh                 # builds build-windows/bin/gow3.exe
 ```
 
 To run it on Windows, package it (`tools/fetch-runtime-deps.sh windows`
-once, then `tools/package-windows.sh`) and double-click `gear3launcher.exe` in
+once, then `tools/package-windows.sh`) and double-click `gears3launcher.exe` in
 the extracted zip; the settings editor is `Settings.exe` (from a command
 prompt, `tools\run-windows.bat` and `tools\settings-windows.bat`). The
 package carries the Visual C++ runtime and a Python with PySide6 for the setup
@@ -138,7 +138,7 @@ frame-rate cap, the renderer choice (native or Xenia) and troubleshooting.
 ## Multiplayer
 
 Co-op Campaign, Horde, Beast and private Versus work through the game's System
-Link mode: on a local network, or over the internet through `squarehole-lobby`,
+Link mode: on a local network, or over the internet through `gears3-lobby`,
 a small lobby and relay server anyone can host. Players connect directly when
 their routers allow it. See [docs/multiplayer.md](docs/multiplayer.md).
 

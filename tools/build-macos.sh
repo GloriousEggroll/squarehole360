@@ -23,5 +23,5 @@ cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_C_COMPILER="$llvm/bin/clang" -DCMAKE_CXX_COMPILER="$llvm/bin/clang++" \
   -DGOW3_ENABLE_FIDELITYFX=OFF -DGOW3_XENIA_RENDERER=OFF 2>&1 | tee logs/configure-macos.log
-cmake --build build --target gow3 gow3-shader-precompile squarehole-lobby --parallel "$jobs" 2>&1 | tee logs/build-macos.log
+cmake --build build --target gow3 gow3-shader-precompile gears3-lobby --parallel "$jobs" 2>&1 | tee logs/build-macos.log
 echo "Built build/bin/gow3; run tools/run-macos.sh"

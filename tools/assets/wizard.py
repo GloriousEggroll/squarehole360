@@ -43,7 +43,7 @@ def _ask(prompt):
 def run_console(game, game_root, user_root, dlc_only=False):
     print(f"\n{game.title} setup\n")
     if not dlc_only and not base_ready(game_root):
-        print(f"squarehole360 needs your own copy of {game.title}: an Xbox 360 disc image (ISO)\n"
+        print(f"This port needs your own copy of {game.title}: an Xbox 360 disc image (ISO)\n"
               "or a folder with the extracted disc files.")
         while True:
             source = _ask("Path to the ISO or folder (empty to cancel): ")
@@ -59,7 +59,7 @@ def run_console(game, game_root, user_root, dlc_only=False):
         return 1
     if not update_ready(game, user_root):
         name = game.title_update.name
-        print(f"\nsquarehole360 is built for {game.title} {name}. Choose your {name} package\n"
+        print(f"\nThis port is built for {game.title} {name}. Choose your {name} package\n"
               f"({game.title_update.file}), or a folder or archive that contains it.")
         while not update_ready(game, user_root):
             source = _ask(f"Path to {name} (empty to cancel): ")
@@ -174,7 +174,7 @@ def run_gui(game, game_root, user_root, dlc_only=False):
     # Base game source.
     source_page = QWizardPage()
     source_page.setTitle(f"Your copy of {game.title}")
-    source_page.setSubTitle("squarehole360 includes no game files. Choose your Xbox 360 disc image (ISO) "
+    source_page.setSubTitle("This port includes no game files. Choose your Xbox 360 disc image (ISO) "
                             "or a folder with the extracted disc files.")
     source_edit = QLineEdit()
     source_edit.setPlaceholderText("Path to an ISO file or a game folder")
@@ -205,7 +205,7 @@ def run_gui(game, game_root, user_root, dlc_only=False):
     update_state = dict(found=None)
     update_page = QWizardPage()
     update_page.setTitle(name)
-    update_page.setSubTitle(f"squarehole360 is built for {game.title} {name}, which RAAM's Shadow also needs. "
+    update_page.setSubTitle(f"This port is built for {game.title} {name}, which RAAM's Shadow also needs. "
                             f"Choose your {name} package, or a folder or archive that contains it.")
     update_status = QLabel()
     update_status.setWordWrap(True)

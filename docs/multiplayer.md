@@ -76,12 +76,12 @@ player who is cut off for that long and comes back has to rejoin the party.
 
 ## Running a lobby server
 
-`squarehole-lobby` is built with the game (`build/bin/squarehole-lobby`,
-or `squarehole-lobby.exe` on Windows) and runs without the game or its data:
+`gears3-lobby` is built with the game (`build/bin/gears3-lobby`,
+or `gears3-lobby.exe` on Windows) and runs without the game or its data:
 
 ```sh
-./build/bin/squarehole-lobby               # UDP port 36360 on all interfaces
-./build/bin/squarehole-lobby --port 40000 --max-rooms 64
+./build/bin/gears3-lobby               # UDP port 36360 on all interfaces
+./build/bin/gears3-lobby --port 40000 --max-rooms 64
 ```
 
 Forward the UDP port on your router to the machine running it. Players then

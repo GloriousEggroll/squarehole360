@@ -26,7 +26,7 @@ namespace {
 constexpr uint32_t kTitleUpdateVersion = 0x0000060B;  // 11.0.6.0, Title Update 6
 constexpr char kTitleUpdateMissing[] =
     "Gears of War 3 Title Update 6 is not installed.\n\n"
-    "This version of squarehole360 is built for the updated game. Start squarehole360 "
+    "This port is built for the updated game. Start the game "
     "again to run the setup wizard, or run tools/setup-wizard.py, and add your Title Update 6 "
     "package (TU_16L625B_000001C000000.00000000001GB, or an archive that contains it).";
 

@@ -574,8 +574,8 @@ class SettingsWindow(QMainWindow):
             with (ROOT / 'logs/settings-launch.log').open('a') as output:
                 if WINDOWS:
                     # Packages have the launcher exe; a checkout has the batch file.
-                    # (gear3launcher.exe; squarehole360.exe before v0.1.0.)
-                    launcher = next((ROOT / name for name in ('gear3launcher.exe', 'squarehole360.exe')
+                    # (gears3launcher.exe; gear3launcher.exe or squarehole360.exe in older ones.)
+                    launcher = next((ROOT / name for name in ('gears3launcher.exe', 'gear3launcher.exe', 'squarehole360.exe')
                                      if (ROOT / name).exists()), None)
                     command = [str(launcher)] if launcher else \
                         ['cmd', '/c', str(ROOT / 'tools/run-windows.bat')]

@@ -25,10 +25,10 @@ if [[ "$next_is_game_root" == true || -z "$game_data_root" ]]; then
 fi
 # Steam Linux Runtime 3 "sniper": packaged builds are built against it
 # (build/steamrt-sniper) and run inside it, using an installed copy from Steam
-# or one downloaded once into ~/.local/share/squarehole360.
+# or one downloaded once into ~/.local/share/gears3.
 # GOW3_STEAM_RUNTIME: auto (default), 1 (require it), 0 (run directly).
 runtime_mode="${GOW3_STEAM_RUNTIME:-auto}"
-runtime_home="${XDG_DATA_HOME:-$HOME/.local/share}/squarehole360"
+runtime_home="${XDG_DATA_HOME:-$HOME/.local/share}/gears3"
 find_steam_runtime() {
   local roots=("${XDG_DATA_HOME:-$HOME/.local/share}/Steam" "$HOME/.steam/steam" "$HOME/.steam/root"
                "$HOME/.var/app/com.valvesoftware.Steam/.local/share/Steam")

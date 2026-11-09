@@ -1,7 +1,7 @@
-// Windows package launchers, built twice from this file: gear3launcher.exe
+// Windows package launchers, built twice from this file: gears3launcher.exe
 // (asset preflight, setup wizard on first run, then the game with default
 // paths inside the package, like tools/run-windows.bat) and, with
-// SQUAREHOLE_SETTINGS_LAUNCHER, Settings.exe (the settings editor). Both sit at
+// GEARS3_SETTINGS_LAUNCHER, Settings.exe (the settings editor). Both sit at
 // the package root, run without a console and work under Proton/Wine.
 #include <windows.h>
 #include <intrin.h>
@@ -72,7 +72,7 @@ int Run(const std::wstring& program, const std::vector<std::wstring>& arguments,
 }
 
 int Fail(const std::wstring& message) {
-  MessageBoxW(nullptr, message.c_str(), L"squarehole360", MB_OK | MB_ICONERROR);
+  MessageBoxW(nullptr, message.c_str(), L"Gears of War 3", MB_OK | MB_ICONERROR);
   return 1;
 }
 
@@ -95,7 +95,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   const std::wstring pythonw = root + L"\\python\\pythonw.exe";
   const std::wstring python = root + L"\\python\\python.exe";
 
-#ifdef SQUAREHOLE_SETTINGS_LAUNCHER
+#ifdef GEARS3_SETTINGS_LAUNCHER
   if (!Exists(pythonw)) return Fail(L"Missing " + pythonw + L".\nUse the complete Windows package.");
   return Run(pythonw, {root + L"\\tools\\settings\\app.py"}, root, false) == -1
              ? Fail(L"Could not start the settings editor.")
@@ -104,7 +104,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
   const std::wstring exe = root + L"\\build-windows\\bin\\gow3.exe";
   if (!Exists(exe)) return Fail(L"Missing " + exe + L".\nUse the complete Windows package.");
   if (!CpuHasFma()) {
-    return Fail(L"This processor lacks FMA3 instructions, which squarehole360 needs.\n"
+    return Fail(L"This processor lacks FMA3 instructions, which this port needs.\n"
                 L"Intel Core 4th generation (Haswell) or AMD FX/Ryzen and newer have them.");
   }
 
@@ -140,7 +140,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
       Run(Exists(pythonw) ? pythonw : python, {root + L"\\tools\\setup-wizard.py", L"--output", game_data}, root,
           false);
       if (Run(python, check, root, true) != 0) {
-        return Fail(L"The game files or Title Update 6 are not set up.\n\nStart squarehole360 again to run the setup wizard, or "
+        return Fail(L"The game files or Title Update 6 are not set up.\n\nStart gears3launcher.exe again to run the setup wizard, or "
                     L"import your own ISO:\n  python\\python.exe tools\\import-assets.py import \"C:\\path\\to\\gow3.iso\"");
       }
     }

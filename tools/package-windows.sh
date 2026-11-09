@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Packages the Windows build as dist/squarehole360-windows-x64.zip.
+# Packages the Windows build as dist/gears3-windows-x64.zip.
 #
 #   tools/package-windows.sh                 # program only
 #   tools/package-windows.sh --with-assets   # plus game/ and the shader cache
@@ -28,18 +28,18 @@ test -f "$build/gow3.exe" || { echo 'Build first: tools/build-windows.sh' >&2; e
 runtime=vendor-sdks/runtime/windows
 test -d "$runtime/python" || { echo 'Fetch the runtime first: tools/fetch-runtime-deps.sh windows' >&2; exit 1; }
 
-stage="dist/windows/squarehole360"
+stage="dist/windows/gears3"
 rm -rf "$stage"
 mkdir -p "$stage/build-windows/bin" "$stage/config" "$stage/docs" "$stage/tools"
 
 # Program files. DLSS and XeSS are the vendors' release binaries, present when
 # their SDKs were fetched.
-for file in gow3.exe gow3-shader-precompile.exe gow3-vrr-probe.exe rexruntime.dll mimalloc.dll amd_fidelityfx_vk.dll dxcompiler.dll squarehole-lobby.exe; do
+for file in gow3.exe gow3-shader-precompile.exe gow3-vrr-probe.exe rexruntime.dll mimalloc.dll amd_fidelityfx_vk.dll dxcompiler.dll gears3-lobby.exe; do
   cp "$build/$file" "$stage/build-windows/bin/"
 done
 # Double-click launchers at the package root.
-cp "$build/squarehole360-launcher.exe" "$stage/gear3launcher.exe"
-cp "$build/squarehole360-settings.exe" "$stage/Settings.exe"
+cp "$build/gears3-launcher.exe" "$stage/gears3launcher.exe"
+cp "$build/gears3-settings.exe" "$stage/Settings.exe"
 for file in nvngx_dlss.dll libxess.dll; do
   test -f "$build/$file" && cp "$build/$file" "$stage/build-windows/bin/"
 done
@@ -61,9 +61,9 @@ mkdir -p "$stage/tools/rendering"
 cp tools/rendering/extract-shaders.py "$stage/tools/rendering/"
 find "$stage/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
 cat > "$stage/README-WINDOWS.txt" <<'EOF'
-squarehole360 - Gears of War 3, Windows build (x86-64, Vulkan)
+Gears of War 3 - Windows build (x86-64, Vulkan)
 
-1. Double-click gear3launcher.exe. Without the full package, the first
+1. Double-click gears3launcher.exe. Without the full package, the first
    start opens a setup wizard: choose your own Xbox 360 disc image (ISO) or
    extracted game folder, then optionally your DLC (folders or
    .zip/.tar.gz/.tar.xz archives). Add DLC later with
@@ -78,7 +78,7 @@ Everything needed is included (the Visual C++ runtime, and Python with
 PySide6 in python\ for the wizard and settings); the PC needs a Vulkan 1.3
 GPU driver and a CPU with FMA3 (Intel Haswell / AMD FX or newer). Also runs
 under Proton or Wine, for example:
-  umu-run gear3launcher.exe
+  umu-run gears3launcher.exe
 
 Upscaling (config\gow3.toml):
   present_effect = "fsr3"   # or "dlss" (NVIDIA RTX), "xess", "fsr", "cas", "bilinear"
@@ -88,7 +88,7 @@ DLSS or XeSS fall back to FSR 3.1 when unavailable; the log says which runs.
 See docs\gears3.md for details.
 
 Multiplayer (System Link and internet play): see docs\multiplayer.md.
-build-windows\bin\squarehole-lobby.exe is the lobby server.
+build-windows\bin\gears3-lobby.exe is the lobby server.
 
 nvngx_dlss.dll (NVIDIA DLSS) and libxess.dll (Intel XeSS) are the vendors'
 official release binaries under their own licenses. python\ is CPython
@@ -99,8 +99,8 @@ If game\ is included, it is Microsoft's copyrighted content: only use this
 package with your own copy of the game.
 EOF
 
-name="squarehole360-windows-x64"
-sources=(squarehole360)
+name="gears3-windows-x64"
+sources=(gears3)
 if [[ "$with_assets" == true ]]; then
   python3 tools/import-assets.py check --output game
   name+="-full"

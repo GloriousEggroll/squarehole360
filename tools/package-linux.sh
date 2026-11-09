@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Packages the Linux build as dist/squarehole360-linux-x86_64[-full].tar.zst.
+# Packages the Linux build as dist/gears3-linux-x86_64[-full].tar.zst.
 #
 #   tools/package-linux.sh                 # program only
 #   tools/package-linux.sh --with-assets   # plus game/ and the shader cache
@@ -50,7 +50,7 @@ if ! grep -q '^GOW3_XENIA_RENDERER:BOOL=OFF$' "$build/CMakeCache.txt"; then
   echo "or reconfigure with: cmake -S . -B $build -DGOW3_XENIA_RENDERER=OFF" >&2
   exit 1
 fi
-stage="dist/linux/squarehole360"
+stage="dist/linux/gears3"
 rm -rf "$stage"
 mkdir -p "$stage/build/bin" "$stage/build/lib" "$stage/config" "$stage/docs" "$stage/tools"
 
@@ -61,7 +61,7 @@ done
 cp -a build/bin/libnvidia-ngx-dlss.so.* "$stage/build/bin/" 2>/dev/null || true
 # The lobby server runs outside the launcher, so it is linked statically.
 clang++ -std=c++20 -O2 -static -s -Ivendor/rexglue-sdk/include tools/lobby/lobby_server.cpp \
-  -o "$stage/build/bin/squarehole-lobby"
+  -o "$stage/build/bin/gears3-lobby"
 
 if [[ "$steamrt" == true ]]; then
   # Found through the binaries' $ORIGIN run path, inside the runtime or not.
@@ -92,7 +92,7 @@ mkdir -p "$stage/tools/rendering"
 cp tools/rendering/extract-shaders.py "$stage/tools/rendering/"
 find "$stage/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
 cat > "$stage/README-LINUX.txt" <<'EOF'
-squarehole360 - Gears of War 3, Linux build (x86-64, Vulkan)
+Gears of War 3 - Linux build (x86-64, Vulkan)
 
 1. Without the full package, the first start opens a setup wizard: choose your
    own Xbox 360 disc image (ISO) or extracted game folder, then optionally your
@@ -108,7 +108,7 @@ Multiplayer (System Link and internet play): see docs/multiplayer.md.
     address and use the same "Room" as the other players.
   - In game: main menu -> Back (Tab) -> Party Options -> System Link.
   A player ID is created in user/identity.toml on first start; never copy it
-  between PCs. build/bin/squarehole-lobby is the lobby server (static binary).
+  between PCs. build/bin/gears3-lobby is the lobby server (static binary).
 
 REQUIREMENTS_PLACEHOLDER
 
@@ -119,7 +119,7 @@ EOF
 if [[ "$steamrt" == true ]]; then
   requirements="Built for the Steam Linux Runtime 3 (sniper). The launcher runs the game inside
 it, using a copy installed by Steam or downloading it once (about 190 MB) into
-~/.local/share/squarehole360; set GOW3_STEAM_RUNTIME=0 to run directly.
+~/.local/share/gears3; set GOW3_STEAM_RUNTIME=0 to run directly.
 Needs a distribution with glibc 2.34 or newer (2021 on: Ubuntu 22.04, Debian 12,
 Fedora 35, SteamOS 3) and a Vulkan driver. The settings app needs Python 3 with
 PySide6 and tomli-w."
@@ -140,9 +140,9 @@ PYEOF
 missing="$(LD_LIBRARY_PATH="$stage/build/lib" ldd "$stage/build/bin/gow3" | grep 'not found' || true)"
 test -z "$missing" || { echo "Unresolved libraries: $missing" >&2; exit 1; }
 
-name="squarehole360-linux-x86_64"
+name="gears3-linux-x86_64"
 [[ "$steamrt" == true ]] && name+="-steamrt"
-sources=(-C dist/linux squarehole360)
+sources=(-C dist/linux gears3)
 if [[ "$with_assets" == true ]]; then
   python3 tools/import-assets.py check --output game
   name+="-full"
@@ -150,14 +150,14 @@ if [[ "$with_assets" == true ]]; then
   for cache in native-shaders native-pipeline-recipes native-fsi-state-recipes native-fsi-state-shaders shaders; do
     test -d "user/cache/$cache" && caches+=("user/cache/$cache")
   done
-  sources+=(-C "$project_dir" --transform 's,^game,squarehole360/game,;s,^user,squarehole360/user,'
+  sources+=(-C "$project_dir" --transform 's,^game,gears3/game,;s,^user,gears3/user,'
             game "${caches[@]}")
 fi
 if [[ "$zip" == true ]]; then
   [[ "$with_assets" == false ]] || { echo '--zip packages the program only' >&2; exit 2; }
   # Keeps each file's Unix permissions, so the binaries stay executable.
   rm -f "dist/$name.zip"
-  (cd dist/linux && python3 -I - "../$name.zip" squarehole360 <<'PY'
+  (cd dist/linux && python3 -I - "../$name.zip" gears3 <<'PY'
 import os, sys, zipfile
 with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
     for folder, directories, files in os.walk(sys.argv[2]):

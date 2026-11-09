@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Packages the macOS build as dist/squarehole360-macos-arm64.tar.gz. Run on
+# Packages the macOS build as dist/gears3-macos-arm64.tar.gz. Run on
 # the Mac after tools/build-macos.sh and, once, tools/fetch-runtime-deps.sh macos.
 #
 #   tools/package-macos.sh                 # program only
@@ -27,11 +27,11 @@ test -x build/bin/gow3 || { echo 'Build first: tools/build-macos.sh' >&2; exit 1
 runtime=vendor-sdks/runtime/macos
 test -d "$runtime/python" || { echo 'Fetch the runtime first: tools/fetch-runtime-deps.sh macos' >&2; exit 1; }
 
-stage="dist/macos/squarehole360"
+stage="dist/macos/gears3"
 rm -rf "$stage"
 mkdir -p "$stage/build/bin" "$stage/build/lib/vulkan/icd.d" "$stage/config" "$stage/docs" "$stage/tools"
 
-for file in gow3 librexruntime.dylib libdxcompiler.dylib squarehole-lobby; do
+for file in gow3 librexruntime.dylib libdxcompiler.dylib gears3-lobby; do
   cp -L "build/bin/$file" "$stage/build/bin/"
 done
 
@@ -88,10 +88,10 @@ mkdir -p "$stage/tools/rendering"
 cp tools/rendering/extract-shaders.py "$stage/tools/rendering/"
 find "$stage/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
 cat > "$stage/README-MACOS.txt" <<'EOF'
-squarehole360 - Gears of War 3, macOS build (Apple silicon, Vulkan on Metal)
+Gears of War 3 - macOS build (Apple silicon, Vulkan on Metal)
 
 0. The game is not signed by Apple. After extracting, allow it once in
-   Terminal:  xattr -dr com.apple.quarantine squarehole360
+   Terminal:  xattr -dr com.apple.quarantine gears3
 1. Run tools/run-macos.sh. Without the full package, the first start opens a
    setup wizard: choose your own Xbox 360 disc image (ISO) or extracted game
    folder, then optionally your DLC (folders or .zip/.tar.gz/.tar.xz
@@ -106,7 +106,7 @@ newer on an Apple silicon Mac. FSR 3.1, DLSS and XeSS are
 not available on macOS; FSR 1 and CAS are.
 
 Multiplayer (System Link and internet play): see docs/multiplayer.md.
-build/bin/squarehole-lobby is the lobby server.
+build/bin/gears3-lobby is the lobby server.
 
 build/lib holds MoltenVK and the Vulkan loader (Apache 2.0) and OpenSSL
 (Apache 2.0). python/ is CPython from python-build-standalone (PSF License)
@@ -116,12 +116,12 @@ If game/ is included, it is Microsoft's copyrighted content: only use this
 package with your own copy of the game.
 EOF
 
-name="squarehole360-macos-arm64"
-sources=(-C dist/macos squarehole360)
+name="gears3-macos-arm64"
+sources=(-C dist/macos gears3)
 if [[ "$with_assets" == true ]]; then
   "$stage/python/bin/python3" tools/import-assets.py check --output game
   name+="-full"
-  sources+=(-C "$project_dir" -s ',^game,squarehole360/game,' -s ',^user,squarehole360/user,' game)
+  sources+=(-C "$project_dir" -s ',^game,gears3/game,' -s ',^user,gears3/user,' game)
   for cache in native-shaders native-pipeline-recipes native-fsi-state-recipes native-fsi-state-shaders shaders; do
     test -d "user/cache/$cache" && sources+=("user/cache/$cache")
   done

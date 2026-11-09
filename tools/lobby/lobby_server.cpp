@@ -1,11 +1,11 @@
-// squarehole-lobby: a self-hostable lobby and relay for internet System Link.
+// gears3-lobby: a self-hostable lobby and relay for internet System Link.
 //
 // Players join a room and appear to each other as one LAN: the server assigns
 // virtual addresses, distributes the member list, fans System Link broadcasts
 // out to the room and relays game traffic between players whose direct
 // connection does not work. See rex/system/xam/lobby_protocol.h.
 //
-// Usage: squarehole-lobby [--port 36360] [--bind 0.0.0.0] [--max-rooms 256]
+// Usage: gears3-lobby [--port 36360] [--bind 0.0.0.0] [--max-rooms 256]
 // Needs one UDP port reachable from the internet (forward it on the router).
 // Games without a configured server also find it on the LAN (see
 // lobby_protocol.h); the server itself is rex/system/xam/lobby_server.h.
@@ -48,11 +48,11 @@ int main(int argc, char** argv) {
   address.sin_port = htons(port);
   if (inet_pton(AF_INET, bind_address.c_str(), &address.sin_addr) != 1 ||
       bind(handle, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
-    std::fprintf(stderr, "squarehole-lobby: cannot listen on %s:%u\n", bind_address.c_str(),
+    std::fprintf(stderr, "gears3-lobby: cannot listen on %s:%u\n", bind_address.c_str(),
                  unsigned(port));
     return 1;
   }
-  std::printf("squarehole-lobby listening on UDP %s:%u\n", bind_address.c_str(), unsigned(port));
+  std::printf("gears3-lobby listening on UDP %s:%u\n", bind_address.c_str(), unsigned(port));
   std::fflush(stdout);
   Server(handle, max_rooms, [](const std::string& line) {
     std::printf("%s\n", line.c_str());
