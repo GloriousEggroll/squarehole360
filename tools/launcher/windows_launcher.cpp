@@ -1,4 +1,4 @@
-// Windows package launchers, built twice from this file: squarehole360.exe
+// Windows package launchers, built twice from this file: gear3launcher.exe
 // (asset preflight, setup wizard on first run, then the game with default
 // paths inside the package, like tools/run-windows.bat) and, with
 // SQUAREHOLE_SETTINGS_LAUNCHER, Settings.exe (the settings editor). Both sit at

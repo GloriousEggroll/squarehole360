@@ -234,3 +234,17 @@ address = 0x828CE13C
 name = "Gow3ExpireDepartedConnection"
 registers = ["r31"]
 after_instruction = false
+
+# TextureStreaming PoolSize, just after each GConfig read of it: where the pool
+# is allocated, and where the streaming manager takes its budget.
+[[midasm_hook]]
+address = 0x8297885C
+name = "Gow3TexturePoolSize"
+registers = ["r1", "r25"]
+after_instruction = false
+
+[[midasm_hook]]
+address = 0x824A96FC
+name = "Gow3TextureStreamingBudget"
+registers = ["r20"]
+after_instruction = false

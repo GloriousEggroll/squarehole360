@@ -38,7 +38,7 @@ for file in gow3.exe gow3-shader-precompile.exe gow3-vrr-probe.exe rexruntime.dl
   cp "$build/$file" "$stage/build-windows/bin/"
 done
 # Double-click launchers at the package root.
-cp "$build/squarehole360-launcher.exe" "$stage/squarehole360.exe"
+cp "$build/squarehole360-launcher.exe" "$stage/gear3launcher.exe"
 cp "$build/squarehole360-settings.exe" "$stage/Settings.exe"
 for file in nvngx_dlss.dll libxess.dll; do
   test -f "$build/$file" && cp "$build/$file" "$stage/build-windows/bin/"
@@ -63,7 +63,7 @@ find "$stage/tools" -name __pycache__ -type d -prune -exec rm -rf {} +
 cat > "$stage/README-WINDOWS.txt" <<'EOF'
 squarehole360 - Gears of War 3, Windows build (x86-64, Vulkan)
 
-1. Double-click squarehole360.exe. Without the full package, the first
+1. Double-click gear3launcher.exe. Without the full package, the first
    start opens a setup wizard: choose your own Xbox 360 disc image (ISO) or
    extracted game folder, then optionally your DLC (folders or
    .zip/.tar.gz/.tar.xz archives). Add DLC later with
@@ -78,7 +78,7 @@ Everything needed is included (the Visual C++ runtime, and Python with
 PySide6 in python\ for the wizard and settings); the PC needs a Vulkan 1.3
 GPU driver and a CPU with FMA3 (Intel Haswell / AMD FX or newer). Also runs
 under Proton or Wine, for example:
-  umu-run squarehole360.exe
+  umu-run gear3launcher.exe
 
 Upscaling (config\gow3.toml):
   present_effect = "fsr3"   # or "dlss" (NVIDIA RTX), "xess", "fsr", "cas", "bilinear"

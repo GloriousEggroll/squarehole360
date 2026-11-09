@@ -8,7 +8,9 @@
 #include <rex/input/sdl/sdl_input_driver.h>
 #include <rex/logging.h>
 #include <rex/ppc/context.h>
+#include <rex/system/kernel_state.h>
 #include <rex/system/xam/network.h>
+#include <rex/system/xmemory.h>
 #include <rex/ui/flags.h>
 #include <rex/ui/window.h>
 
@@ -16,8 +18,11 @@
 #include <cmath>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 
 REXCVAR_DEFINE_BOOL(gow3_60fps, true, "Game",
@@ -40,6 +45,13 @@ REXCVAR_DEFINE_INT32(gow3_render_height, 1080, "Game",
                     "(the game's 720p layout drawn at twice the size by the native renderer)")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
+REXCVAR_DEFINE_INT32(gow3_texture_pool_mb, 0, "Game",
+                     "Texture streaming pool in MB, from the game's guest memory (0: the game's 145)")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DEFINE_BOOL(gow3_texture_pool_stats, false, "Game",
+                    "Log the texture pool and guest physical memory every second")
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
 int Gow3GuestRenderHeight() {
   const int height = REXCVAR_GET(gow3_render_height);
   return height >= 1440 ? 720 : std::clamp(height, 360, 1080);
@@ -51,6 +63,7 @@ uint8_t* screen_size_base = nullptr;
 bool enabled = false;
 bool movie_pacing_enabled = false;
 bool departed_connection_hook = false;
+bool texture_pool_hooks = false;
 bool mouse_look_enabled = false;
 bool projection_hooks = false;
 uint8_t* guest_memory = nullptr;
@@ -109,6 +122,12 @@ void Gow3ConfigureFrameRate(const uint8_t* guest_base) {
   departed_connection_hook = ReadInstruction(guest_base, 0x828CE13C) == 0x817F0114 &&
       ReadInstruction(guest_base, 0x829088C8) == 0x80634FC4;
   if (!departed_connection_hook) REXLOG_WARN("Gears network drop disabled: executable does not match");
+  // lis r11 / lis r4, right after bl GConfig::GetInt with the PoolSize key.
+  texture_pool_hooks = ReadInstruction(guest_base, 0x82978858) == 0x4B93F1B1 &&
+      ReadInstruction(guest_base, 0x8297885C) == 0x3D60821D &&
+      ReadInstruction(guest_base, 0x824A96F8) == 0x4BE0E311 &&
+      ReadInstruction(guest_base, 0x824A96FC) == 0x3C808213 && HasUtf16Name(guest_base, 0x82130048, "PoolSize");
+  if (!texture_pool_hooks) REXLOG_WARN("Gears texture pool setting disabled: executable does not match");
   supported_image = ReadInstruction(guest_base, 0x8254E4A8) == 0xC02304C8 &&
                     ReadInstruction(guest_base, 0x82B09E5C) == 0x39600002;
   enabled = supported_image && REXCVAR_GET(gow3_60fps);
@@ -143,6 +162,48 @@ void Gow3ExpireDepartedConnection(rex::ppc::Register& connection) {
   const uint64_t long_ago = std::bit_cast<uint64_t>(-1.0e9);
   for (int i = 0; i < 8; ++i) object[276 + i] = uint8_t(long_ago >> (56 - 8 * i));
 }
+
+namespace {
+uint32_t ReadBigEndian32(const uint8_t* at) {
+  return uint32_t(at[0]) << 24 | uint32_t(at[1]) << 16 | uint32_t(at[2]) << 8 | at[3];
+}
+
+void OverrideTexturePool(uint32_t address, const char* use) {
+  const int megabytes = REXCVAR_GET(gow3_texture_pool_mb);
+  if (!texture_pool_hooks || megabytes <= 0) return;
+  auto* value = guest_memory + address;
+  REXLOG_INFO("Texture streaming {}: {} MB (game's setting: {} MB)", use, megabytes, ReadBigEndian32(value));
+  for (int i = 0; i < 4; ++i) value[i] = uint8_t(uint32_t(megabytes) >> (24 - 8 * i));
+}
+
+void LogTexturePool(uint32_t pool) {
+  std::thread([pool] {
+    const rex::memory::BaseHeap* heaps[3] = {REX_KERNEL_MEMORY()->LookupHeapByType(true, 0x1000),
+                                             REX_KERNEL_MEMORY()->LookupHeapByType(true, 0x10000),
+                                             REX_KERNEL_MEMORY()->LookupHeapByType(true, 0x1000000)};
+    for (;;) {
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      uint32_t unreserved = 0, reserved = 0, used = 0, reserved_bytes = 0;
+      REX_KERNEL_MEMORY()->GetHeapsPageStatsSummary(heaps, std::size(heaps), unreserved, reserved, used,
+                                                    reserved_bytes);
+      const auto* object = guest_memory + pool;
+      REXLOG_INFO("Texture pool: size={} +40={} +44={} +48={} physical used={} MB of 512",
+                  ReadBigEndian32(object + 276), ReadBigEndian32(object + 40), ReadBigEndian32(object + 44),
+                  ReadBigEndian32(object + 48), used / 256);
+    }
+  }).detach();
+}
+}  // namespace
+
+// Where the pool is allocated (sub_829787F0): the read value is on the stack.
+void Gow3TexturePoolSize(rex::ppc::Register& stack, rex::ppc::Register& pool) {
+  OverrideTexturePool(stack.u32 + 80, "pool");
+  static std::once_flag stats;
+  if (REXCVAR_GET(gow3_texture_pool_stats)) std::call_once(stats, LogTexturePool, pool.u32);
+}
+
+// The streaming manager's budget (sub_824A9338): its own copy of the value.
+void Gow3TextureStreamingBudget(rex::ppc::Register& value) { OverrideTexturePool(value.u32, "budget"); }
 
 void Gow3MoviePollInterval(rex::ppc::Register& interval) {
   // Change only this idle tick threshold, never the shared 0.025 constant.

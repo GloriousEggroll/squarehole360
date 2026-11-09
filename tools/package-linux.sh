@@ -4,6 +4,7 @@
 #   tools/package-linux.sh                 # program only
 #   tools/package-linux.sh --with-assets   # plus game/ and the shader cache
 #   tools/package-linux.sh --steamrt       # from build-sniper (recommended)
+#   tools/package-linux.sh --zip           # a .zip instead of .tar.zst (program only)
 #
 # --steamrt packages the Steam Linux Runtime (sniper) build: it needs glibc 2.30
 # for our code and 2.34 for the prebuilt shader compiler, links libstdc++
@@ -24,11 +25,13 @@ cd "$project_dir"
 
 with_assets=false
 steamrt=false
+zip=false
 for arg in "$@"; do
   case "$arg" in
     --with-assets) with_assets=true ;;
     --steamrt) steamrt=true ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --zip) zip=true ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "Unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -149,6 +152,23 @@ if [[ "$with_assets" == true ]]; then
   done
   sources+=(-C "$project_dir" --transform 's,^game,squarehole360/game,;s,^user,squarehole360/user,'
             game "${caches[@]}")
+fi
+if [[ "$zip" == true ]]; then
+  [[ "$with_assets" == false ]] || { echo '--zip packages the program only' >&2; exit 2; }
+  # Keeps each file's Unix permissions, so the binaries stay executable.
+  rm -f "dist/$name.zip"
+  (cd dist/linux && python3 -I - "../$name.zip" squarehole360 <<'PY'
+import os, sys, zipfile
+with zipfile.ZipFile(sys.argv[1], 'w', zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+    for folder, directories, files in os.walk(sys.argv[2]):
+        directories.sort()
+        for name in sorted(files):
+            archive.write(os.path.join(folder, name))
+PY
+  )
+  echo "dist/$name.zip"
+  sha256sum "dist/$name.zip"
+  exit 0
 fi
 tar -cf - "${sources[@]}" | zstd -T0 -6 -q -f -o "dist/$name.tar.zst"
 echo "dist/$name.tar.zst"

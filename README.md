@@ -103,7 +103,7 @@ tools/build-windows.sh                 # builds build-windows/bin/gow3.exe
 ```
 
 To run it on Windows, package it (`tools/fetch-runtime-deps.sh windows`
-once, then `tools/package-windows.sh`) and double-click `squarehole360.exe` in
+once, then `tools/package-windows.sh`) and double-click `gear3launcher.exe` in
 the extracted zip; the settings editor is `Settings.exe` (from a command
 prompt, `tools\run-windows.bat` and `tools\settings-windows.bat`). The
 package carries the Visual C++ runtime and a Python with PySide6 for the setup

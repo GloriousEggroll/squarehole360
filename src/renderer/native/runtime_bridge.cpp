@@ -274,6 +274,7 @@ REXCVAR_DEFINE_BOOL(gow3_native_import_mostly_gpu_textures, true, "Graphics",
                    "Copy the CPU-written parts of a mostly GPU-written texture (such as a scene copy in a reused "
                    "allocation) into GPU memory once, instead of reading the GPU part back each time it is sampled")
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+REXCVAR_DECLARE(bool, gow3_texture_pool_stats);
 REXCVAR_DEFINE_INT32(gow3_native_hold_incomplete_frames_ms, 4000, "Graphics",
                      "When at least 1 in 4 of a frame's draws waits for a shader or pipeline compile, keep the "
                      "last complete frame on screen until none waits, for up to this long (0: never hold)")
@@ -4500,6 +4501,15 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
     const uint64_t draws=counts.draws-presented_skips.draws,skipped=counts.skipped-presented_skips.skipped;
     presented_skips=counts;
     const auto now=std::chrono::steady_clock::now();
+    if(REXCVAR_GET(gow3_texture_pool_stats)) {
+      static std::chrono::steady_clock::time_point stats_start=now;
+      static uint64_t stats_draws=0,stats_skipped=0;
+      stats_draws+=draws;stats_skipped+=skipped;
+      if(now-stats_start>=std::chrono::seconds(1)) {
+        if(stats_skipped)REXLOG_INFO("Native compile skips: {} of {} draws in the last second",stats_skipped,stats_draws);
+        stats_start=now;stats_draws=stats_skipped=0;
+      }
+    }
     // Start holding when 1 in 4 draws is missing, as in a new area or a
     // cutscene's first shots; new enemies mid-fight miss far fewer, and a
     // frozen frame there is a stutter. Once holding, keep going until none is

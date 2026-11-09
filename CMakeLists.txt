@@ -236,7 +236,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/generated/default/sources.cmake")
         target_link_libraries(squarehole-lobby PRIVATE ws2_32)
     endif()
     if(WIN32)
-        # Package-root launchers: squarehole360.exe (game) and Settings.exe.
+        # Package-root launchers: gear3launcher.exe (game) and Settings.exe.
         add_executable(squarehole360-launcher WIN32 tools/launcher/windows_launcher.cpp)
         add_executable(squarehole360-settings WIN32 tools/launcher/windows_launcher.cpp)
         target_compile_definitions(squarehole360-settings PRIVATE SQUAREHOLE_SETTINGS_LAUNCHER)

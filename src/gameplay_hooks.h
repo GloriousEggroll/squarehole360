@@ -10,6 +10,8 @@ namespace rex::ui { class Window; }
 bool Gow3UncapFrameRate();
 void Gow3SetPresentInterval(rex::ppc::Register& interval);
 void Gow3ExpireDepartedConnection(rex::ppc::Register& connection);
+void Gow3TexturePoolSize(rex::ppc::Register& stack, rex::ppc::Register& pool);
+void Gow3TextureStreamingBudget(rex::ppc::Register& value);
 void Gow3ConfigureFrameRate(const uint8_t* guest_base);
 void Gow3ConfigureInputPrompts(const uint8_t* guest_base);
 void Gow3OverrideScreenSize();
