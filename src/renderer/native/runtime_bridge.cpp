@@ -1044,8 +1044,10 @@ struct RuntimeState : std::enable_shared_from_this<RuntimeState> {
                         REXCVAR_GET(gow3_native_diagnose_texture_eviction_reloads)),
         verbose_frame_reports(REXCVAR_GET(gow3_native_verbose_frame_reports)),
         retire_query_prefixes(deferred_queries&&unified_gpu_queue&&REXCVAR_GET(gow3_native_retire_query_prefixes)),
-        cache_coherence_waits(native_raster&&unified_gpu_queue&&description.ordered_pixel_interlock&&
-                              description.features.fragmentStoresAndAtomics&&REXCVAR_GET(gow3_native_async_gpu_submissions)&&
+        cache_coherence_waits(native_raster&&unified_gpu_queue&&
+                              (REXCVAR_GET(gow3_native_hardware_render_targets)||
+                               (description.ordered_pixel_interlock&&description.features.fragmentStoresAndAtomics))&&
+                              REXCVAR_GET(gow3_native_async_gpu_submissions)&&
                               REXCVAR_GET(gow3_native_cache_coherence_waits)),
         fsi_state_material_composition_enabled(REXCVAR_GET(gow3_native_fsi_state_material_composition)),
         fsi_state_inactive_early_catalog_enabled(REXCVAR_GET(gow3_native_fsi_state_inactive_early_catalog)),
@@ -4783,17 +4785,26 @@ void Gow3StartNativeRenderer(rex::graphics::GraphicsSystem* graphics, const std:
   try {
     auto* processor = graphics ? dynamic_cast<Processor*>(graphics->command_processor()) : nullptr;
     if (!processor) throw std::runtime_error("Native renderer requires the Vulkan host backend");
+    // Hardware render targets need no EDRAM emulation in shaders, so they also
+    // run on drivers without fragment shader interlock (AMD on Windows).
+    const bool hardware_render_targets=REXCVAR_GET(gow3_native_hardware_render_targets);
     if(NativeRasterRequested()&&(!REXCVAR_QUERY(bool,occlusion_query_enable)||
         REXCVAR_QUERY(int32_t,resolution_scale)>1||REXCVAR_QUERY(int32_t,draw_resolution_scale_x)>1||
-        REXCVAR_QUERY(int32_t,draw_resolution_scale_y)>1||REXCVAR_QUERY(std::string,render_target_path_vulkan)=="fbo"))
+        REXCVAR_QUERY(int32_t,draw_resolution_scale_y)>1||
+        (!hardware_render_targets&&REXCVAR_QUERY(std::string,render_target_path_vulkan)=="fbo")))
       throw std::runtime_error("Native renderer requires 1x draw resolution, FSI storage, and occlusion queries enabled");
+    processor->AllowNativeWithHostRenderTargets(hardware_render_targets);
     if(NativeRasterRequested()&&!processor->CanUseNativeQueryAuthority())
-      throw std::runtime_error("Native renderer requires1x FSI storage and available occlusion query resources");
+      throw std::runtime_error(hardware_render_targets?
+          "Native renderer requires 1x draw resolution and available occlusion query resources":
+          "Native renderer requires 1x FSI storage and available occlusion query resources");
     auto description = DescribeDevice(processor->GetVulkanDevice());
     const auto unsupported = CheckLiveVulkanDevice(description);
     if (!unsupported.empty()) throw std::runtime_error(unsupported);
-    if(NativeRasterRequested()&&(!description.ordered_pixel_interlock||!description.features.fragmentStoresAndAtomics))
-      throw std::runtime_error("Native raster authority requires enabled ordered pixel interlock and fragment storage writes");
+    if(NativeRasterRequested()&&!hardware_render_targets&&
+       (!description.ordered_pixel_interlock||!description.features.fragmentStoresAndAtomics))
+      throw std::runtime_error("Native raster authority requires enabled ordered pixel interlock and fragment storage writes; "
+                               "turn on gow3_native_hardware_render_targets on this GPU");
     // Render sizes above 720p place surfaces past the console's 2048 EDRAM tiles.
     // 1440p is the 720p layout scaled by the renderer (docs/resolution-scaling-plan.md).
     const int32_t render_height=REXCVAR_QUERY(int32_t,gow3_render_height);
