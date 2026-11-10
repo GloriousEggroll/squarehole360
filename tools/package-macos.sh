@@ -72,7 +72,7 @@ done
 cp -R "$runtime/python" "$stage/python"
 
 # Documentation, default configuration and tools.
-cp README.md LICENSE THIRD_PARTY_NOTICES.md "$stage/"
+cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md "$stage/"
 cp docs/gears3.md docs/multiplayer.md "$stage/docs/"
 if git rev-parse --git-dir >/dev/null 2>&1; then
   git show HEAD:config/gow3.toml > "$stage/config/gow3.toml"

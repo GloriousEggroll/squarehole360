@@ -50,7 +50,7 @@ cp -r "$runtime/python" "$stage/python"
 printf '..\\tools\n..\\tools\\settings\n' >> "$stage/python/python313._pth"
 
 # Documentation, default configuration and tools.
-cp README.md LICENSE THIRD_PARTY_NOTICES.md "$stage/"
+cp README.md CHANGELOG.md LICENSE THIRD_PARTY_NOTICES.md "$stage/"
 cp docs/gears3.md docs/multiplayer.md "$stage/docs/"
 git show HEAD:config/gow3.toml > "$stage/config/gow3.toml"
 cp tools/run-windows.bat tools/run-windows.ps1 tools/settings-windows.bat tools/import-assets.py \
